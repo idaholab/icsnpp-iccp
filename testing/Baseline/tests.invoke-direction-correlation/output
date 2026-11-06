@@ -1,0 +1,57 @@
+ambiguous compatibility=
+read response dir=T invoke=7 object=RESP_POINT
+read response dir=F invoke=7 object=ORIG_POINT
+read response dir=T invoke=8 object=
+read response dir=F invoke=8 object=KEEP_POINT
+error response dir=T invoke=9 object=
+error response dir=F invoke=9 object=KEEP_ERROR
+reuse purge invoke=14 generic=F invalid=T read=F controls=F control_reads=F invalid_reads=F sets=F support=F transfer_controls=F types=F invalid_types=F shape=F
+read response dir=F invoke=14 object=
+error response dir=F invoke=16 object=
+transfer service mismatch pending=T known=T
+transfer service matched pending=F known=T
+read response dir=F invoke=3 object=OLD_POINT
+terminal provenance marker=F value=unknown
+parser-error provenance marker=F value=unknown
+deferred reuse final generic=T invalid=F read=NEW_POINT
+T	0	decoded	11	requested	request-orig
+F	0	decoded	11	requested	request-resp
+T	1	decoded	11	matched_response	response-to-resp
+F	1	decoded	11	matched_response	response-to-orig
+T	0	decoded	12	requested	request-keep
+T	1	direction_mismatch	12	direction_mismatch	wrong-direction
+F	1	decoded	12	matched_response	right-direction
+T	0	decoded	13	requested	reuse-first
+T	0	invoke_reused	13	invoke_reused	reuse-second
+F	1	ambiguous_response	13	ambiguous_response	reuse-ambiguous
+F	1	decoded	13	unmatched_response	reuse-consumed
+T	0	decoded	14	requested	cross-service-first
+T	0	invoke_reused	14	-	-
+F	1	ambiguous_response	14	-	-
+T	0	decoded	15	requested	orig-first
+F	0	decoded	15	requested	resp-only
+T	0	invoke_reused	15	invoke_reused	orig-reused
+T	1	decoded	15	matched_response	response-to-resp
+F	1	ambiguous_response	15	ambiguous_response	response-to-orig-ambiguous
+T	0	decoded	16	requested	error-first
+T	0	invoke_reused	16	-	-
+T	0	decoded	17	requested	release-first
+T	0	invoke_reused	17	invoke_reused	release-second
+F	1	decoded	17	unmatched_response	after-release
+T	0	decoded	18	requested	cancel-target
+F	6	decoded	18	-	-
+F	1	decoded	18	unmatched_response	after-cancel-response
+T	0	decoded	19	requested	conclude-first
+T	0	invoke_reused	19	invoke_reused	conclude-second
+F	1	decoded	19	unmatched_response	after-conclude
+T	0	decoded	23	requested	reject-peer-request
+F	0	decoded	23	requested	reject-sender-request
+F	4	decoded	23	-	-
+T	1	decoded	23	matched_response	response-to-reject-sender
+F	1	decoded	23	unmatched_response	response-to-rejected-peer
+Cinvoke-races	T	0	decoded	2	inferred	-
+Cinvoke-races	T	0	decoded	3	inferred	-
+Cinvoke-races	T	0	decoded	3	inferred	-
+Cinvoke-races	F	1	decoded	3	verified	OLD_POINT
+Cinvoke-races	T	0	decoded	1	verified	-
+F	ambiguous_response	16	-	-

@@ -1,0 +1,9 @@
+resource=bilateral_domains limit=1 current=1 invoke=71 provenance=unknown
+resource=pending_reads limit=1 current=1 invoke=2 provenance=unknown
+resource=pending_confirmed limit=1 current=1 invoke=2 provenance=unknown
+resource=pending_controls limit=1 current=1 invoke=11 provenance=unknown
+resource=known_transfer_sets limit=1 current=1 invoke=21 provenance=unknown
+resource=pending_transfer_sets limit=1 current=1 invoke=23 provenance=unknown
+resource=pending_transfer_support limit=1 current=1 invoke=31 provenance=unknown
+resource=pending_controls limit=1 current=1 invoke=61 provenance=verified
+resource=pending_controls limit=1 current=1 invoke=62 provenance=inferred

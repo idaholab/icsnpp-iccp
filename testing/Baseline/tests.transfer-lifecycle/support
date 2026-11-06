@@ -1,0 +1,8 @@
+transfer_timestamp	decoded	50	icc	CONTROL_CENTER_B	Transfer_Set_Time_Stamp	-	-	-	1700000000
+next_transfer_set	decoded	51	icc	CONTROL_CENTER_B	Next_DSTransfer_Set	icc	CONTROL_CENTER_B	TS_NEXT	-
+transfer_set_name	decoded	52	icc	CONTROL_CENTER_B	Transfer_Set_Name	icc	CONTROL_CENTER_B	TS1	-
+read_report_ack_value	invalid_value	53	icc	CONTROL_CENTER_B	Transfer_Report_ACK	-	-	-	-
+read_report_nack_value	decoded	54	icc	CONTROL_CENTER_B	Transfer_Report_NACK	icc	CONTROL_CENTER_B	TS_NACK	-
+next_transfer_set	invalid_value	55	icc	CONTROL_CENTER_B	Next_DSTransfer_Set	-	-	-	-
+read_report_ack_value	rejected	56	icc	CONTROL_CENTER_B	Transfer_Report_ACK	-	-	-	-
+read_report_ack_value	invalid_value	57	icc	CONTROL_CENTER_B	Transfer_Report_ACK	-	-	-	-

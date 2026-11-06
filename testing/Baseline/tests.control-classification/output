@@ -1,0 +1,14 @@
+operate_command	requested	200	BREAKER	Control_Command	1	-
+operate_command	confirmed	200	BREAKER	Control_Command	1	-
+operate_setpoint_real	requested	201	MW_SETPOINT	Control_Setpoint_Real	-	12.5
+operate_setpoint_real	confirmed	201	MW_SETPOINT	Control_Setpoint_Real	-	12.5
+operate_setpoint_discrete	requested	202	TAP_SETPOINT	Control_Setpoint_Discrete	42	-
+operate_setpoint_discrete	partial_or_failed	202	TAP_SETPOINT	Control_Setpoint_Discrete	42	-
+write_candidate	requested	203	UNKNOWN_COMMAND	-	-	-
+write_candidate	confirmed	203	UNKNOWN_COMMAND	-	-	-
+write_candidate	requested	204	BREAKER	Control_Command	-	-
+write_candidate	confirmed	204	BREAKER	Control_Command	-	-
+write_candidate	requested	205	BREAKER	Control_Command	-	-
+write_candidate	confirmed	205	BREAKER	Control_Command	-	-
+operate_command	requested	206	BREAKER	Control_Command	0	-
+operate_command	rejected	206	BREAKER	Control_Command	0	-

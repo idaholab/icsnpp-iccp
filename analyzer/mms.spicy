@@ -1,0 +1,5080 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses and validates Manufacturing Message Specification (MMS)
+## protocol data units used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_MMS;
+
+import spicy;
+import ICCP_BER;
+import ICCP_MMS_TYPES;
+
+function knownPduRequiresConstructed(tag: uint64): bool {
+    switch (tag) {
+        case 0, 1, 2, 3, 4, 7, 8, 9, 10, 13:
+            return True;
+        default:
+            return False;
+    }
+}
+
+function knownPduRequiresPrimitive(tag: uint64): bool {
+    switch (tag) {
+        case 5, 6, 11, 12:
+            return True;
+        default:
+            return False;
+    }
+}
+
+function visibleStringIsValid(value: bytes): bool {
+    local offset: uint64 = 0;
+    while (offset < |value|) {
+        local octet = *value.at(offset);
+        if (octet < 0x20 || octet > 0x7e)
+            return False;
+        offset += 1;
+    }
+    return True;
+}
+
+function identifierIsValid(value: bytes): bool {
+    # Without the negotiated MMS `char` capability, Identifier is limited to
+    # the basic repertoire. Since every permitted character is one octet,
+    # this byte bound is also the ASN.1 SIZE (1..32) character bound.
+    if (|value| == 0 || |value| > 32)
+        return False;
+
+    local offset: uint64 = 0;
+    while (offset < |value|) {
+        local octet = *value.at(offset);
+        if (
+            ! (
+                (octet >= 0x41 && octet <= 0x5a) ||
+                (octet >= 0x61 && octet <= 0x7a) ||
+                (octet >= 0x30 && octet <= 0x39) ||
+                octet == 0x24 ||
+                octet == 0x5f
+            )
+        )
+            return False;
+        offset += 1;
+    }
+
+    return True;
+}
+
+function isTase2VersionObjectIdentifier(value: bytes): bool {
+    # IEC 60870-6-503:2014 defines this exact VMD-specific Named Variable,
+    # even though its period is outside the ISO 9506-2 base Identifier
+    # repertoire used when the negotiated `char` CBB is unavailable.  Keep
+    # the compatibility exception byte-exact; it must not widen ordinary MMS
+    # Identifiers to arbitrary VisibleString punctuation.
+    if (|value| != 14)
+        return False;
+
+    return (
+        *value.at(0) == 0x54 &&
+        *value.at(1) == 0x41 &&
+        *value.at(2) == 0x53 &&
+        *value.at(3) == 0x45 &&
+        *value.at(4) == 0x2e &&
+        *value.at(5) == 0x32 &&
+        *value.at(6) == 0x5f &&
+        *value.at(7) == 0x56 &&
+        *value.at(8) == 0x65 &&
+        *value.at(9) == 0x72 &&
+        *value.at(10) == 0x73 &&
+        *value.at(11) == 0x69 &&
+        *value.at(12) == 0x6f &&
+        *value.at(13) == 0x6e
+    );
+}
+
+function isIccpRequiredConfirmedService(tag: uint64): bool {
+    switch (tag) {
+        case 1, 4, 5, 6, 11, 12, 13:
+            return True;
+        default:
+            return False;
+    }
+}
+
+# A recognized context-specific top-level tag alone is not enough to identify
+# MMS: shared RFC 1006 stacks may carry other application protocols. Production
+# protocol confirmation therefore requires a completed semantic decoder for
+# the selected MMS PDU/service alternative.
+public function protocolConfirmationIsValid(
+    recognized: bool,
+    semanticDecoded: bool
+): bool {
+    return recognized && semanticDecoded;
+}
+
+public type IdentifierValue = unit(length: uint64) {
+    : void &requires=length > 0 && length <= 32;
+    encoded: bytes &size=length;
+    : void &requires=identifierIsValid(self.encoded);
+    var value: string;
+
+    on %done {
+        self.value = self.encoded.decode(spicy::Charset::ASCII);
+    }
+};
+
+# Some Identifier occurrences are IMPLICIT, so the standalone parser cannot
+# recover whether their contents came from the base VisibleString form or a
+# negotiated UTF8String Identifier.  Selected TASE.2 contexts may opt into the
+# mandatory fixed version name; every other value retains the base rules.
+public type Tase2CompatibleIdentifierValue = unit(
+    length: uint64,
+    allowTase2Version: bool
+) {
+    : void &requires=length > 0 && length <= 32;
+    encoded: bytes &size=length;
+    : void &requires=(
+        identifierIsValid(self.encoded) ||
+        (
+            allowTase2Version &&
+            isTase2VersionObjectIdentifier(self.encoded)
+        )
+    );
+    var value: string;
+
+    on %done {
+        self.value = self.encoded.decode(spicy::Charset::ASCII);
+    }
+};
+
+public type VisibleStringValue = unit(length: uint64) {
+    encoded: bytes &size=length;
+    : void &requires=visibleStringIsValid(self.encoded);
+    var value: string;
+
+    on %done {
+        self.value = self.encoded.decode(spicy::Charset::ASCII);
+    }
+};
+
+public type MMSStringValue = unit(length: uint64) {
+    encoded: bytes &size=length;
+    var value: string;
+
+    on %done {
+        self.value = self.encoded.decode(
+            spicy::Charset::UTF8,
+            spicy::DecodeErrorStrategy::STRICT
+        );
+    }
+};
+
+# The current MMSpdu entry point has no connection-scoped MMS negotiation
+# state. Consequently this static Identifier TLV accepts only the base
+# VisibleString form; UNIVERSAL UTF8String must remain rejected until the
+# negotiated `char` capability can be supplied by the association context.
+public type IdentifierTLV = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 26
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: IdentifierValue(self.length.value);
+};
+
+# A GetNameList response has no request context inside the standalone PDU
+# parser.  Accept the fixed TASE.2 Named Variable in either the base tag used
+# by legacy profiles or the UTF8String tag selected by the `char` CBB.  The
+# UTF8String path remains byte-exact and does not enable arbitrary extended
+# MMS Identifiers.
+public type GetNameListIdentifierTLV = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        (
+            self.identifier.tagNumber == 12 ||
+            self.identifier.tagNumber == 26
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: Tase2CompatibleIdentifierValue(self.length.value, True);
+    : void &requires=(
+        self.identifier.tagNumber != 12 ||
+        isTase2VersionObjectIdentifier(self.value.encoded)
+    );
+};
+
+public type MMSStringTLV = unit {
+    var value: string;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        (
+            self.identifier.tagNumber == 12 ||
+            self.identifier.tagNumber == 26
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        12 -> utf8: MMSStringValue(self.length.value) {
+            self.value = $$.value;
+        }
+        26 -> visible: VisibleStringValue(self.length.value) {
+            self.value = $$.value;
+        }
+    };
+};
+
+# MMSString is selected as either UTF8String or VisibleString by the negotiated
+# `char` CBB. Address carries it with an explicit wrapper, so its universal tag
+# remains available and both syntactically valid negotiated forms can be
+# distinguished even though the standalone MMSpdu parser has no CBB state.
+public type BoundedMMSString = unit(length: uint64) {
+    value: MMSStringTLV;
+} &size=length;
+
+public type DomainSpecificName = unit(length: uint64) {
+    domainId: IdentifierTLV;
+    itemId: IdentifierTLV;
+} &size=length;
+
+public type ObjectName = unit {
+    var scope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 2 &&
+        (
+            (
+                self.identifier.tagNumber == 1 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                self.identifier.tagNumber != 1 &&
+                ! self.identifier.first.constructed
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0,
+        2 -> simple: Tase2CompatibleIdentifierValue(
+            self.length.value,
+            self.identifier.tagNumber == 0
+        ) {
+            self.scope = self.identifier.tagNumber;
+            self.itemId = $$.value;
+        }
+        1 -> domain: DomainSpecificName(self.length.value) {
+            self.scope = 1;
+            self.domainId = $$.domainId.value.value;
+            self.itemId = $$.itemId.value.value;
+        }
+    };
+};
+
+# ObjectName is self-delimiting, but callers that detached an explicitly
+# tagged value must also prove that no sibling TLV remains in that value.
+public type BoundedObjectName = unit(length: uint64) {
+    value: ObjectName;
+} &size=length;
+
+public type EventTime = unit {
+    var choice: uint64 = 0;
+    var raw: bytes;
+    var sequenceIdentifier: int64 = -1;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 2
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: bytes &size=self.length.value {
+        self.choice = self.identifier.tagNumber;
+        self.raw = $$;
+    }
+
+    timeSequenceIdentifier: MMSUnsigned32Value(|self.value|)
+        &parse-from=self.value if (self.choice == 1) {
+            self.sequenceIdentifier = $$.value.value;
+        }
+    undefinedTime: ICCP_BER::NullValue(|self.value|)
+        &parse-from=self.value if (self.choice == 2);
+
+    : void &requires=(
+        self.choice != 0 || timeOfDayIsValid(self.value)
+    );
+};
+
+public type BoundedEventTime = unit(length: uint64) {
+    value: EventTime;
+} &size=length;
+
+public type ObjectScope = unit {
+    var scope: uint64 = 0;
+    var domainId: string;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 2
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0,
+        2 -> nullScope: ICCP_BER::NullValue(self.length.value) {
+            self.scope = self.identifier.tagNumber;
+        }
+        1 -> domainScope: IdentifierValue(self.length.value) {
+            self.scope = 1;
+            self.domainId = $$.value;
+        }
+    };
+};
+
+public type ObjectClass = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=self.value.value >= 0 && self.value.value <= 13;
+};
+
+public type Address = unit {
+    var choice: uint64 = 0;
+    var numeric: int64 = -1;
+    var symbolic: string;
+    var unconstrained: bytes;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 2 &&
+        (
+            (
+                self.identifier.tagNumber == 1 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                self.identifier.tagNumber != 1 &&
+                ! self.identifier.first.constructed
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0 -> numericAddress: MMSUnsigned32Value(self.length.value) {
+            self.choice = 0;
+            self.numeric = $$.value.value;
+        }
+        1 -> symbolicAddress: BoundedMMSString(self.length.value) {
+            self.choice = 1;
+            self.symbolic = $$.value.value;
+        }
+        2 -> unconstrainedAddress: bytes &size=self.length.value {
+            self.choice = 2;
+            self.unconstrained = $$;
+        }
+    };
+};
+
+public type BoundedAddress = unit(length: uint64) {
+    value: Address;
+} &size=length;
+
+function typeDescriptionTagIsSupported(tag: uint64): bool {
+    switch (tag) {
+        case 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 15, 16:
+            return True;
+        default:
+            return False;
+    }
+}
+
+function typeDescriptionFormIsValid(tag: uint64, constructed: bool): bool {
+    switch (tag) {
+        case 1, 2, 7, 16:
+            return constructed;
+        default:
+            return ! constructed;
+    }
+}
+
+public type MMSInteger32Value = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=(
+        self.value.value >= -2147483648 &&
+        self.value.value <= 2147483647
+    );
+};
+
+public type MMSInteger16Value = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=(
+        self.value.value >= -32768 && self.value.value <= 32767
+    );
+};
+
+public type MMSInteger8Value = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=(
+        self.value.value >= -128 && self.value.value <= 127
+    );
+};
+
+public type MMSInteger32TLV = unit(encodedLength: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: MMSInteger32Value(self.length.value);
+} &size=encodedLength;
+
+public type MMSUnsigned8Value = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=self.value.value >= 0 && self.value.value <= 127;
+};
+
+public type FloatingPointTypeDescription = unit(length: uint64) {
+    formatIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.formatIdentifier.first.class_ ==
+            ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.formatIdentifier.first.constructed &&
+        self.formatIdentifier.tagNumber == 2
+    );
+    formatLength: ICCP_BER::DefiniteLength;
+    format: MMSUnsigned8Value(self.formatLength.value);
+
+    exponentIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.exponentIdentifier.first.class_ ==
+            ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.exponentIdentifier.first.constructed &&
+        self.exponentIdentifier.tagNumber == 2
+    );
+    exponentLength: ICCP_BER::DefiniteLength;
+    exponent: MMSUnsigned8Value(self.exponentLength.value);
+
+    var formatWidth: int64;
+    var exponentWidth: int64;
+
+    on %done {
+        self.formatWidth = self.format.value.value;
+        self.exponentWidth = self.exponent.value.value;
+    }
+} &size=length;
+
+public type TypeDescriptionState = struct {
+    elements: uint64;
+    maximumDepth: uint64;
+    unresolvedTypeNames: uint64;
+    signatureChoices: vector<uint64>;
+    signaturePrimary: vector<int64>;
+    signatureSecondary: vector<int64>;
+    signatureChildCounts: vector<uint64>;
+    signaturePacked: vector<bool>;
+};
+
+public type TypeSpecificationValue = unit(
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    var choice: uint64 = 0;
+    var constructed: bool = False;
+    var signedValue: int64 = 0;
+    var booleanValue: bool = False;
+    var formatWidth: int64 = 0;
+    var exponentWidth: int64 = 0;
+    var raw: bytes;
+    var typeNameScope: uint64 = 0;
+    var typeNameDomain: string;
+    var typeNameItem: string;
+    var packed: bool = False;
+    var numberOfElements: int64 = -1;
+    var componentCount: uint64 = 0;
+
+    : void &requires=depth <= ICCP_BER::MAX_NESTING_DEPTH;
+
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS TypeDescription exceeds configured element limit";
+        if (depth > state.maximumDepth)
+            state.maximumDepth = depth;
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        (
+            (
+                allowTypeName && self.identifier.tagNumber == 0 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                typeDescriptionTagIsSupported(
+                    self.identifier.tagNumber
+                ) &&
+                typeDescriptionFormIsValid(
+                    self.identifier.tagNumber,
+                    self.identifier.first.constructed
+                )
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: bytes &size=self.length.value {
+        self.choice = self.identifier.tagNumber;
+        self.constructed = self.identifier.first.constructed;
+        self.raw = $$;
+    }
+
+    typeName: BoundedObjectName(|self.value|) &parse-from=self.value
+        if (self.choice == 0) {
+            self.typeNameScope = $$.value.scope;
+            self.typeNameDomain = $$.value.domainId;
+            self.typeNameItem = $$.value.itemId;
+            state.unresolvedTypeNames += 1;
+        }
+
+    arrayDescription: ArrayTypeDescription(
+        |self.value|,
+        depth,
+        state,
+        True
+    ) &parse-from=self.value if (self.choice == 1) {
+        self.packed = $$.packed;
+        self.numberOfElements = $$.numberOfElements;
+    }
+
+    structureDescription: StructureTypeDescription(
+        |self.value|,
+        depth,
+        state,
+        True
+    ) &parse-from=self.value if (self.choice == 2) {
+        self.packed = $$.packed;
+        self.componentCount = $$.componentCount;
+    }
+
+    nullValue: ICCP_BER::NullValue(|self.value|)
+        &parse-from=self.value
+        if (self.choice == 3 || self.choice == 11 || self.choice == 15);
+
+    signedSize: ICCP_BER::IntegerValue(|self.value|)
+        &parse-from=self.value
+        if (self.choice == 4 || self.choice == 9 || self.choice == 10) {
+            if ($$.value < -2147483648 || $$.value > 2147483647)
+                throw "MMS TypeDescription Integer32 is out of range";
+            self.signedValue = $$.value;
+        }
+
+    unsignedSize: ICCP_BER::IntegerValue(|self.value|)
+        &parse-from=self.value
+        if (self.choice == 5 || self.choice == 6 || self.choice == 13) {
+            if ($$.value < 0 || $$.value > 127)
+                throw "MMS TypeDescription Unsigned8 is out of range";
+            self.signedValue = $$.value;
+        }
+
+    floatingPoint: FloatingPointTypeDescription(|self.value|)
+        &parse-from=self.value if (self.choice == 7) {
+            self.formatWidth = $$.formatWidth;
+            self.exponentWidth = $$.exponentWidth;
+        }
+
+    binaryTime: ICCP_BER::BooleanValue(|self.value|)
+        &parse-from=self.value if (self.choice == 12) {
+            self.booleanValue = $$.value;
+        }
+
+    # MMS-Object-Module-1 uses default EXPLICIT tagging and declares
+    # mMSString as `[16] Integer32`, so the context wrapper contains exactly
+    # one UNIVERSAL INTEGER TLV.
+    mmsString: MMSInteger32TLV(|self.value|) &parse-from=self.value
+        if (self.choice == 16) {
+            self.signedValue = $$.value.value.value;
+        }
+
+    # Preserve the entire resolved type tree in deterministic post-order.
+    # Component names are intentionally absent: MMS makes them optional.  A
+    # missing packed field and an explicit FALSE both normalize to False.
+    on %done {
+        local primary: int64 = 0;
+        local secondary: int64 = 0;
+        local childCount: uint64 = 0;
+
+        if (
+            self.choice == 4 || self.choice == 5 || self.choice == 6 ||
+            self.choice == 9 || self.choice == 10 || self.choice == 13 ||
+            self.choice == 16
+        )
+            primary = self.signedValue;
+        else if (self.choice == 7) {
+            primary = self.formatWidth;
+            secondary = self.exponentWidth;
+        }
+        else if (self.choice == 12)
+            primary = self.booleanValue ? cast<int64>(1) : cast<int64>(0);
+        else if (self.choice == 1) {
+            primary = self.numberOfElements;
+            childCount = 1;
+        }
+        else if (self.choice == 2)
+            childCount = self.componentCount;
+
+        state.signatureChoices.push_back(self.choice);
+        state.signaturePrimary.push_back(primary);
+        state.signatureSecondary.push_back(secondary);
+        state.signatureChildCounts.push_back(childCount);
+        state.signaturePacked.push_back(
+            (self.choice == 1 || self.choice == 2) && self.packed
+        );
+    }
+};
+
+# TypeSpecification is a CHOICE, so an explicit wrapper must contain exactly
+# one alternative rather than a valid prefix followed by ignored TLVs.
+public type BoundedTypeSpecificationValue = unit(
+    length: uint64,
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    value: TypeSpecificationValue(depth, state, allowTypeName);
+} &size=length;
+
+public type ArrayTypeDescription = unit(
+    length: uint64,
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    var havePacked: bool = False;
+    var haveElementCount: bool = False;
+    var haveElementType: bool = False;
+    var packedValue: bytes;
+    var elementCountValue: bytes;
+    var elementTypeValue: bytes;
+    var packed: bool = False;
+    var numberOfElements: int64 = -1;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.havePacked && ! self.haveElementCount &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.havePacked = True;
+            self.packedValue = $$.value;
+        }
+        else if (
+            ! self.haveElementCount &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveElementCount = True;
+            self.elementCountValue = $$.value;
+        }
+        else if (
+            self.haveElementCount && ! self.haveElementType &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveElementType = True;
+            self.elementTypeValue = $$.value;
+        }
+        else
+            throw "MMS array TypeDescription fields are invalid or out of order";
+    }
+
+    packedField: ICCP_BER::BooleanValue(|self.packedValue|)
+        &parse-from=self.packedValue if (self.havePacked) {
+            self.packed = $$.value;
+        }
+
+    elementCount: MMSUnsigned32Value(|self.elementCountValue|)
+        &parse-from=self.elementCountValue if (self.haveElementCount) {
+            self.numberOfElements = $$.value.value;
+        }
+
+    # elementType is a TypeSpecification, so its [0] typeName alternative is
+    # legal even though the outer GVA field itself is a TypeDescription.
+    elementType: BoundedTypeSpecificationValue(
+        |self.elementTypeValue|,
+        depth + 1,
+        state,
+        True
+    )
+        &parse-from=self.elementTypeValue if (self.haveElementType);
+
+    on %done {
+        if (! self.haveElementCount || ! self.haveElementType)
+            throw "MMS array TypeDescription is missing a mandatory field";
+    }
+} &size=length;
+
+public type StructureComponentContent = unit(
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    var haveName: bool = False;
+    var haveType: bool = False;
+    var nameValue: bytes;
+    var typeValue: bytes;
+    var name: string;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveName && ! self.haveType &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveName = True;
+            self.nameValue = $$.value;
+        }
+        else if (
+            ! self.haveType &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveType = True;
+            self.typeValue = $$.value;
+        }
+        else
+            throw "MMS structure component fields are invalid or out of order";
+    }
+
+    componentName: IdentifierValue(|self.nameValue|)
+        &parse-from=self.nameValue if (self.haveName) {
+            self.name = $$.value;
+        }
+
+    # componentType is likewise a TypeSpecification and may be a typeName.
+    # Such a reference remains unresolved evidence; policy must not learn an
+    # exact TASE.2 type from a tree containing it.
+    componentType: BoundedTypeSpecificationValue(
+        |self.typeValue|,
+        depth + 1,
+        state,
+        True
+    )
+        &parse-from=self.typeValue if (self.haveType);
+
+    on %done {
+        if (! self.haveType)
+            throw "MMS structure component is missing its type";
+    }
+};
+
+public type StructureComponent = unit(
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS TypeDescription exceeds configured element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: StructureComponentContent(depth, state, allowTypeName)
+        &size=self.length.value;
+};
+
+public type StructureComponentList = unit(
+    length: uint64,
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    var count: uint64 = 0;
+
+    components: StructureComponent(depth, state, allowTypeName)[] &eod foreach {
+        self.count += 1;
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS structure TypeDescription exceeds configured component limit";
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS structure TypeDescription component list must not be empty";
+    }
+} &size=length;
+
+public type StructureTypeDescription = unit(
+    length: uint64,
+    depth: uint64,
+    state: TypeDescriptionState&,
+    allowTypeName: bool
+) {
+    var havePacked: bool = False;
+    var haveComponents: bool = False;
+    var packedValue: bytes;
+    var componentsValue: bytes;
+    var packed: bool = False;
+    var componentCount: uint64 = 0;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.havePacked && ! self.haveComponents &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.havePacked = True;
+            self.packedValue = $$.value;
+        }
+        else if (
+            ! self.haveComponents &&
+            $$.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveComponents = True;
+            self.componentsValue = $$.value;
+        }
+        else
+            throw "MMS structure TypeDescription fields are invalid or out of order";
+    }
+
+    packedField: ICCP_BER::BooleanValue(|self.packedValue|)
+        &parse-from=self.packedValue if (self.havePacked) {
+            self.packed = $$.value;
+        }
+
+    components: StructureComponentList(
+        |self.componentsValue|,
+        depth,
+        state,
+        allowTypeName
+    ) &parse-from=self.componentsValue if (self.haveComponents) {
+        self.componentCount = $$.count;
+    }
+
+    on %done {
+        if (! self.haveComponents)
+            throw "MMS structure TypeDescription is missing components";
+    }
+} &size=length;
+
+# TypeDescription is distinct from TypeSpecification. In particular, a
+# GetVariableAccessAttributes response carries [2] TypeDescription and cannot
+# legally return the typeName [0] alternative of TypeSpecification.
+public type TypeDescription = unit {
+    var state: TypeDescriptionState& = new TypeDescriptionState;
+    var choice: uint64 = 0;
+    var constructed: bool = False;
+    var signedValue: int64 = 0;
+    var booleanValue: bool = False;
+    var raw: bytes;
+    var formatWidth: int64 = 0;
+    var exponentWidth: int64 = 0;
+    var packed: bool = False;
+    var numberOfElements: int64 = -1;
+    var componentCount: uint64 = 0;
+    var nodeCount: uint64 = 0;
+    var maximumDepth: uint64 = 0;
+    var unresolvedTypeNames: uint64 = 0;
+    var signatureChoices: vector<uint64>;
+    var signaturePrimary: vector<int64>;
+    var signatureSecondary: vector<int64>;
+    var signatureChildCounts: vector<uint64>;
+    var signaturePacked: vector<bool>;
+
+    value: TypeSpecificationValue(1, self.state, False) {
+        self.choice = $$.choice;
+        self.constructed = $$.constructed;
+        self.signedValue = $$.signedValue;
+        self.booleanValue = $$.booleanValue;
+        self.raw = $$.raw;
+        self.formatWidth = $$.formatWidth;
+        self.exponentWidth = $$.exponentWidth;
+        self.packed = $$.packed;
+        self.numberOfElements = $$.numberOfElements;
+        self.componentCount = $$.componentCount;
+        self.nodeCount = self.state.elements;
+        self.maximumDepth = self.state.maximumDepth;
+        self.unresolvedTypeNames = self.state.unresolvedTypeNames;
+        self.signatureChoices = self.state.signatureChoices;
+        self.signaturePrimary = self.state.signaturePrimary;
+        self.signatureSecondary = self.state.signatureSecondary;
+        self.signatureChildCounts = self.state.signatureChildCounts;
+        self.signaturePacked = self.state.signaturePacked;
+    }
+    trailing: bytes &eod;
+
+    on %done {
+        if (|self.trailing| != 0)
+            throw "MMS TypeDescription has trailing data";
+    }
+};
+
+public type TypeSpecification = unit {
+    var state: TypeDescriptionState& = new TypeDescriptionState;
+    var choice: uint64 = 0;
+    var constructed: bool = False;
+    var signedValue: int64 = 0;
+    var booleanValue: bool = False;
+    var raw: bytes;
+    var typeNameScope: uint64 = 0;
+    var typeNameDomain: string;
+    var typeNameItem: string;
+    var formatWidth: int64 = 0;
+    var exponentWidth: int64 = 0;
+    var packed: bool = False;
+    var numberOfElements: int64 = -1;
+    var componentCount: uint64 = 0;
+    var nodeCount: uint64 = 0;
+    var maximumDepth: uint64 = 0;
+
+    value: TypeSpecificationValue(1, self.state, True) {
+        self.choice = $$.choice;
+        self.constructed = $$.constructed;
+        self.signedValue = $$.signedValue;
+        self.booleanValue = $$.booleanValue;
+        if ($$.choice <= 2)
+            self.raw = $$.raw;
+        self.typeNameScope = $$.typeNameScope;
+        self.typeNameDomain = $$.typeNameDomain;
+        self.typeNameItem = $$.typeNameItem;
+        self.formatWidth = $$.formatWidth;
+        self.exponentWidth = $$.exponentWidth;
+        self.packed = $$.packed;
+        self.numberOfElements = $$.numberOfElements;
+        self.componentCount = $$.componentCount;
+        self.nodeCount = self.state.elements;
+        self.maximumDepth = self.state.maximumDepth;
+    }
+    trailing: bytes &eod;
+
+    on %done {
+        if (|self.trailing| != 0)
+            throw "MMS TypeSpecification has trailing data";
+    }
+};
+
+public type AlternateAccessState = struct {
+    # Shared by all variable-list roots and AlternateAccess descendants in an
+    # enclosing explicit variable list.
+    elements: uint64;
+};
+
+public type MMSUnsigned32Value = unit(length: uint64) {
+    value: ICCP_BER::IntegerValue(length);
+    : void &requires=(
+        self.value.value >= 0 && self.value.value <= 2147483647
+    );
+};
+
+function alternateAccessSelectionFormIsValid(
+    tag: uint64,
+    constructed: bool
+): bool {
+    if (tag == 0 || tag == 3)
+        return constructed;
+
+    return ! constructed;
+}
+
+function nestedAccessSelectionFormIsValid(
+    tag: uint64,
+    constructed: bool
+): bool {
+    if (tag == 2)
+        return constructed;
+
+    return ! constructed;
+}
+
+public type AlternateAccessIndexRange = unit(length: uint64) {
+    lowIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.lowIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.lowIdentifier.first.constructed &&
+        self.lowIdentifier.tagNumber == 0
+    );
+    lowLength: ICCP_BER::DefiniteLength;
+    lowIndex: MMSUnsigned32Value(self.lowLength.value);
+
+    countIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.countIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.countIdentifier.first.constructed &&
+        self.countIdentifier.tagNumber == 1
+    );
+    countLength: ICCP_BER::DefiniteLength;
+    numberOfElements: MMSUnsigned32Value(self.countLength.value);
+} &size=length;
+
+public type NestedAccessSelection = unit(state: AlternateAccessState&) {
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS alternate access exceeds configured element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 3 &&
+        nestedAccessSelectionFormIsValid(
+            self.identifier.tagNumber,
+            self.identifier.first.constructed
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0 -> component: IdentifierValue(self.length.value);
+        1 -> index: MMSUnsigned32Value(self.length.value);
+        2 -> indexRange: AlternateAccessIndexRange(self.length.value);
+        3 -> allElements: ICCP_BER::NullValue(self.length.value);
+    };
+};
+
+public type SelectAlternateAccess = unit(
+    length: uint64,
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    : void &requires=depth < ICCP_BER::MAX_NESTING_DEPTH;
+
+    accessSelection: NestedAccessSelection(state);
+    alternateIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.alternateIdentifier.first.class_ ==
+            ICCP_BER::TagClass::UNIVERSAL &&
+        self.alternateIdentifier.first.constructed &&
+        self.alternateIdentifier.tagNumber == 16
+    );
+    alternateLength: ICCP_BER::DefiniteLength;
+    alternateAccess: AlternateAccessList(
+        self.alternateLength.value,
+        depth + 1,
+        state
+    );
+} &size=length;
+
+public type AlternateAccessSelectionContent = unit(
+    tag: uint64,
+    length: uint64,
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    switch (tag) {
+        0 -> selectAlternateAccess: SelectAlternateAccess(
+            length,
+            depth,
+            state
+        );
+        1 -> component: IdentifierValue(length);
+        2 -> index: MMSUnsigned32Value(length);
+        3 -> indexRange: AlternateAccessIndexRange(length);
+        4 -> allElements: ICCP_BER::NullValue(length);
+    };
+};
+
+public type AlternateAccessSelection = unit(
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS alternate access exceeds configured element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 4 &&
+        alternateAccessSelectionFormIsValid(
+            self.identifier.tagNumber,
+            self.identifier.first.constructed
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: AlternateAccessSelectionContent(
+        self.identifier.tagNumber,
+        self.length.value,
+        depth,
+        state
+    );
+};
+
+public type NamedAlternateAccess = unit(
+    length: uint64,
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    componentIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.componentIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.componentIdentifier.first.constructed &&
+        self.componentIdentifier.tagNumber == 0
+    );
+    componentLength: ICCP_BER::DefiniteLength;
+    componentName: IdentifierValue(self.componentLength.value);
+    access: AlternateAccessSelection(depth, state);
+} &size=length;
+
+public type AlternateAccessMember = unit(
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    : void &requires=depth <= ICCP_BER::MAX_NESTING_DEPTH;
+
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS alternate access exceeds configured element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 5 &&
+        (
+            (
+                self.identifier.tagNumber == 5 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                self.identifier.tagNumber < 5 &&
+                alternateAccessSelectionFormIsValid(
+                    self.identifier.tagNumber,
+                    self.identifier.first.constructed
+                )
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0,
+        1,
+        2,
+        3,
+        4 -> unnamed: AlternateAccessSelectionContent(
+            self.identifier.tagNumber,
+            self.length.value,
+            depth,
+            state
+        );
+        5 -> named: NamedAlternateAccess(
+            self.length.value,
+            depth,
+            state
+        );
+    };
+};
+
+public type AlternateAccessList = unit(
+    length: uint64,
+    depth: uint64,
+    state: AlternateAccessState&
+) {
+    : void &requires=depth <= ICCP_BER::MAX_NESTING_DEPTH;
+    var count: uint64 = 0;
+    var namedCount: uint64 = 0;
+
+    selections: AlternateAccessMember(depth, state)[] &eod foreach {
+        self.count += 1;
+        if ($$.identifier.tagNumber == 5)
+            self.namedCount += 1;
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS alternate access list must not be empty";
+        if (self.count == 1 && self.namedCount == 1)
+            throw "MMS single alternate access selection must not have a component name";
+    }
+} &size=length;
+
+public type AlternateAccess = unit(
+    length: uint64,
+    state: AlternateAccessState& = new AlternateAccessState
+) {
+    var count: uint64 = 0;
+    var totalCount: uint64 = 0;
+
+    selections: AlternateAccessList(length, 1, state) {
+        self.count = $$.count;
+        self.totalCount = state.elements;
+    }
+};
+
+public type AlternateAccessTLV = unit {
+    var state: AlternateAccessState& = new AlternateAccessState;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: AlternateAccess(self.length.value, self.state);
+};
+
+public type AlternateAccessTail = unit(
+    length: uint64,
+    state: AlternateAccessState& = new AlternateAccessState
+) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 5
+    );
+    alternateLength: ICCP_BER::DefiniteLength;
+    alternateAccess: AlternateAccess(self.alternateLength.value, state);
+    trailing: bytes &eod;
+
+    on %done {
+        if (|self.trailing| != 0)
+            throw "MMS variable-list entry has trailing data after AlternateAccess";
+    }
+} &size=length;
+
+# The ICCP supported profile decodes named, addressed, and invalidated
+# variables. The variableDescription [2] and scatteredAccessDescription [3]
+# alternatives remain excluded until their nested schemas are decoded; merely
+# treating their constructed content as opaque would incorrectly make a
+# malformed required field eligible for semantic protocol confirmation.
+public type VariableSpecification = unit(
+    allowInvalidated: bool = False
+) {
+    var choice: uint64 = 0;
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+    var raw: bytes;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 4 &&
+        (
+            (
+                self.identifier.tagNumber <= 1 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                allowInvalidated && self.identifier.tagNumber == 4 &&
+                ! self.identifier.first.constructed
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: bytes &size=self.length.value {
+        self.choice = self.identifier.tagNumber;
+        self.raw = $$;
+    }
+
+    objectName: BoundedObjectName(|self.value|) &parse-from=self.value
+        if (self.choice == 0) {
+            self.nameScope = $$.value.scope;
+            self.domainId = $$.value.domainId;
+            self.itemId = $$.value.itemId;
+        }
+
+    address: BoundedAddress(|self.value|) &parse-from=self.value
+        if (self.choice == 1);
+
+    invalidated: ICCP_BER::NullValue(|self.value|)
+        &parse-from=self.value if (self.choice == 4);
+};
+
+public type VariableListEntryContent = unit(
+    state: AlternateAccessState& = new AlternateAccessState,
+    allowInvalidated: bool = False
+) {
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+    var alternateAccessStart: uint64 = 0;
+    var alternateAccessCount: uint64 = 0;
+
+    on %init {
+        # The shared forest counter includes entry roots as well as every
+        # nested AlternateAccess node.  Snapshot it after the enclosing entry
+        # has consumed its root so this entry can export an exact, local count
+        # without depending on a sibling completion hook.
+        self.alternateAccessStart = state.elements;
+    }
+
+    specification: VariableSpecification(allowInvalidated) {
+        self.nameScope = $$.nameScope;
+        self.domainId = $$.domainId;
+        self.itemId = $$.itemId;
+    }
+    trailing: bytes &eod;
+    alternateAccess: AlternateAccessTail(|self.trailing|, state)
+        &parse-from=self.trailing if (|self.trailing| > 0);
+
+    on %done {
+        self.alternateAccessCount =
+            state.elements - self.alternateAccessStart;
+    }
+};
+
+public type VariableListEntry = unit(
+    state: AlternateAccessState& = new AlternateAccessState,
+    allowInvalidated: bool = False
+) {
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS variable list exceeds configured aggregate element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+    var alternateAccessCount: uint64 = 0;
+    content: VariableListEntryContent(state, allowInvalidated)
+        &size=self.length.value {
+        self.nameScope = $$.nameScope;
+        self.domainId = $$.domainId;
+        self.itemId = $$.itemId;
+        self.alternateAccessCount = $$.alternateAccessCount;
+    }
+};
+
+public type VariableList = unit(
+    length: uint64,
+    allowInvalidated: bool = False
+) {
+    # Entry roots and all AlternateAccess descendants consume one forest-wide
+    # budget. Passing this state into every entry prevents a new member from
+    # resetting the recursive work limit.
+    var state: AlternateAccessState& = new AlternateAccessState;
+    var count: uint64 = 0;
+    var totalNodes: uint64 = 0;
+    var firstNameScope: uint64 = 0;
+    var firstDomainId: string;
+    var firstItemId: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+    var memberAlternateAccessCounts: vector<uint64>;
+
+    entries: VariableListEntry(self.state, allowInvalidated)[] &eod foreach {
+        self.count += 1;
+        self.totalNodes = self.state.elements;
+        self.memberScopes.push_back($$.nameScope);
+        self.memberDomains.push_back($$.domainId);
+        self.memberNames.push_back($$.itemId);
+        self.memberAlternateAccessCounts.push_back(
+            $$.alternateAccessCount
+        );
+        if (self.count == 1) {
+            self.firstNameScope = $$.nameScope;
+            self.firstDomainId = $$.domainId;
+            self.firstItemId = $$.itemId;
+        }
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS variable list must not be empty";
+    }
+} &size=length;
+
+public type VariableAccessSpecification = unit(
+    allowInvalidated: bool = False
+) {
+    var choice: uint64 = 0;
+    var variableCount: uint64 = 0;
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+    var memberAlternateAccessCounts: vector<uint64>;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 1
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: bytes &size=self.length.value {
+        self.choice = self.identifier.tagNumber;
+    }
+
+    variableList: VariableList(|self.value|, allowInvalidated)
+        &parse-from=self.value
+        if (self.choice == 0) {
+            self.variableCount = $$.count;
+            self.nameScope = $$.firstNameScope;
+            self.domainId = $$.firstDomainId;
+            self.itemId = $$.firstItemId;
+            self.memberScopes = $$.memberScopes;
+            self.memberDomains = $$.memberDomains;
+            self.memberNames = $$.memberNames;
+            self.memberAlternateAccessCounts =
+                $$.memberAlternateAccessCounts;
+        }
+
+    variableListName: BoundedObjectName(|self.value|) &parse-from=self.value
+        if (self.choice == 1) {
+            self.nameScope = $$.value.scope;
+            self.domainId = $$.value.domainId;
+            self.itemId = $$.value.itemId;
+    }
+};
+
+public type BoundedVariableAccessSpecification = unit(
+    length: uint64,
+    allowInvalidated: bool = False
+) {
+    value: VariableAccessSpecification(allowInvalidated);
+} &size=length;
+
+public type DataState = struct {
+    # Mutable traversal count shared by every root in one enclosing forest.
+    elements: uint64;
+};
+
+public type DataChildren = unit(
+    length: uint64,
+    depth: uint64,
+    state: DataState& = new DataState
+) {
+    var count: uint64 = 0;
+    var totalNodes: uint64 = 0;
+    var maximumDepth: uint64 = depth - 1;
+    var integerCount: uint64 = 0;
+    var firstInteger: int64 = 0;
+    var secondInteger: int64 = 0;
+    var firstChoice: uint64 = 0;
+    var secondChoice: uint64 = 0;
+    var thirdChoice: uint64 = 0;
+    var firstIntegerValue: int64 = 0;
+    var secondIntegerValue: int64 = 0;
+    var firstFloatingValue: real = 0.0;
+    var firstRaw: bytes;
+    var secondRaw: bytes;
+    var thirdRaw: bytes;
+    var thirdIntegerValue: int64 = 0;
+    var twelfthChoice: uint64 = 0;
+    var twelfthBoolean: bool = False;
+    var dstTransferSetChoicesValid: bool = True;
+    var dstTransferSetShape: bool = False;
+    var choices: vector<uint64>;
+    var raws: vector<bytes>;
+    var integerValues: vector<int64>;
+    var nestedComponentIndex: uint64 = 0;
+    var nestedChoices: vector<uint64>;
+    var nestedRaws: vector<bytes>;
+    var nestedIntegerValues: vector<int64>;
+
+    children: DataValue(depth, state)[] &eod foreach {
+        self.count += 1;
+        self.choices.push_back($$.choice);
+        self.raws.push_back($$.raw);
+        self.integerValues.push_back($$.integerValue);
+        if (
+            self.nestedComponentIndex == 0 && $$.choice == 2 &&
+            |$$.nestedChoices| > 0
+        ) {
+            self.nestedComponentIndex = self.count;
+            self.nestedChoices = $$.nestedChoices;
+            self.nestedRaws = $$.nestedRaws;
+            self.nestedIntegerValues = $$.nestedIntegerValues;
+        }
+        self.totalNodes += $$.nodeCount;
+        if (
+            (self.count == 1 &&
+                ($$.choice != 2 || $$.childCount != 3 ||
+                 $$.nestedFirstChoice != 6 ||
+                 $$.nestedSecondChoice != 10 ||
+                 $$.nestedThirdChoice != 10)) ||
+            (self.count >= 2 && self.count <= 6 && $$.choice != 5) ||
+            (self.count == 7 && $$.choice != 4) ||
+            (self.count >= 8 && self.count <= 12 && $$.choice != 3) ||
+            (self.count == 13 && $$.choice != 5) ||
+            self.count > 13
+        )
+            self.dstTransferSetChoicesValid = False;
+        if ($$.maximumDepth > self.maximumDepth)
+            self.maximumDepth = $$.maximumDepth;
+        if (
+            $$.choice == 5 ||
+            $$.choice == 6 ||
+            $$.choice == 13 ||
+            $$.choice == 17
+        ) {
+            self.integerCount += 1;
+            if (self.integerCount == 1)
+                self.firstInteger = $$.integerValue;
+            else if (self.integerCount == 2)
+                self.secondInteger = $$.integerValue;
+        }
+
+        # In four-component DiscreteExtended values the first INTEGER is the
+        # scalar, while the third and fourth integers are timestamp and COV.
+        # Normalize those two metadata slots without changing two-component
+        # structures such as TASE.2_Version.
+        if (
+            self.count == 3 &&
+            self.firstChoice != 4 &&
+            ($$.choice == 5 || $$.choice == 6 || $$.choice == 13)
+        )
+            self.firstInteger = $$.integerValue;
+        else if (
+            self.count == 4 &&
+            ($$.choice == 5 || $$.choice == 6 || $$.choice == 13)
+        )
+            self.secondInteger = $$.integerValue;
+        if (self.count == 1) {
+            self.firstChoice = $$.choice;
+            self.firstIntegerValue = $$.integerValue;
+            self.firstFloatingValue = $$.floatingValue;
+            self.firstRaw = $$.raw;
+        }
+        else if (self.count == 2) {
+            self.secondChoice = $$.choice;
+            self.secondIntegerValue = $$.integerValue;
+            self.secondRaw = $$.raw;
+        }
+        else if (self.count == 3) {
+            self.thirdChoice = $$.choice;
+            self.thirdIntegerValue = $$.integerValue;
+            self.thirdRaw = $$.raw;
+        }
+        else if (self.count == 12) {
+            self.twelfthChoice = $$.choice;
+            self.twelfthBoolean = $$.booleanValue;
+        }
+    }
+
+    on %done {
+        self.dstTransferSetShape =
+            self.count == 13 && self.dstTransferSetChoicesValid;
+    }
+} &size=length;
+
+public type FloatingPointValue = unit(length: uint64) {
+    : void &requires=length == 5 || length == 9;
+    formatWidth: uint8;
+    : void &requires=(
+        (length == 5 && self.formatWidth == 8) ||
+        (length == 9 && self.formatWidth == 11)
+    );
+    var value: real = 0.0;
+
+    switch (length) {
+        5 -> single: real
+            &type=spicy::RealType::IEEE754_Single
+            &byte-order=spicy::ByteOrder::Big {
+                self.value = $$;
+            }
+        9 -> double: real
+            &type=spicy::RealType::IEEE754_Double
+            &byte-order=spicy::ByteOrder::Big {
+                self.value = $$;
+            }
+    };
+};
+
+# MMS utc-time uses eight octets: four seconds-since-epoch
+# octets, three binary-fraction octets, and one quality octet. Retain the raw
+# Data bytes while exposing millisecond precision through integerValue.
+public type UtcTimeValue = unit {
+    seconds: uint32 &byte-order=spicy::ByteOrder::Big;
+    fractionHigh: uint16 &byte-order=spicy::ByteOrder::Big;
+    fractionLow: uint8;
+    quality: uint8;
+
+    var milliseconds: uint64;
+
+    on %done {
+        local fraction =
+            uint64(self.fractionHigh) * 256 + self.fractionLow;
+        self.milliseconds =
+            uint64(self.seconds) * 1000 +
+            (fraction * 1000 / 16777216);
+    }
+};
+
+function dataIdentifierFormIsValid(
+    tag: uint64,
+    constructed: bool
+): bool {
+    # Tag zero is reserved for AccessResult.failure and tag eight is reserved
+    # by the MMS Data CHOICE itself. GeneralizedTime [11] remains fail-closed
+    # until its ASN.1 lexical forms are validated; accepting arbitrary bytes
+    # here would incorrectly label the enclosing service semantically decoded.
+    if (tag == 0 || tag == 8 || tag == 11)
+        return False;
+
+    if (tag == 1 || tag == 2)
+        return constructed;
+
+    return ! constructed;
+}
+
+function timeOfDayIsValid(value: bytes): bool {
+    if (|value| != 4 && |value| != 6)
+        return False;
+
+    local first = uint64(*value.at(0));
+    local milliseconds =
+        (first << 24) |
+        (uint64(*value.at(1)) << 16) |
+        (uint64(*value.at(2)) << 8) |
+        uint64(*value.at(3));
+
+    # ISO 9506-2 requires bits 28..31 to be zero. The remaining field is the
+    # number of milliseconds since midnight and therefore must be within one
+    # day.
+    return (first & 0xf0) == 0 && milliseconds < 86400000;
+}
+
+public type DataValue = unit(
+    depth: uint64,
+    state: DataState& = new DataState
+) {
+    var choice: uint64 = 0;
+    var known: bool = False;
+    var nodeCount: uint64 = 1;
+    var childCount: uint64 = 0;
+    var maximumDepth: uint64 = depth;
+    var booleanValue: bool = False;
+    var integerValue: int64 = 0;
+    var unusedBits: uint8 = 0;
+    var stringValue: string;
+    var oidValue: string;
+    var floatingValue: real = 0.0;
+    var raw: bytes;
+    var twelfthChildChoice: uint64 = 0;
+    var twelfthChildBoolean: bool = False;
+    var dstTransferSetShape: bool = False;
+    var nestedFirstChoice: uint64 = 0;
+    var nestedSecondChoice: uint64 = 0;
+    var nestedThirdChoice: uint64 = 0;
+    var nestedChoices: vector<uint64>;
+    var nestedRaws: vector<bytes>;
+    var nestedIntegerValues: vector<int64>;
+
+    : void &requires=depth <= ICCP_BER::MAX_NESTING_DEPTH;
+
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS Data forest exceeds configured aggregate element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        dataIdentifierFormIsValid(
+            self.identifier.tagNumber,
+            self.identifier.first.constructed
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: bytes &size=self.length.value {
+        self.choice = self.identifier.tagNumber;
+        self.raw = $$;
+        self.known = self.choice <= 17 && self.choice != 8;
+    }
+
+    nested: DataChildren(|self.value|, depth + 1, state)
+        &parse-from=self.value
+        if (self.choice == 1 || self.choice == 2) {
+            self.childCount = $$.count;
+            self.nodeCount += $$.totalNodes;
+            if ($$.maximumDepth > self.maximumDepth)
+                self.maximumDepth = $$.maximumDepth;
+            self.twelfthChildChoice = $$.twelfthChoice;
+            self.twelfthChildBoolean = $$.twelfthBoolean;
+            self.dstTransferSetShape = $$.dstTransferSetShape;
+            self.nestedFirstChoice = $$.firstChoice;
+            self.nestedSecondChoice = $$.secondChoice;
+            self.nestedThirdChoice = $$.thirdChoice;
+            self.nestedChoices = $$.choices;
+            self.nestedRaws = $$.raws;
+            self.nestedIntegerValues = $$.integerValues;
+        }
+
+    booleanData: ICCP_BER::BooleanValue(|self.value|)
+        &parse-from=self.value if (self.choice == 3) {
+            self.booleanValue = $$.value;
+        }
+
+    bitStringData: ICCP_BER::BitStringValue(|self.value|)
+        &parse-from=self.value
+        if (self.choice == 4 || self.choice == 14) {
+            self.unusedBits = $$.unusedBits;
+        }
+
+    signedData: ICCP_BER::IntegerValue(|self.value|)
+        &parse-from=self.value if (self.choice == 5) {
+            self.integerValue = $$.value;
+        }
+
+    bcdData: ICCP_BER::IntegerValue(|self.value|)
+        &parse-from=self.value if (self.choice == 13) {
+            if ($$.value < 0)
+                throw "MMS BCD Data value is negative";
+            self.integerValue = $$.value;
+        }
+
+    unsignedData: ICCP_BER::IntegerValue(|self.value|)
+        &parse-from=self.value if (self.choice == 6) {
+            if ($$.value < 0)
+                throw "MMS unsigned Data value is negative";
+            self.integerValue = $$.value;
+        }
+
+    floatingData: FloatingPointValue(|self.value|)
+        &parse-from=self.value if (self.choice == 7) {
+            self.floatingValue = $$.value;
+        }
+
+    visibleStringData: VisibleStringValue(|self.value|)
+        &parse-from=self.value if (self.choice == 10) {
+            self.stringValue = $$.value;
+        }
+
+    objectIdentifierData: ICCP_BER::ObjectIdentifierValue(|self.value|)
+        &parse-from=self.value if (self.choice == 15) {
+            self.oidValue = $$.value;
+        }
+
+    mmsStringData: MMSStringValue(|self.value|)
+        &parse-from=self.value if (self.choice == 16) {
+            self.stringValue = $$.value;
+        }
+
+    utcTimeData: UtcTimeValue &parse-from=self.value
+        if (self.choice == 17 && |self.value| == 8) {
+            self.integerValue = cast<int64>($$.milliseconds);
+        }
+
+    : void &requires=self.choice != 12 || timeOfDayIsValid(self.value);
+    : void &requires=self.choice != 17 || self.length.value == 8;
+};
+
+public type AccessResult = unit(state: DataState& = new DataState) {
+    var success: bool = False;
+    var choice: uint64 = 0;
+    var error: int64 = -1;
+    var raw: bytes;
+    var componentIntegerCount: uint64 = 0;
+    var firstComponentInteger: int64 = 0;
+    var secondComponentInteger: int64 = 0;
+    var componentCount: uint64 = 0;
+    var firstComponentChoice: uint64 = 0;
+    var secondComponentChoice: uint64 = 0;
+    var thirdComponentChoice: uint64 = 0;
+    var firstComponentIntegerValue: int64 = 0;
+    var secondComponentIntegerValue: int64 = 0;
+    var firstComponentFloatingValue: real = 0.0;
+    var firstComponentRaw: bytes;
+    var secondComponentRaw: bytes;
+    var thirdComponentRaw: bytes;
+    var thirdComponentIntegerValue: int64 = 0;
+    var integerValue: int64 = 0;
+    var floatingValue: real = 0.0;
+    var booleanValue: bool = False;
+    var stringValue: string;
+    var unusedBits: uint8 = 0;
+    # Count the AccessResult/Data root itself for event metadata. The shared
+    # DataState enforces the forest budget as descendants are entered.
+    var nodeCount: uint64 = 1;
+
+    on %init {
+        state.elements += 1;
+        if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS Data forest exceeds configured aggregate element limit";
+    }
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        (
+            (
+                self.identifier.tagNumber == 0 &&
+                ! self.identifier.first.constructed
+            ) ||
+            dataIdentifierFormIsValid(
+                self.identifier.tagNumber,
+                self.identifier.first.constructed
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0 -> failure: ICCP_BER::IntegerValue(self.length.value) {
+            if ($$.value < 0 || $$.value > 11)
+                throw "MMS data access error is out of range";
+            self.choice = 0;
+            self.error = $$.value;
+        }
+        * -> data: bytes &size=self.length.value {
+            self.success = True;
+            self.choice = self.identifier.tagNumber;
+            self.raw = $$;
+        }
+    };
+
+    structuredData: DataChildren(|self.raw|, 1, state)
+        &parse-from=self.raw
+        if (self.success && (self.choice == 1 || self.choice == 2)) {
+            self.nodeCount += $$.totalNodes;
+            self.componentIntegerCount = $$.integerCount;
+            self.firstComponentInteger = $$.firstInteger;
+            self.secondComponentInteger = $$.secondInteger;
+            self.componentCount = $$.count;
+            self.firstComponentChoice = $$.firstChoice;
+            self.secondComponentChoice = $$.secondChoice;
+            self.thirdComponentChoice = $$.thirdChoice;
+            self.firstComponentIntegerValue =
+                $$.firstIntegerValue;
+            self.secondComponentIntegerValue =
+                $$.secondIntegerValue;
+            self.firstComponentFloatingValue =
+                $$.firstFloatingValue;
+            self.firstComponentRaw = $$.firstRaw;
+            self.secondComponentRaw = $$.secondRaw;
+            self.thirdComponentRaw = $$.thirdRaw;
+            self.thirdComponentIntegerValue =
+                $$.thirdIntegerValue;
+        }
+
+    integerData: ICCP_BER::IntegerValue(|self.raw|)
+        &parse-from=self.raw
+        if (
+            self.success &&
+            (self.choice == 5 || self.choice == 6)
+        ) {
+            if (self.choice == 6 && $$.value < 0)
+                throw "MMS unsigned access result is negative";
+            self.integerValue = $$.value;
+            self.firstComponentIntegerValue = $$.value;
+        }
+
+    bcdData: ICCP_BER::IntegerValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 13) {
+            if ($$.value < 0)
+                throw "MMS BCD access result is negative";
+            self.integerValue = $$.value;
+            self.firstComponentIntegerValue = $$.value;
+        }
+
+    booleanData: ICCP_BER::BooleanValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 3) {
+            self.booleanValue = $$.value;
+        }
+
+    bitStringData: ICCP_BER::BitStringValue(|self.raw|)
+        &parse-from=self.raw
+        if (self.success && (self.choice == 4 || self.choice == 14)) {
+            self.unusedBits = $$.unusedBits;
+        }
+
+    floatingData: FloatingPointValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 7) {
+            self.floatingValue = $$.value;
+        }
+
+    visibleStringData: VisibleStringValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 10) {
+            self.stringValue = $$.value;
+        }
+
+    objectIdentifierData: ICCP_BER::ObjectIdentifierValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 15) {
+            self.stringValue = $$.value;
+        }
+
+    mmsStringData: MMSStringValue(|self.raw|)
+        &parse-from=self.raw if (self.success && self.choice == 16) {
+            self.stringValue = $$.value;
+        }
+
+    utcTimeData: UtcTimeValue &parse-from=self.raw
+        if (self.success && self.choice == 17 && |self.raw| == 8) {
+            self.integerValue = cast<int64>($$.milliseconds);
+        }
+
+    : void &requires=(
+        ! self.success || self.choice != 12 || timeOfDayIsValid(self.raw)
+    );
+    : void &requires=(
+        ! self.success || self.choice != 17 || self.length.value == 8
+    );
+};
+
+public type ExtendedObjectClass = unit {
+    var choice: uint64 = 0;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 1
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::IntegerValue(self.length.value) {
+        self.choice = self.identifier.tagNumber;
+    }
+    : void &requires=(
+        (
+            self.choice == 0 &&
+            self.value.value >= 0 &&
+            self.value.value <= 13
+        ) ||
+        (
+            self.choice == 1 &&
+            self.value.value >= 0 &&
+            self.value.value <= 1
+        )
+    );
+};
+
+public type BoundedExtendedObjectClass = unit(length: uint64) {
+    value: ExtendedObjectClass;
+} &size=length;
+
+public type BoundedObjectScope = unit(length: uint64) {
+    value: ObjectScope;
+} &size=length;
+
+public type GetNameListRequest = unit(length: uint64) {
+    var haveObjectClass: bool = False;
+    var haveScope: bool = False;
+    var haveContinueAfter: bool = False;
+    var objectClassValue: bytes;
+    var scopeValue: bytes;
+    var continueValue: bytes;
+    var objectClassChoice: uint64 = 0;
+    var objectClass: int64 = -1;
+    var objectScope: uint64 = 0;
+    var domainId: string;
+    var continueAfter: string;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveObjectClass &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveObjectClass = True;
+            self.objectClassValue = $$.value;
+        }
+        else if (
+            self.haveObjectClass &&
+            ! self.haveScope &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveScope = True;
+            self.scopeValue = $$.value;
+        }
+        else if (
+            self.haveScope &&
+            ! self.haveContinueAfter &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveContinueAfter = True;
+            self.continueValue = $$.value;
+        }
+        else
+            throw "MMS GetNameList request fields are invalid or out of order";
+    }
+
+    classChoice: BoundedExtendedObjectClass(|self.objectClassValue|)
+        &parse-from=self.objectClassValue
+        if (self.haveObjectClass) {
+            self.objectClassChoice = $$.value.choice;
+            self.objectClass = $$.value.value.value;
+        }
+
+    scope: BoundedObjectScope(|self.scopeValue|) &parse-from=self.scopeValue
+        if (self.haveScope) {
+            self.objectScope = $$.value.scope;
+            self.domainId = $$.value.domainId;
+        }
+
+    continuation: Tase2CompatibleIdentifierValue(
+        |self.continueValue|,
+        self.objectScope == 0 &&
+            self.objectClassChoice == 0 &&
+            self.objectClass == 0
+    )
+        &parse-from=self.continueValue
+        if (self.haveContinueAfter) {
+            self.continueAfter = $$.value;
+        }
+
+    on %done {
+        if (! self.haveObjectClass || ! self.haveScope)
+            throw "MMS GetNameList request is missing a mandatory field";
+    }
+} &size=length;
+
+public type IdentifierList = unit(length: uint64) {
+    var count: uint64 = 0;
+    var first: string;
+    var values: vector<string>;
+
+    identifiers: GetNameListIdentifierTLV[] &eod foreach {
+        self.count += 1;
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS identifier list exceeds configured element limit";
+        self.values.push_back($$.value.value);
+        if (self.count == 1)
+            self.first = $$.value.value;
+    }
+} &size=length;
+
+public type GetNameListResponse = unit(length: uint64) {
+    var haveList: bool = False;
+    var haveMoreFollows: bool = False;
+    var listValue: bytes;
+    var moreValue: bytes;
+    var identifierCount: uint64 = 0;
+    var firstIdentifier: string;
+    var identifiers: vector<string>;
+    var moreFollows: bool = True;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveList &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveList = True;
+            self.listValue = $$.value;
+        }
+        else if (
+            self.haveList &&
+            ! self.haveMoreFollows &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveMoreFollows = True;
+            self.moreValue = $$.value;
+        }
+        else
+            throw "MMS GetNameList response fields are invalid or out of order";
+    }
+
+    identifierList: IdentifierList(|self.listValue|)
+        &parse-from=self.listValue
+        if (self.haveList) {
+            self.identifierCount = $$.count;
+            self.firstIdentifier = $$.first;
+            self.identifiers = $$.values;
+        }
+
+    more: ICCP_BER::BooleanValue(|self.moreValue|)
+        &parse-from=self.moreValue
+        if (self.haveMoreFollows) {
+            self.moreFollows = $$.value;
+        }
+
+    on %done {
+        if (! self.haveList)
+            throw "MMS GetNameList response is missing identifier list";
+    }
+} &size=length;
+
+public type IdentifyRequest = unit(length: uint64, constructed: bool) {
+    : void &requires=! constructed && length == 0;
+    body: bytes &size=length;
+};
+
+public type ImplicitNullService = unit(length: uint64, constructed: bool) {
+    : void &requires=! constructed && length == 0;
+    body: bytes &size=length;
+};
+
+public type IdentifyObjectIdentifier = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 6
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::ObjectIdentifierValue(self.length.value);
+};
+
+public type IdentifyAbstractSyntaxList = unit(length: uint64) {
+    var count: uint64 = 0;
+    var firstOid: string;
+
+    syntaxes: IdentifyObjectIdentifier[] &eod foreach {
+        self.count += 1;
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS Identify abstract-syntax list exceeds configured element limit";
+        if (self.count == 1)
+            self.firstOid = $$.value.value;
+    }
+} &size=length;
+
+public type IdentifyResponse = unit(length: uint64, constructed: bool) {
+    : void &requires=constructed;
+
+    var expectedTag: uint64 = 0;
+    var vendorRaw: bytes;
+    var modelRaw: bytes;
+    var revisionRaw: bytes;
+    var syntaxRaw: bytes;
+    var vendorName: string;
+    var modelName: string;
+    var revision: string;
+    var abstractSyntaxCount: uint64 = 0;
+    var firstAbstractSyntax: string;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            self.expectedTag <= 2 &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == self.expectedTag
+        ) {
+            if (self.expectedTag == 0)
+                self.vendorRaw = $$.value;
+            else if (self.expectedTag == 1)
+                self.modelRaw = $$.value;
+            else
+                self.revisionRaw = $$.value;
+            self.expectedTag += 1;
+        }
+        else if (
+            self.expectedTag == 3 &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 3
+        ) {
+            self.syntaxRaw = $$.value;
+            self.expectedTag = 4;
+        }
+        else
+            throw "MMS Identify response fields are invalid or out of order";
+    }
+
+    vendor: MMSStringValue(|self.vendorRaw|)
+        &parse-from=self.vendorRaw
+        if (self.expectedTag >= 3) {
+            self.vendorName = $$.value;
+        }
+    model: MMSStringValue(|self.modelRaw|)
+        &parse-from=self.modelRaw
+        if (self.expectedTag >= 3) {
+            self.modelName = $$.value;
+        }
+    revisionValue: MMSStringValue(|self.revisionRaw|)
+        &parse-from=self.revisionRaw
+        if (self.expectedTag >= 3) {
+            self.revision = $$.value;
+        }
+    abstractSyntaxes: IdentifyAbstractSyntaxList(|self.syntaxRaw|)
+        &parse-from=self.syntaxRaw
+        if (self.expectedTag == 4) {
+            self.abstractSyntaxCount = $$.count;
+            self.firstAbstractSyntax = $$.firstOid;
+        }
+
+    on %done {
+        if (self.expectedTag < 3)
+            throw "MMS Identify response is missing a mandatory field";
+    }
+} &size=length;
+
+public type ReadRequest = unit(length: uint64) {
+    var haveSpecification: bool = False;
+    var haveAccess: bool = False;
+    var specificationValue: bytes;
+    var accessValue: bytes;
+    var specificationWithResult: bool = False;
+    var accessChoice: uint64 = 0;
+    var variableCount: uint64 = 0;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveSpecification &&
+            ! self.haveAccess &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveSpecification = True;
+            self.specificationValue = $$.value;
+        }
+        else if (
+            ! self.haveAccess &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveAccess = True;
+            self.accessValue = $$.value;
+        }
+        else
+            throw "MMS Read request fields are invalid or out of order";
+    }
+
+    specification: ICCP_BER::BooleanValue(|self.specificationValue|)
+        &parse-from=self.specificationValue
+        if (self.haveSpecification) {
+            self.specificationWithResult = $$.value;
+        }
+
+    access: BoundedVariableAccessSpecification(|self.accessValue|)
+        &parse-from=self.accessValue
+        if (self.haveAccess) {
+            self.accessChoice = $$.value.choice;
+            self.variableCount = $$.value.variableCount;
+        }
+
+    on %done {
+        if (! self.haveAccess)
+            throw "MMS Read request is missing variable access specification";
+    }
+} &size=length;
+
+public type AccessResultList = unit(length: uint64) {
+    # Every AccessResult root and every nested Data node shares this state.
+    # The limit therefore applies to the complete forest, not independently
+    # to each result.
+    var state: DataState& = new DataState;
+    var count: uint64 = 0;
+    var totalNodes: uint64 = 0;
+    var failureCount: uint64 = 0;
+    var firstChoice: uint64 = 0;
+    var firstRaw: bytes;
+    var firstComponentIntegerCount: uint64 = 0;
+    var firstComponentInteger: int64 = 0;
+    var secondComponentInteger: int64 = 0;
+    var firstComponentCount: uint64 = 0;
+    var firstComponentChoice: uint64 = 0;
+    var secondComponentChoice: uint64 = 0;
+    var thirdComponentChoice: uint64 = 0;
+    var firstComponentIntegerValue: int64 = 0;
+    var secondComponentIntegerValue: int64 = 0;
+    var firstComponentFloatingValue: real = 0.0;
+    var firstComponentRaw: bytes;
+    var secondComponentRaw: bytes;
+    var thirdComponentRaw: bytes;
+    var thirdComponentIntegerValue: int64 = 0;
+    var resultChoices: vector<uint64>;
+    var resultErrors: vector<int64>;
+    var resultRaws: vector<bytes>;
+    var resultIntegerValues: vector<int64>;
+    var resultFloatingValues: vector<real>;
+    var resultBooleanValues: vector<bool>;
+    var resultStringValues: vector<string>;
+
+    results: AccessResult(self.state)[] &eod foreach {
+        self.count += 1;
+        self.totalNodes = self.state.elements;
+        self.resultChoices.push_back($$.choice);
+        self.resultErrors.push_back($$.error);
+        self.resultRaws.push_back($$.raw);
+        self.resultIntegerValues.push_back($$.integerValue);
+        self.resultFloatingValues.push_back($$.floatingValue);
+        self.resultBooleanValues.push_back($$.booleanValue);
+        self.resultStringValues.push_back($$.stringValue);
+        if (self.count == 1 && $$.success) {
+            self.firstChoice = $$.choice;
+            self.firstRaw = $$.raw;
+            self.firstComponentIntegerCount =
+                $$.componentIntegerCount;
+            self.firstComponentInteger =
+                $$.firstComponentInteger;
+            self.secondComponentInteger =
+                $$.secondComponentInteger;
+            self.firstComponentCount = $$.componentCount;
+            self.firstComponentChoice = $$.firstComponentChoice;
+            self.secondComponentChoice = $$.secondComponentChoice;
+            self.thirdComponentChoice = $$.thirdComponentChoice;
+            self.firstComponentIntegerValue =
+                $$.firstComponentIntegerValue;
+            self.secondComponentIntegerValue =
+                $$.secondComponentIntegerValue;
+            self.firstComponentFloatingValue =
+                $$.firstComponentFloatingValue;
+            self.firstComponentRaw = $$.firstComponentRaw;
+            self.secondComponentRaw = $$.secondComponentRaw;
+            self.thirdComponentRaw = $$.thirdComponentRaw;
+            self.thirdComponentIntegerValue =
+                $$.thirdComponentIntegerValue;
+        }
+        if (! $$.success)
+            self.failureCount += 1;
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS access result list must not be empty";
+    }
+} &size=length;
+
+public type ReadResponse = unit(length: uint64) {
+    var haveAccess: bool = False;
+    var haveResults: bool = False;
+    var accessValue: bytes;
+    var resultsValue: bytes;
+    var accessChoice: uint64 = 0;
+    var variableCount: uint64 = 0;
+    var resultCount: uint64 = 0;
+    var failureCount: uint64 = 0;
+    var firstResultChoice: uint64 = 0;
+    var firstResultRaw: bytes;
+    var firstResultComponentIntegerCount: uint64 = 0;
+    var firstResultFirstInteger: int64 = 0;
+    var firstResultSecondInteger: int64 = 0;
+    var firstResultComponentCount: uint64 = 0;
+    var firstResultFirstChoice: uint64 = 0;
+    var firstResultSecondChoice: uint64 = 0;
+    var firstResultThirdChoice: uint64 = 0;
+    var firstResultIntegerValue: int64 = 0;
+    var firstResultSecondIntegerValue: int64 = 0;
+    var firstResultFloatingValue: real = 0.0;
+    var firstResultFirstRaw: bytes;
+    var firstResultSecondRaw: bytes;
+    var firstResultFlagsRaw: bytes;
+    var firstResultThirdRaw: bytes;
+    var firstResultTimestampValue: int64 = 0;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveAccess &&
+            ! self.haveResults &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveAccess = True;
+            self.accessValue = $$.value;
+        }
+        else if (
+            ! self.haveResults &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveResults = True;
+            self.resultsValue = $$.value;
+        }
+        else
+            throw "MMS Read response fields are invalid or out of order";
+    }
+
+    access: BoundedVariableAccessSpecification(|self.accessValue|, True)
+        &parse-from=self.accessValue
+        if (self.haveAccess) {
+            self.accessChoice = $$.value.choice;
+            self.variableCount = $$.value.variableCount;
+        }
+
+    results: AccessResultList(|self.resultsValue|)
+        &parse-from=self.resultsValue if (self.haveResults) {
+            self.resultCount = $$.count;
+            self.failureCount = $$.failureCount;
+            self.firstResultChoice = $$.firstChoice;
+            self.firstResultRaw = $$.firstRaw;
+            self.firstResultComponentIntegerCount =
+                $$.firstComponentIntegerCount;
+            self.firstResultFirstInteger =
+                $$.firstComponentInteger;
+            self.firstResultSecondInteger =
+                $$.secondComponentInteger;
+            self.firstResultComponentCount =
+                $$.firstComponentCount;
+            self.firstResultFirstChoice =
+                $$.firstComponentChoice;
+            self.firstResultSecondChoice =
+                $$.secondComponentChoice;
+            self.firstResultThirdChoice =
+                $$.thirdComponentChoice;
+            self.firstResultIntegerValue =
+                $$.firstComponentIntegerValue;
+            self.firstResultSecondIntegerValue =
+                $$.secondComponentIntegerValue;
+            self.firstResultFloatingValue =
+                $$.firstComponentFloatingValue;
+            self.firstResultFirstRaw =
+                $$.firstComponentRaw;
+            self.firstResultSecondRaw =
+                $$.secondComponentRaw;
+            self.firstResultFlagsRaw =
+                $$.secondComponentRaw;
+            self.firstResultThirdRaw =
+                $$.thirdComponentRaw;
+            self.firstResultTimestampValue =
+                $$.thirdComponentIntegerValue;
+
+            # Supported timestamped point values place the timestamp before
+            # the flags; retain those components in their semantic slots.
+            if (
+                self.firstResultComponentCount == 3 &&
+                ($$.firstComponentChoice == 5 ||
+                 $$.firstComponentChoice == 7) &&
+                $$.secondComponentChoice == 5 &&
+                $$.thirdComponentChoice == 4
+            ) {
+                self.firstResultFlagsRaw = $$.thirdComponentRaw;
+                self.firstResultTimestampValue =
+                    $$.secondComponentIntegerValue;
+            }
+        }
+
+    on %done {
+        if (! self.haveResults)
+            throw "MMS Read response is missing access result list";
+        if (
+            self.haveAccess && self.accessChoice == 0 &&
+            self.variableCount != self.resultCount
+        )
+            throw "MMS Read response variable/result count mismatch";
+    }
+} &size=length;
+
+public type DataList = unit(length: uint64) {
+    # Write values form one aggregate Data forest even when each root is a
+    # separately encoded MMS Data value.
+    var state: DataState& = new DataState;
+    var count: uint64 = 0;
+    var totalNodes: uint64 = 0;
+    var firstChoice: uint64 = 0;
+    var firstBoolean: bool = False;
+    var firstChildCount: uint64 = 0;
+    var firstTwelfthChildChoice: uint64 = 0;
+    var firstTwelfthChildBoolean: bool = False;
+    var firstDSTransferSetShape: bool = False;
+    var firstRaw: bytes;
+    var firstIntegerValue: int64 = 0;
+    var firstFloatingValue: real = 0.0;
+    var choices: vector<uint64>;
+    var raws: vector<bytes>;
+    var integerValues: vector<int64>;
+    var floatingValues: vector<real>;
+    var booleanValues: vector<bool>;
+    var stringValues: vector<string>;
+
+    values: DataValue(0, self.state)[] &eod foreach {
+        self.count += 1;
+        self.totalNodes = self.state.elements;
+        self.choices.push_back($$.choice);
+        self.raws.push_back($$.raw);
+        self.integerValues.push_back($$.integerValue);
+        self.floatingValues.push_back($$.floatingValue);
+        self.booleanValues.push_back($$.booleanValue);
+        self.stringValues.push_back($$.stringValue);
+        if (self.count == 1) {
+            self.firstChoice = $$.choice;
+            self.firstBoolean = $$.booleanValue;
+            self.firstChildCount = $$.childCount;
+            self.firstTwelfthChildChoice = $$.twelfthChildChoice;
+            self.firstTwelfthChildBoolean = $$.twelfthChildBoolean;
+            self.firstDSTransferSetShape = $$.dstTransferSetShape;
+            self.firstRaw = $$.raw;
+            self.firstIntegerValue = $$.integerValue;
+            self.firstFloatingValue = $$.floatingValue;
+        }
+    }
+} &size=length;
+
+public type WriteRequest = unit(length: uint64) {
+    var accessChoice: uint64 = 0;
+    var variableCount: uint64 = 0;
+    var dataCount: uint64 = 0;
+    var targetCount: uint64 = 0;
+    var targetCountKnown: bool = False;
+    var valueCount: uint64 = 0;
+    var dataNodeCount: uint64 = 0;
+    var firstDataChoice: uint64 = 0;
+    var firstDataBoolean: bool = False;
+    var firstDataChildCount: uint64 = 0;
+    var firstDataTwelfthChoice: uint64 = 0;
+    var firstDataTwelfthBoolean: bool = False;
+    var firstDataDSTransferSetShape: bool = False;
+    var firstDataRaw: bytes;
+    var firstDataIntegerValue: int64 = 0;
+    var firstDataFloatingValue: real = 0.0;
+    var targetScopes: vector<uint64>;
+    var targetDomains: vector<string>;
+    var targetNames: vector<string>;
+    var valueChoices: vector<uint64>;
+    var valueRaws: vector<bytes>;
+    var valueIntegerValues: vector<int64>;
+    var valueFloatingValues: vector<real>;
+    var valueBooleanValues: vector<bool>;
+    var valueStringValues: vector<string>;
+
+    access: VariableAccessSpecification {
+        self.accessChoice = $$.choice;
+        self.variableCount = $$.variableCount;
+        self.targetCount = $$.variableCount;
+        self.targetCountKnown = $$.choice == 0;
+        if (self.targetCountKnown) {
+            self.targetScopes = $$.memberScopes;
+            self.targetDomains = $$.memberDomains;
+            self.targetNames = $$.memberNames;
+        }
+    }
+    listIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.listIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.listIdentifier.first.constructed &&
+        self.listIdentifier.tagNumber == 0
+    );
+    listLength: ICCP_BER::DefiniteLength;
+    data: DataList(self.listLength.value) {
+        self.dataCount = $$.count;
+        self.valueCount = $$.count;
+        self.dataNodeCount = $$.totalNodes;
+        self.firstDataChoice = $$.firstChoice;
+        self.firstDataBoolean = $$.firstBoolean;
+        self.firstDataChildCount = $$.firstChildCount;
+        self.firstDataTwelfthChoice = $$.firstTwelfthChildChoice;
+        self.firstDataTwelfthBoolean = $$.firstTwelfthChildBoolean;
+        self.firstDataDSTransferSetShape = $$.firstDSTransferSetShape;
+        self.firstDataRaw = $$.firstRaw;
+        self.firstDataIntegerValue = $$.firstIntegerValue;
+        self.firstDataFloatingValue = $$.firstFloatingValue;
+        self.valueChoices = $$.choices;
+        self.valueRaws = $$.raws;
+        self.valueIntegerValues = $$.integerValues;
+        self.valueFloatingValues = $$.floatingValues;
+        self.valueBooleanValues = $$.booleanValues;
+        self.valueStringValues = $$.stringValues;
+    }
+
+    on %done {
+        if (self.dataCount == 0)
+            throw "MMS Write request Data list must not be empty";
+        if (self.targetCountKnown && self.targetCount != self.valueCount)
+            throw "MMS Write request target/value count mismatch";
+    }
+} &size=length;
+
+public type WriteResult = unit {
+    var success: bool = False;
+    var error: int64 = -1;
+
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 1
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0 -> failure: ICCP_BER::IntegerValue(self.length.value) {
+            if ($$.value < 0 || $$.value > 11)
+                throw "MMS Write data access error is out of range";
+            self.error = $$.value;
+        }
+        1 -> successValue: ICCP_BER::NullValue(self.length.value) {
+            self.success = True;
+        }
+    };
+};
+
+public type WriteResponse = unit(length: uint64) {
+    var count: uint64 = 0;
+    var successCount: uint64 = 0;
+    var failureCount: uint64 = 0;
+    var resultErrors: vector<int64>;
+    var resultSuccesses: vector<bool>;
+
+    results: WriteResult[] &eod foreach {
+        self.count += 1;
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS Write response exceeds configured element limit";
+        self.resultErrors.push_back($$.error);
+        self.resultSuccesses.push_back($$.success);
+        if ($$.success)
+            self.successCount += 1;
+        else
+            self.failureCount += 1;
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS Write response must not be empty";
+    }
+} &size=length;
+
+public type GetVariableAccessAttributesRequest = unit(length: uint64) {
+    var choice: uint64 = 0;
+    var value: bytes;
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+
+    field: ICCP_BER::RawTLV {
+        self.choice = $$.identifier.tagNumber;
+        self.value = $$.value;
+        if (
+            $$.identifier.first.class_ !=
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC ||
+            ! $$.identifier.first.constructed ||
+            $$.identifier.tagNumber > 1
+        )
+            throw "MMS variable attributes request choice is invalid";
+    }
+
+    name: BoundedObjectName(|self.value|) &parse-from=self.value
+        if (self.choice == 0) {
+        self.nameScope = $$.value.scope;
+        self.domainId = $$.value.domainId;
+        self.itemId = $$.value.itemId;
+    }
+
+    address: BoundedAddress(|self.value|) &parse-from=self.value
+        if (self.choice == 1);
+} &size=length;
+
+public type GetVariableAccessAttributesResponse = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var haveDeletable: bool = False;
+    var haveAddress: bool = False;
+    var haveType: bool = False;
+    var haveAccessControl: bool = False;
+    var haveMeaning: bool = False;
+    var deletableValue: bytes;
+    var addressValue: bytes;
+    var typeValue: bytes;
+    var accessControlValue: bytes;
+    var meaningValue: bytes;
+    var deletable: bool = False;
+    var typeChoice: uint64 = 0;
+    var typeConstructed: bool = False;
+    var typeSignedValue: int64 = 0;
+    var typeBooleanValue: bool = False;
+    var typeFormatWidth: int64 = 0;
+    var typeExponentWidth: int64 = 0;
+    var typeRaw: bytes;
+    var typePacked: bool = False;
+    var typeNumberOfElements: int64 = -1;
+    var typeComponentCount: uint64 = 0;
+    var typeNodeCount: uint64 = 0;
+    var typeMaximumDepth: uint64 = 0;
+    var typeUnresolvedNameCount: uint64 = 0;
+    var typeSignatureChoices: vector<uint64>;
+    var typeSignaturePrimary: vector<int64>;
+    var typeSignatureSecondary: vector<int64>;
+    var typeSignatureChildCounts: vector<uint64>;
+    var typeSignaturePacked: vector<bool>;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS variable attributes response exceeds configured element limit";
+
+        if (
+            ! self.haveDeletable &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveDeletable = True;
+            self.deletableValue = $$.value;
+        }
+        else if (
+            self.haveDeletable &&
+            ! self.haveAddress &&
+            ! self.haveType &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveAddress = True;
+            self.addressValue = $$.value;
+        }
+        else if (
+            self.haveDeletable &&
+            ! self.haveType &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveType = True;
+            self.typeValue = $$.value;
+        }
+        else if (
+            self.haveType &&
+            ! self.haveAccessControl &&
+            ! self.haveMeaning &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 3
+        ) {
+            self.haveAccessControl = True;
+            self.accessControlValue = $$.value;
+        }
+        else if (
+            self.haveType &&
+            ! self.haveMeaning &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 4
+        ) {
+            self.haveMeaning = True;
+            self.meaningValue = $$.value;
+        }
+        else
+            throw "MMS variable attributes response fields are invalid or out of order";
+    }
+
+    deletableField: ICCP_BER::BooleanValue(|self.deletableValue|)
+        &parse-from=self.deletableValue if (self.haveDeletable) {
+            self.deletable = $$.value;
+        }
+
+    address: BoundedAddress(|self.addressValue|)
+        &parse-from=self.addressValue
+        if (self.haveAddress);
+
+    typeDescription: TypeDescription &parse-from=self.typeValue
+        if (self.haveType) {
+            self.typeChoice = $$.choice;
+            self.typeConstructed = $$.constructed;
+            self.typeSignedValue = $$.signedValue;
+            self.typeBooleanValue = $$.booleanValue;
+            self.typeFormatWidth = $$.formatWidth;
+            self.typeExponentWidth = $$.exponentWidth;
+            self.typeRaw = $$.raw;
+            self.typePacked = $$.packed;
+            self.typeNumberOfElements = $$.numberOfElements;
+            self.typeComponentCount = $$.componentCount;
+            self.typeNodeCount = $$.nodeCount;
+            self.typeMaximumDepth = $$.maximumDepth;
+            self.typeUnresolvedNameCount = $$.unresolvedTypeNames;
+            self.typeSignatureChoices = $$.signatureChoices;
+            self.typeSignaturePrimary = $$.signaturePrimary;
+            self.typeSignatureSecondary = $$.signatureSecondary;
+            self.typeSignatureChildCounts = $$.signatureChildCounts;
+            self.typeSignaturePacked = $$.signaturePacked;
+        }
+
+    accessControl: IdentifierValue(|self.accessControlValue|)
+        &parse-from=self.accessControlValue if (self.haveAccessControl);
+
+    meaning: VisibleStringValue(|self.meaningValue|)
+        &parse-from=self.meaningValue if (self.haveMeaning);
+
+    on %done {
+        if (! self.haveDeletable || ! self.haveType)
+            throw "MMS variable attributes response is missing a mandatory field";
+    }
+} &size=length;
+
+public type ObjectNameList = unit(length: uint64) {
+    var count: uint64 = 0;
+    var firstScope: uint64 = 0;
+    var firstDomain: string;
+    var firstName: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+
+    names: ObjectName[] &eod foreach {
+        self.count += 1;
+        self.memberScopes.push_back($$.scope);
+        self.memberDomains.push_back($$.domainId);
+        self.memberNames.push_back($$.itemId);
+        if (self.count == 1) {
+            self.firstScope = $$.scope;
+            self.firstDomain = $$.domainId;
+            self.firstName = $$.itemId;
+        }
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS ObjectName list exceeds configured element limit";
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS ObjectName list must not be empty";
+    }
+} &size=length;
+
+public type DefineNamedVariableListRequest = unit(length: uint64) {
+    var nameScope: uint64 = 0;
+    var domainId: string;
+    var itemId: string;
+    var variableCount: uint64 = 0;
+    var firstVariableScope: uint64 = 0;
+    var firstVariableDomain: string;
+    var firstVariableName: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+    var memberAlternateAccessCounts: vector<uint64>;
+
+    name: ObjectName {
+        self.nameScope = $$.scope;
+        self.domainId = $$.domainId;
+        self.itemId = $$.itemId;
+    }
+    listIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.listIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.listIdentifier.first.constructed &&
+        self.listIdentifier.tagNumber == 0
+    );
+    listLength: ICCP_BER::DefiniteLength;
+    variables: VariableList(self.listLength.value) {
+        self.variableCount = $$.count;
+        self.firstVariableScope = $$.firstNameScope;
+        self.firstVariableDomain = $$.firstDomainId;
+        self.firstVariableName = $$.firstItemId;
+        self.memberScopes = $$.memberScopes;
+        self.memberDomains = $$.memberDomains;
+        self.memberNames = $$.memberNames;
+        self.memberAlternateAccessCounts =
+            $$.memberAlternateAccessCounts;
+    }
+} &size=length;
+
+public type GetNamedVariableListAttributesResponse = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var haveDeletable: bool = False;
+    var haveList: bool = False;
+    var haveAccessControl: bool = False;
+    var deletableValue: bytes;
+    var listValue: bytes;
+    var accessControlValue: bytes;
+    var deletable: bool = False;
+    var variableCount: uint64 = 0;
+    var firstVariableScope: uint64 = 0;
+    var firstVariableDomain: string;
+    var firstVariableName: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+    var memberAlternateAccessCounts: vector<uint64>;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS named variable list attributes exceeds configured element limit";
+
+        if (
+            ! self.haveDeletable &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveDeletable = True;
+            self.deletableValue = $$.value;
+        }
+        else if (
+            self.haveDeletable &&
+            ! self.haveList &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveList = True;
+            self.listValue = $$.value;
+        }
+        else if (
+            self.haveList &&
+            ! self.haveAccessControl &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveAccessControl = True;
+            self.accessControlValue = $$.value;
+        }
+        else
+            throw "MMS named variable list attributes fields are invalid or out of order";
+    }
+
+    deletableField: ICCP_BER::BooleanValue(|self.deletableValue|)
+        &parse-from=self.deletableValue if (self.haveDeletable) {
+            self.deletable = $$.value;
+        }
+
+    variables: VariableList(|self.listValue|, True)
+        &parse-from=self.listValue if (self.haveList) {
+            self.variableCount = $$.count;
+            self.firstVariableScope = $$.firstNameScope;
+            self.firstVariableDomain = $$.firstDomainId;
+            self.firstVariableName = $$.firstItemId;
+            self.memberScopes = $$.memberScopes;
+            self.memberDomains = $$.memberDomains;
+            self.memberNames = $$.memberNames;
+            self.memberAlternateAccessCounts =
+                $$.memberAlternateAccessCounts;
+        }
+
+    accessControl: IdentifierValue(|self.accessControlValue|)
+        &parse-from=self.accessControlValue if (self.haveAccessControl);
+
+    on %done {
+        if (! self.haveDeletable || ! self.haveList)
+            throw "MMS named variable list attributes is missing a mandatory field";
+    }
+} &size=length;
+
+public type DeleteNamedVariableListRequest = unit(length: uint64) {
+    var haveScope: bool = False;
+    var haveList: bool = False;
+    var haveDomain: bool = False;
+    var scopeValue: bytes;
+    var listValue: bytes;
+    var domainValue: bytes;
+    var scope: int64 = 0;
+    var nameCount: uint64 = 0;
+    var domainId: string;
+    var firstNameScope: uint64 = 0;
+    var firstNameDomain: string;
+    var firstName: string;
+    var memberScopes: vector<uint64>;
+    var memberDomains: vector<string>;
+    var memberNames: vector<string>;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveScope &&
+            ! self.haveList &&
+            ! self.haveDomain &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveScope = True;
+            self.scopeValue = $$.value;
+        }
+        else if (
+            ! self.haveList &&
+            ! self.haveDomain &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveList = True;
+            self.listValue = $$.value;
+        }
+        else if (
+            ! self.haveDomain &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveDomain = True;
+            self.domainValue = $$.value;
+        }
+        else
+            throw "MMS DeleteNamedVariableList fields are invalid or out of order";
+    }
+
+    scopeField: ICCP_BER::IntegerValue(|self.scopeValue|)
+        &parse-from=self.scopeValue if (self.haveScope) {
+            if ($$.value < 0 || $$.value > 3)
+                throw "MMS delete scope is out of range";
+            self.scope = $$.value;
+        }
+
+    names: ObjectNameList(|self.listValue|)
+        &parse-from=self.listValue if (self.haveList) {
+            self.nameCount = $$.count;
+            self.firstNameScope = $$.firstScope;
+            self.firstNameDomain = $$.firstDomain;
+            self.firstName = $$.firstName;
+            self.memberScopes = $$.memberScopes;
+            self.memberDomains = $$.memberDomains;
+            self.memberNames = $$.memberNames;
+        }
+
+    domain: IdentifierValue(|self.domainValue|)
+        &parse-from=self.domainValue if (self.haveDomain) {
+            self.domainId = $$.value;
+        }
+
+    on %done {
+        if (
+            (self.scope == 0 && (! self.haveList || self.haveDomain)) ||
+            (self.scope == 1 && (self.haveList || self.haveDomain)) ||
+            (self.scope == 2 && (! self.haveDomain || self.haveList)) ||
+            (self.scope == 3 && (self.haveList || self.haveDomain))
+        )
+            throw "MMS DeleteNamedVariableList scope has invalid selectors";
+    }
+} &size=length;
+
+public type DeleteNamedVariableListResponse = unit(length: uint64) {
+    var haveMatched: bool = False;
+    var haveDeleted: bool = False;
+    var matchedValue: bytes;
+    var deletedValue: bytes;
+    var numberMatched: int64 = 0;
+    var numberDeleted: int64 = 0;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveMatched &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveMatched = True;
+            self.matchedValue = $$.value;
+        }
+        else if (
+            self.haveMatched &&
+            ! self.haveDeleted &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveDeleted = True;
+            self.deletedValue = $$.value;
+        }
+        else
+            throw "MMS DeleteNamedVariableList response fields are invalid or out of order";
+    }
+
+    matched: MMSUnsigned32Value(|self.matchedValue|)
+        &parse-from=self.matchedValue if (self.haveMatched) {
+            self.numberMatched = $$.value.value;
+        }
+
+    deleted: MMSUnsigned32Value(|self.deletedValue|)
+        &parse-from=self.deletedValue if (self.haveDeleted) {
+            self.numberDeleted = $$.value.value;
+        }
+
+    on %done {
+        if (! self.haveMatched || ! self.haveDeleted)
+            throw "MMS DeleteNamedVariableList response is missing a mandatory field";
+    }
+} &size=length;
+
+public type InformationReport = unit(length: uint64) {
+    var accessChoice: uint64 = 0;
+    var variableCount: uint64 = 0;
+    var resultCount: uint64 = 0;
+    var failureCount: uint64 = 0;
+    var firstVariableScope: uint64 = 0;
+    var firstVariableDomain: string;
+    var firstVariableName: string;
+    var firstResultChoice: uint64 = 0;
+    var firstResultRaw: bytes;
+    var firstResultComponentIntegerCount: uint64 = 0;
+    var firstResultFirstInteger: int64 = 0;
+    var firstResultSecondInteger: int64 = 0;
+    var firstResultComponentCount: uint64 = 0;
+    var firstResultFirstChoice: uint64 = 0;
+    var firstResultSecondChoice: uint64 = 0;
+    var firstResultThirdChoice: uint64 = 0;
+    var firstResultIntegerValue: int64 = 0;
+    var firstResultSecondIntegerValue: int64 = 0;
+    var firstResultFloatingValue: real = 0.0;
+    var firstResultFirstRaw: bytes;
+    var firstResultSecondRaw: bytes;
+    var firstResultFlagsRaw: bytes;
+    var firstResultThirdRaw: bytes;
+    var firstResultTimestampValue: int64 = 0;
+    var resultChoices: vector<uint64>;
+    var resultErrors: vector<int64>;
+    var resultRaws: vector<bytes>;
+    var variableScopes: vector<uint64>;
+    var variableDomains: vector<string>;
+    var variableNames: vector<string>;
+    var resultIntegerValues: vector<int64>;
+    var resultFloatingValues: vector<real>;
+    var resultBooleanValues: vector<bool>;
+    var resultStringValues: vector<string>;
+
+    access: VariableAccessSpecification {
+        self.accessChoice = $$.choice;
+        self.variableCount = $$.variableCount;
+        # A named-list report identifies the list, not the member associated
+        # with the first result. Only explicit variable lists are paired here.
+        if ($$.choice == 0) {
+            self.firstVariableScope = $$.nameScope;
+            self.firstVariableDomain = $$.domainId;
+            self.firstVariableName = $$.itemId;
+            self.variableScopes = $$.memberScopes;
+            self.variableDomains = $$.memberDomains;
+            self.variableNames = $$.memberNames;
+        }
+    }
+    listIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.listIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.listIdentifier.first.constructed &&
+        self.listIdentifier.tagNumber == 0
+    );
+    listLength: ICCP_BER::DefiniteLength;
+    results: AccessResultList(self.listLength.value) {
+        self.resultCount = $$.count;
+        self.failureCount = $$.failureCount;
+        self.firstResultChoice = $$.firstChoice;
+        self.firstResultRaw = $$.firstRaw;
+        self.firstResultComponentIntegerCount =
+            $$.firstComponentIntegerCount;
+        self.firstResultFirstInteger = $$.firstComponentInteger;
+        self.firstResultSecondInteger = $$.secondComponentInteger;
+        self.firstResultComponentCount = $$.firstComponentCount;
+        self.firstResultFirstChoice = $$.firstComponentChoice;
+        self.firstResultSecondChoice = $$.secondComponentChoice;
+        self.firstResultThirdChoice = $$.thirdComponentChoice;
+        self.firstResultIntegerValue = $$.firstComponentIntegerValue;
+        self.firstResultSecondIntegerValue =
+            $$.secondComponentIntegerValue;
+        self.firstResultFloatingValue = $$.firstComponentFloatingValue;
+        self.firstResultFirstRaw = $$.firstComponentRaw;
+        self.firstResultSecondRaw = $$.secondComponentRaw;
+        self.firstResultFlagsRaw = $$.secondComponentRaw;
+        self.firstResultThirdRaw = $$.thirdComponentRaw;
+        self.firstResultTimestampValue = $$.thirdComponentIntegerValue;
+        self.resultChoices = $$.resultChoices;
+        self.resultErrors = $$.resultErrors;
+        self.resultRaws = $$.resultRaws;
+        self.resultIntegerValues = $$.resultIntegerValues;
+        self.resultFloatingValues = $$.resultFloatingValues;
+        self.resultBooleanValues = $$.resultBooleanValues;
+        self.resultStringValues = $$.resultStringValues;
+
+        if (self.firstResultFirstChoice == 4) {
+            self.firstResultFlagsRaw = $$.firstComponentRaw;
+            self.firstResultTimestampValue = $$.firstComponentInteger;
+        }
+        else if (
+            self.firstResultComponentCount == 3 &&
+            (self.firstResultFirstChoice == 5 ||
+             self.firstResultFirstChoice == 7) &&
+            self.firstResultSecondChoice == 5 &&
+            self.firstResultThirdChoice == 4
+        ) {
+            self.firstResultFlagsRaw = $$.thirdComponentRaw;
+            self.firstResultTimestampValue =
+                $$.secondComponentIntegerValue;
+        }
+    }
+
+    on %done {
+        if (
+            self.accessChoice == 0 &&
+            self.variableCount != self.resultCount
+        )
+            throw "MMS InformationReport variable/result count mismatch";
+    }
+} &size=length;
+
+public type EventActionResult = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS EventNotification action result exceeds configured element limit";
+    }
+
+    on %done {
+        if (self.fieldCount == 0)
+            throw "MMS EventNotification action result must not be empty";
+    }
+} &size=length;
+
+public type EventNotification = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveEnrollmentName: bool = False;
+    var haveConditionName: bool = False;
+    var haveSeverity: bool = False;
+    var haveCurrentState: bool = False;
+    var haveTransitionTime: bool = False;
+    var haveNotificationLost: bool = False;
+    var haveAlarmAcknowledgmentRule: bool = False;
+    var haveActionResult: bool = False;
+    var enrollmentRaw: bytes;
+    var conditionRaw: bytes;
+    var severityRaw: bytes;
+    var currentStateRaw: bytes;
+    var transitionTimeRaw: bytes;
+    var notificationLostRaw: bytes;
+    var alarmAcknowledgmentRuleRaw: bytes;
+    var actionResultRaw: bytes;
+    var enrollmentScope: uint64 = 0;
+    var enrollmentDomain: string;
+    var enrollmentName: string;
+    var conditionScope: uint64 = 0;
+    var conditionDomain: string;
+    var conditionName: string;
+    var severity: int64 = -1;
+    var currentState: int64 = -1;
+    var transitionTimeChoice: uint64 = 0;
+    var transitionTimeValueRaw: bytes;
+    var transitionTimeSequenceIdentifier: int64 = -1;
+    var notificationLost: bool = False;
+    var alarmAcknowledgmentRule: int64 = -1;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS EventNotification exceeds configured element limit";
+        if (
+            $$.identifier.first.class_ !=
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC ||
+            $$.identifier.tagNumber > 8 ||
+            $$.identifier.tagNumber == 5 ||
+            (self.fieldCount > 1 &&
+             $$.identifier.tagNumber <= self.lastTag)
+        )
+            throw "MMS EventNotification fields are invalid or out of order";
+        self.lastTag = $$.identifier.tagNumber;
+
+        if (
+            ($$.identifier.tagNumber == 0 ||
+             $$.identifier.tagNumber == 1 ||
+             $$.identifier.tagNumber == 4 ||
+             $$.identifier.tagNumber == 8) !=
+            $$.identifier.first.constructed
+        )
+            throw "MMS EventNotification field has invalid primitive form";
+
+        switch ($$.identifier.tagNumber) {
+            case 0: {
+                self.haveEnrollmentName = True;
+                self.enrollmentRaw = $$.value;
+            }
+            case 1: {
+                self.haveConditionName = True;
+                self.conditionRaw = $$.value;
+            }
+            case 2: {
+                self.haveSeverity = True;
+                self.severityRaw = $$.value;
+            }
+            case 3: {
+                self.haveCurrentState = True;
+                self.currentStateRaw = $$.value;
+            }
+            case 4: {
+                self.haveTransitionTime = True;
+                self.transitionTimeRaw = $$.value;
+            }
+            case 6: {
+                self.haveNotificationLost = True;
+                self.notificationLostRaw = $$.value;
+            }
+            case 7: {
+                self.haveAlarmAcknowledgmentRule = True;
+                self.alarmAcknowledgmentRuleRaw = $$.value;
+            }
+            case 8: {
+                self.haveActionResult = True;
+                self.actionResultRaw = $$.value;
+            }
+            default: { }
+        }
+    }
+
+    enrollment: BoundedObjectName(|self.enrollmentRaw|)
+        &parse-from=self.enrollmentRaw if (self.haveEnrollmentName) {
+            self.enrollmentScope = $$.value.scope;
+            self.enrollmentDomain = $$.value.domainId;
+            self.enrollmentName = $$.value.itemId;
+        }
+    condition: BoundedObjectName(|self.conditionRaw|)
+        &parse-from=self.conditionRaw if (self.haveConditionName) {
+            self.conditionScope = $$.value.scope;
+            self.conditionDomain = $$.value.domainId;
+            self.conditionName = $$.value.itemId;
+        }
+    severityValue: ICCP_BER::IntegerValue(|self.severityRaw|)
+        &parse-from=self.severityRaw if (self.haveSeverity) {
+            if ($$.value < 0 || $$.value > 127)
+                throw "MMS EventNotification severity is out of range";
+            self.severity = $$.value;
+        }
+    currentStateValue: ICCP_BER::IntegerValue(|self.currentStateRaw|)
+        &parse-from=self.currentStateRaw if (self.haveCurrentState) {
+            if ($$.value < 0 || $$.value > 2)
+                throw "MMS EventNotification current state is out of range";
+            self.currentState = $$.value;
+        }
+    transitionTime: BoundedEventTime(|self.transitionTimeRaw|)
+        &parse-from=self.transitionTimeRaw if (self.haveTransitionTime) {
+            self.transitionTimeChoice = $$.value.choice;
+            self.transitionTimeValueRaw = $$.value.raw;
+            self.transitionTimeSequenceIdentifier =
+                $$.value.sequenceIdentifier;
+        }
+    notificationLostValue: ICCP_BER::BooleanValue(
+        |self.notificationLostRaw|)
+        &parse-from=self.notificationLostRaw if (self.haveNotificationLost) {
+            self.notificationLost = $$.value;
+        }
+    alarmAcknowledgmentRuleValue: ICCP_BER::IntegerValue(
+        |self.alarmAcknowledgmentRuleRaw|)
+        &parse-from=self.alarmAcknowledgmentRuleRaw
+        if (self.haveAlarmAcknowledgmentRule) {
+            if ($$.value < 0 || $$.value > 3)
+                throw "MMS EventNotification acknowledgement rule is out of range";
+            self.alarmAcknowledgmentRule = $$.value;
+        }
+    actionResult: EventActionResult(|self.actionResultRaw|)
+        &parse-from=self.actionResultRaw if (self.haveActionResult);
+
+    on %done {
+        if (
+            ! self.haveEnrollmentName || ! self.haveConditionName ||
+            ! self.haveSeverity || ! self.haveTransitionTime
+        )
+            throw "MMS EventNotification is missing mandatory fields";
+    }
+} &size=length;
+
+public type Unconfirmed = unit(length: uint64) {
+    var serviceTag: uint64 = 0;
+    var serviceConstructed: bool = False;
+    var serviceValue: bytes;
+    var haveService: bool = False;
+    var haveDetail: bool = False;
+
+    fields: ICCP_BER::RawTLV[] &eod foreach {
+        if (
+            ! self.haveService &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC
+        ) {
+            self.haveService = True;
+            self.serviceTag = $$.identifier.tagNumber;
+            self.serviceConstructed = $$.identifier.first.constructed;
+            self.serviceValue = $$.value;
+        }
+        else if (
+            self.haveService &&
+            ! self.haveDetail &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 79
+        )
+            self.haveDetail = True;
+        else
+            throw "MMS unconfirmed fields are invalid or out of order";
+    }
+
+    on %done {
+        if (! self.haveService)
+            throw "MMS unconfirmed PDU is missing its service";
+    }
+} &size=length;
+
+public type InitiateDetailField = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        (self.identifier.tagNumber > 5 ||
+         ! self.identifier.first.constructed)
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var integerValue: int64 = 0;
+    var unusedBits: uint8 = 0;
+    var bits: bytes;
+
+    switch (self.identifier.tagNumber) {
+        0 -> version: MMSInteger16Value(self.length.value) {
+            self.integerValue = $$.value.value;
+        }
+        1,
+        2,
+        3,
+        4 -> options: ICCP_BER::BitStringValue(self.length.value) {
+            self.unusedBits = $$.unusedBits;
+            self.bits = $$.value;
+        }
+        5 -> privilege: VisibleStringValue(self.length.value);
+        * -> extension: bytes &size=self.length.value;
+    };
+
+    : void &requires=(
+        self.identifier.tagNumber != 1 ||
+        (self.unusedBits == 6 && |self.bits| == 3)
+    );
+    : void &requires=(
+        self.identifier.tagNumber != 2 ||
+        (self.unusedBits == 3 && |self.bits| == 12)
+    );
+    : void &requires=(
+        self.identifier.tagNumber != 3 ||
+        (self.unusedBits == 1 && |self.bits| == 3)
+    );
+    : void &requires=(
+        self.identifier.tagNumber != 4 ||
+        (self.unusedBits == 5 && |self.bits| == 1)
+    );
+};
+
+public type InitiateDetail = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveTag: bool = False;
+    var haveVersion: bool = False;
+    var haveParameterCbb: bool = False;
+    var haveServices: bool = False;
+    var version: int64 = 0;
+    var parameterCbbUnusedBits: uint8 = 0;
+    var parameterCbb: bytes;
+    var servicesUnusedBits: uint8 = 0;
+    var services: bytes;
+
+    fields: InitiateDetailField[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS initiate-detail exceeds configured element limit";
+        if (self.haveTag && $$.identifier.tagNumber <= self.lastTag)
+            throw "MMS initiate-detail fields are duplicated or out of order";
+
+        self.lastTag = $$.identifier.tagNumber;
+        self.haveTag = True;
+
+        switch ($$.identifier.tagNumber) {
+            case 0: {
+                self.haveVersion = True;
+                self.version = $$.integerValue;
+            }
+            case 1: {
+                self.haveParameterCbb = True;
+                self.parameterCbbUnusedBits = $$.unusedBits;
+                self.parameterCbb = $$.bits;
+            }
+            case 2: {
+                self.haveServices = True;
+                self.servicesUnusedBits = $$.unusedBits;
+                self.services = $$.bits;
+            }
+            default: { }
+        }
+    }
+
+    on %done {
+        if (
+            ! self.haveVersion ||
+            ! self.haveParameterCbb ||
+            ! self.haveServices
+        )
+            throw "MMS initiate-detail is missing a mandatory field";
+    }
+} &size=length;
+
+public type InitiateField = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        (
+            (
+                self.identifier.tagNumber == 4 &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                self.identifier.tagNumber < 4 &&
+                ! self.identifier.first.constructed
+            ) || self.identifier.tagNumber > 4
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var integerValue: int64 = 0;
+
+    switch (self.identifier.tagNumber) {
+        4 -> detail: InitiateDetail(self.length.value);
+        0 -> localDetail: MMSInteger32Value(self.length.value) {
+            self.integerValue = $$.value.value;
+        }
+        1,
+        2 -> outstanding: MMSInteger16Value(self.length.value) {
+            self.integerValue = $$.value.value;
+        }
+        3 -> nesting: MMSInteger8Value(self.length.value) {
+            self.integerValue = $$.value.value;
+        }
+        * -> extension: bytes &size=self.length.value;
+    };
+};
+
+public type Initiate = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveTag: bool = False;
+    var haveMaxCalling: bool = False;
+    var haveMaxCalled: bool = False;
+    var haveNestingLevel: bool = False;
+    var haveDetail: bool = False;
+    var localDetail: int64 = -1;
+    var maxCalling: int64 = 0;
+    var maxCalled: int64 = 0;
+    var nestingLevel: int64 = -1;
+    var version: int64 = 0;
+    var parameterCbbUnusedBits: uint8 = 0;
+    var parameterCbb: bytes;
+    var servicesUnusedBits: uint8 = 0;
+    var services: bytes;
+
+    fields: InitiateField[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS initiate PDU exceeds configured element limit";
+        if (self.haveTag && $$.identifier.tagNumber <= self.lastTag)
+            throw "MMS initiate fields are duplicated or out of order";
+
+        self.lastTag = $$.identifier.tagNumber;
+        self.haveTag = True;
+
+        switch ($$.identifier.tagNumber) {
+            case 0: {
+                self.localDetail = $$.integerValue;
+            }
+            case 1: {
+                self.haveMaxCalling = True;
+                self.maxCalling = $$.integerValue;
+            }
+            case 2: {
+                self.haveMaxCalled = True;
+                self.maxCalled = $$.integerValue;
+            }
+            case 3: {
+                self.haveNestingLevel = True;
+                self.nestingLevel = $$.integerValue;
+            }
+            case 4: {
+                self.haveDetail = True;
+                self.version = $$.detail.version;
+                self.parameterCbbUnusedBits =
+                    $$.detail.parameterCbbUnusedBits;
+                self.parameterCbb = $$.detail.parameterCbb;
+                self.servicesUnusedBits =
+                    $$.detail.servicesUnusedBits;
+                self.services = $$.detail.services;
+            }
+            default: { }
+        }
+    }
+
+    on %done {
+        if (
+            ! self.haveMaxCalling ||
+            ! self.haveMaxCalled ||
+            ! self.haveDetail
+        )
+            throw "MMS initiate PDU is missing a mandatory field";
+
+        if (
+            self.maxCalling < 0 ||
+            self.maxCalled < 0 ||
+            (self.haveNestingLevel && self.nestingLevel < 0)
+        )
+            throw "MMS initiate PDU contains a negative negotiation value";
+
+        # ISO 9506-1 requires the proposed/negotiated minor version to be at
+        # least one. Local Detail is intentionally not included above: its
+        # Integer32 content is explicitly a local matter.
+        if (self.version < 1)
+            throw "MMS initiate PDU version is out of range";
+    }
+} &size=length;
+
+function errorClassValueIsValid(tag: uint64, value: int64): bool {
+    if (tag == 12)
+        return True;
+
+    if (value < 0)
+        return False;
+
+    switch (tag) {
+        case 0, 1:
+            return value <= 4;
+        case 2:
+            return value <= 6;
+        case 3:
+            return value <= 5;
+        case 4:
+            return value <= 5 && value != 3;
+        case 5:
+            return value <= 3;
+        case 6, 9:
+            return value <= 1;
+        case 7:
+            return value <= 4;
+        case 8:
+            return value == 0 || (value >= 3 && value <= 7);
+        case 10:
+            return value <= 2;
+        case 11:
+            return value <= 9;
+        default:
+            return False;
+    }
+}
+
+function rejectReasonValueIsValid(tag: uint64, value: int64): bool {
+    if (value < 0)
+        return False;
+
+    switch (tag) {
+        case 1:
+            return value <= 9 && value != 7;
+        case 2:
+            return value <= 6 && value != 4;
+        case 3, 4:
+            return value <= 4;
+        case 5:
+            return value <= 2;
+        case 6, 7, 9, 10:
+            return value <= 1;
+        case 8:
+            return value <= 3;
+        case 11:
+            return value <= 2;
+        default:
+            return False;
+    }
+}
+
+public type ErrorClass = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 12
+    );
+    valueLength: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::IntegerValue(self.valueLength.value);
+    : void &requires=errorClassValueIsValid(
+        self.identifier.tagNumber,
+        self.value.value
+    );
+} &size=length;
+
+# ServiceSpecificInfo is an explicitly tagged CHOICE. Its complete alternative
+# set depends on negotiated MMS CBBs, but the wrapper must still contain exactly
+# one bounded context-specific alternative before the ServiceError is trusted.
+public type ServiceSpecificInfo = unit(length: uint64) {
+    value: ICCP_BER::RawTLV;
+    : void &requires=(
+        self.value.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.value.identifier.tagNumber <= 11
+    );
+} &size=length;
+
+public type ServiceErrorField = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 3 &&
+        (
+            (
+                (self.identifier.tagNumber == 0 ||
+                 self.identifier.tagNumber == 3) &&
+                self.identifier.first.constructed
+            ) ||
+            (
+                (self.identifier.tagNumber == 1 ||
+                 self.identifier.tagNumber == 2) &&
+                ! self.identifier.first.constructed
+            )
+        )
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var integerValue: int64 = 0;
+    var description: string;
+
+    switch (self.identifier.tagNumber) {
+        0 -> errorClass: ErrorClass(self.length.value);
+        1 -> additionalCode: ICCP_BER::IntegerValue(self.length.value) {
+            self.integerValue = $$.value;
+        }
+        2 -> additionalDescription: VisibleStringValue(self.length.value) {
+            self.description = $$.value;
+        }
+        3 -> serviceSpecific: ServiceSpecificInfo(self.length.value);
+    };
+};
+
+public type ServiceError = unit(length: uint64) {
+    var fieldCount: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveTag: bool = False;
+    var haveErrorClass: bool = False;
+    var errorClass: uint64 = 0;
+    var errorCode: int64 = 0;
+    var haveAdditionalCode: bool = False;
+    var additionalCode: int64 = -1;
+    var additionalDescription: string;
+    var serviceSpecificLength: uint64 = 0;
+    var haveServiceSpecificInfo: bool = False;
+
+    fields: ServiceErrorField[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.haveTag && $$.identifier.tagNumber <= self.lastTag)
+            throw "MMS service-error fields are duplicated or out of order";
+
+        self.lastTag = $$.identifier.tagNumber;
+        self.haveTag = True;
+
+        switch ($$.identifier.tagNumber) {
+            case 0: {
+                self.haveErrorClass = True;
+                self.errorClass = $$.errorClass.identifier.tagNumber;
+                self.errorCode = $$.errorClass.value.value;
+            }
+            case 1: {
+                self.haveAdditionalCode = True;
+                self.additionalCode = $$.integerValue;
+            }
+            case 2: {
+                self.additionalDescription = $$.description;
+            }
+            case 3: {
+                self.haveServiceSpecificInfo = True;
+                self.serviceSpecificLength = $$.length.value;
+            }
+        }
+    }
+
+    on %done {
+        if (! self.haveErrorClass)
+            throw "MMS service-error is missing error-class";
+    }
+} &size=length;
+
+public type InvokeID = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: MMSUnsigned32Value(self.length.value);
+};
+
+public type ModifierList = unit(length: uint64) {
+    var count: uint64 = 0;
+
+    modifiers: ICCP_BER::RawTLV[] &eod foreach {
+        self.count += 1;
+        if (self.count > ICCP_BER::MAX_ELEMENT_COUNT)
+            throw "MMS modifier list exceeds configured element limit";
+    }
+
+    on %done {
+        if (self.count == 0)
+            throw "MMS modifier list must not be empty";
+    }
+} &size=length;
+
+public type ConfirmedRequest = unit(length: uint64) {
+    var elementCount: uint64 = 0;
+    var haveModifierList: bool = False;
+    var haveService: bool = False;
+    var haveDetail: bool = False;
+    var modifierValue: bytes;
+    var modifierCount: uint64 = 0;
+    var serviceTag: uint64 = 0;
+    var serviceConstructed: bool = False;
+    var serviceValue: bytes;
+
+    invokeId: InvokeID;
+
+    elements: ICCP_BER::RawTLV[] &eod foreach {
+        self.elementCount += 1;
+
+        if (
+            ! self.haveService &&
+            ! self.haveModifierList &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 16
+        ) {
+            self.haveModifierList = True;
+            self.modifierValue = $$.value;
+        }
+        else if (
+            ! self.haveService &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC
+        ) {
+            self.haveService = True;
+            self.serviceTag = $$.identifier.tagNumber;
+            self.serviceConstructed = $$.identifier.first.constructed;
+            self.serviceValue = $$.value;
+        }
+        else if (
+            self.haveService &&
+            ! self.haveDetail &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 79
+        )
+            self.haveDetail = True;
+        else
+            throw "MMS confirmed-request fields are invalid or out of order";
+    }
+
+    modifiers: ModifierList(|self.modifierValue|)
+        &parse-from=self.modifierValue
+        if (self.haveModifierList) {
+            self.modifierCount = $$.count;
+        }
+
+    on %done {
+        if (! self.haveService)
+            throw "MMS confirmed-request is missing service request";
+    }
+} &size=length;
+
+public type ConfirmedResponse = unit(length: uint64) {
+    var elementCount: uint64 = 0;
+    var haveService: bool = False;
+    var haveDetail: bool = False;
+    var serviceTag: uint64 = 0;
+    var serviceConstructed: bool = False;
+    var serviceValue: bytes;
+
+    invokeId: InvokeID;
+
+    elements: ICCP_BER::RawTLV[] &eod foreach {
+        self.elementCount += 1;
+
+        if (
+            ! self.haveService &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC
+        ) {
+            self.haveService = True;
+            self.serviceTag = $$.identifier.tagNumber;
+            self.serviceConstructed = $$.identifier.first.constructed;
+            self.serviceValue = $$.value;
+        }
+        else if (
+            self.haveService &&
+            ! self.haveDetail &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 79
+        )
+            self.haveDetail = True;
+        else
+            throw "MMS confirmed-response fields are invalid or out of order";
+    }
+
+    on %done {
+        if (! self.haveService)
+            throw "MMS confirmed-response is missing service response";
+    }
+} &size=length;
+
+public type ConfirmedError = unit(length: uint64) {
+    var elementCount: uint64 = 0;
+    var haveInvokeId: bool = False;
+    var haveModifierPosition: bool = False;
+    var haveServiceError: bool = False;
+    var invokeIdValue: bytes;
+    var invokeId: int64 = -1;
+    var modifierPosition: int64 = -1;
+    var modifierPositionValue: bytes;
+    var serviceErrorValue: bytes;
+    var errorClass: uint64 = 0;
+    var errorCode: int64 = 0;
+    var haveAdditionalCode: bool = False;
+    var additionalCode: int64 = -1;
+    var additionalDescription: string;
+    var haveServiceSpecificInfo: bool = False;
+
+    elements: ICCP_BER::RawTLV[] &eod foreach {
+        self.elementCount += 1;
+
+        if (
+            ! self.haveInvokeId &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveInvokeId = True;
+            self.invokeIdValue = $$.value;
+        }
+        else if (
+            self.haveInvokeId &&
+            ! self.haveModifierPosition &&
+            ! self.haveServiceError &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 1
+        ) {
+            self.haveModifierPosition = True;
+            self.modifierPositionValue = $$.value;
+        }
+        else if (
+            ! self.haveServiceError &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 2
+        ) {
+            self.haveServiceError = True;
+            self.serviceErrorValue = $$.value;
+        }
+        else
+            throw "MMS confirmed-error fields are invalid or out of order";
+    }
+
+    serviceError: ServiceError(|self.serviceErrorValue|)
+        &parse-from=self.serviceErrorValue
+        if (self.haveServiceError) {
+            self.errorClass = $$.errorClass;
+            self.errorCode = $$.errorCode;
+            self.haveAdditionalCode = $$.haveAdditionalCode;
+            self.additionalCode = $$.additionalCode;
+            self.additionalDescription = $$.additionalDescription;
+            self.haveServiceSpecificInfo = $$.haveServiceSpecificInfo;
+        }
+
+    decodedModifierPosition: MMSUnsigned32Value(
+        |self.modifierPositionValue|
+    ) &parse-from=self.modifierPositionValue
+        if (self.haveModifierPosition) {
+            self.modifierPosition = $$.value.value;
+        }
+
+    decodedInvokeId: MMSUnsigned32Value(|self.invokeIdValue|)
+        &parse-from=self.invokeIdValue
+        if (self.haveInvokeId) {
+            self.invokeId = $$.value.value;
+        }
+
+    on %done {
+        if (! self.haveInvokeId)
+            throw "MMS confirmed-error is missing invoke ID";
+        if (! self.haveServiceError)
+            throw "MMS confirmed-error is missing service-error";
+        if (self.haveModifierPosition && self.haveServiceSpecificInfo)
+            throw "MMS confirmed-error modifier position conflicts with service-specific information";
+    }
+} &size=length;
+
+public type Reject = unit(length: uint64) {
+    var elementCount: uint64 = 0;
+    var haveInvokeId: bool = False;
+    var haveReason: bool = False;
+    var invokeIdValue: bytes;
+    var reasonValue: bytes;
+    var invokeId: int64 = -1;
+    var reasonTag: uint64 = 0;
+    var reason: int64 = -1;
+
+    elements: ICCP_BER::RawTLV[] &eod foreach {
+        self.elementCount += 1;
+
+        if (
+            ! self.haveInvokeId &&
+            ! self.haveReason &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber == 0
+        ) {
+            self.haveInvokeId = True;
+            self.invokeIdValue = $$.value;
+        }
+        else if (
+            ! self.haveReason &&
+            $$.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            ! $$.identifier.first.constructed &&
+            $$.identifier.tagNumber >= 1 &&
+            $$.identifier.tagNumber <= 11
+        ) {
+            self.haveReason = True;
+            self.reasonTag = $$.identifier.tagNumber;
+            self.reasonValue = $$.value;
+        }
+        else
+            throw "MMS reject fields are invalid or out of order";
+    }
+
+    decodedInvokeId: MMSUnsigned32Value(|self.invokeIdValue|)
+        &parse-from=self.invokeIdValue
+        if (self.haveInvokeId) {
+            self.invokeId = $$.value.value;
+        }
+
+    decodedReason: ICCP_BER::IntegerValue(|self.reasonValue|)
+        &parse-from=self.reasonValue
+        if (self.haveReason) {
+            self.reason = $$.value;
+        }
+
+    on %done {
+        if (! self.haveReason)
+            throw "MMS reject is missing reject reason";
+        if (! rejectReasonValueIsValid(self.reasonTag, self.reason))
+            throw "MMS reject reason is out of range";
+    }
+} &size=length;
+
+public type CancelError = unit(length: uint64) {
+    var errorClass: uint64 = 0;
+    var errorCode: int64 = 0;
+    var haveAdditionalCode: bool = False;
+    var additionalCode: int64 = -1;
+    var additionalDescription: string;
+    var haveServiceSpecificInfo: bool = False;
+
+    invokeIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.invokeIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.invokeIdentifier.first.constructed &&
+        self.invokeIdentifier.tagNumber == 0
+    );
+    invokeLength: ICCP_BER::DefiniteLength;
+    invokeId: MMSUnsigned32Value(self.invokeLength.value);
+    serviceIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.serviceIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.serviceIdentifier.first.constructed &&
+        self.serviceIdentifier.tagNumber == 1
+    );
+    serviceLength: ICCP_BER::DefiniteLength;
+    serviceError: ServiceError(self.serviceLength.value) {
+        self.errorClass = $$.errorClass;
+        self.errorCode = $$.errorCode;
+        self.haveAdditionalCode = $$.haveAdditionalCode;
+        self.additionalCode = $$.additionalCode;
+        self.additionalDescription = $$.additionalDescription;
+        self.haveServiceSpecificInfo = $$.haveServiceSpecificInfo;
+    }
+} &size=length;
+
+# Standalone MMSpdu entry point used both by ACSE dispatch and focused tests.
+# Every recognized alternative remains bounded even before its semantic
+# decoder is implemented.
+public type MMSpdu = unit {
+    var pduType: ICCP_MMS_TYPES::TopLevelPDU =
+        ICCP_MMS_TYPES::TopLevelPDU::UNKNOWN;
+    var recognized: bool = False;
+    var semanticDecoded: bool = False;
+    var bodyLength: uint64 = 0;
+    var localDetail: int64 = -1;
+    var maxCalling: int64 = 0;
+    var maxCalled: int64 = 0;
+    var nestingLevel: int64 = -1;
+    var version: int64 = 0;
+    var parameterCbbUnusedBits: uint8 = 0;
+    var parameterCbb: bytes;
+    var servicesUnusedBits: uint8 = 0;
+    var services: bytes;
+    var errorClass: uint64 = 0;
+    var errorCode: int64 = 0;
+    var additionalCodePresent: bool = False;
+    var additionalCode: int64 = -1;
+    var additionalDescription: string;
+    var invokeId: int64 = -1;
+    var modifierCount: uint64 = 0;
+    var modifierPosition: int64 = -1;
+    var serviceTag: uint64 = 0;
+    var serviceConstructed: bool = False;
+    var serviceBody: bytes;
+    var rejectReasonTag: uint64 = 0;
+    var rejectReason: int64 = -1;
+    var objectClassChoice: uint64 = 0;
+    var objectClass: int64 = -1;
+    var objectScope: uint64 = 0;
+    var objectDomain: string;
+    var continueAfter: string;
+    var identifierCount: uint64 = 0;
+    var firstIdentifier: string;
+    var getNameListIdentifiers: vector<string>;
+    var moreFollows: bool = True;
+    var identifyVendorRaw: bytes;
+    var identifyModelRaw: bytes;
+    var identifyRevisionRaw: bytes;
+    var identifyVendorName: string;
+    var identifyModelName: string;
+    var identifyRevision: string;
+    var identifyAbstractSyntaxCount: uint64 = 0;
+    var identifyFirstAbstractSyntax: string;
+    var specificationWithResult: bool = False;
+    var accessChoice: uint64 = 0;
+    var variableCount: uint64 = 0;
+    var resultCount: uint64 = 0;
+    var successCount: uint64 = 0;
+    var failureCount: uint64 = 0;
+    var dataCount: uint64 = 0;
+    var dataNodeCount: uint64 = 0;
+    var writeTargetCount: uint64 = 0;
+    var writeTargetCountKnown: bool = False;
+    var writeValueCount: uint64 = 0;
+    var writeTargetScopes: vector<uint64>;
+    var writeTargetDomains: vector<string>;
+    var writeTargetNames: vector<string>;
+    var writeValueChoices: vector<uint64>;
+    var writeValueRaws: vector<bytes>;
+    var writeValueIntegerValues: vector<int64>;
+    var writeValueFloatingValues: vector<real>;
+    var writeValueBooleanValues: vector<bool>;
+    var writeValueStringValues: vector<string>;
+    var writeResultErrors: vector<int64>;
+    var writeResultSuccesses: vector<bool>;
+    var writeFirstDataChoice: uint64 = 0;
+    var writeFirstDataBoolean: bool = False;
+    var writeFirstDataChildCount: uint64 = 0;
+    var writeFirstDataTwelfthChoice: uint64 = 0;
+    var writeFirstDataTwelfthBoolean: bool = False;
+    var writeFirstDataDSTransferSetShape: bool = False;
+    var writeFirstDataRaw: bytes;
+    var writeFirstDataIntegerValue: int64 = 0;
+    var writeFirstDataFloatingValue: real = 0.0;
+    var writeComponentChoices: vector<uint64>;
+    var writeComponentRaws: vector<bytes>;
+    var writeComponentIntegerValues: vector<int64>;
+    var writeNestedComponentChoices: vector<uint64>;
+    var writeNestedComponentRaws: vector<bytes>;
+    var writeNestedComponentIntegerValues: vector<int64>;
+    var writeShapeState: DataState& = new DataState;
+    var mmsDeletable: bool = False;
+    var typeChoice: uint64 = 0;
+    var typeDescriptionConstructed: bool = False;
+    var typeDescriptionSignedValue: int64 = 0;
+    var typeDescriptionBooleanValue: bool = False;
+    var typeDescriptionFormatWidth: int64 = 0;
+    var typeDescriptionExponentWidth: int64 = 0;
+    var typeDescriptionRaw: bytes;
+    var typeDescriptionPacked: bool = False;
+    var typeDescriptionNumberOfElements: int64 = -1;
+    var typeDescriptionComponentCount: uint64 = 0;
+    var typeDescriptionNodeCount: uint64 = 0;
+    var typeDescriptionMaximumDepth: uint64 = 0;
+    var typeDescriptionUnresolvedNameCount: uint64 = 0;
+    var typeDescriptionSignatureChoices: vector<uint64>;
+    var typeDescriptionSignaturePrimary: vector<int64>;
+    var typeDescriptionSignatureSecondary: vector<int64>;
+    var typeDescriptionSignatureChildCounts: vector<uint64>;
+    var typeDescriptionSignaturePacked: vector<bool>;
+    # Retained for event ABI compatibility. A standards-conformant
+    # GetVariableAccessAttributes response cannot populate these fields.
+    var typeNameScope: uint64 = 0;
+    var typeNameDomain: string;
+    var typeNameItem: string;
+    var namedListScope: uint64 = 0;
+    var namedListDomain: string;
+    var namedListName: string;
+    var namedListFirstVariableScope: uint64 = 0;
+    var namedListFirstVariableDomain: string;
+    var namedListFirstVariableName: string;
+    var namedListMemberScopes: vector<uint64>;
+    var namedListMemberDomains: vector<string>;
+    var namedListMemberNames: vector<string>;
+    var namedListMemberAlternateAccessCounts: vector<uint64>;
+    var deleteScope: int64 = 0;
+    var nameCount: uint64 = 0;
+    var numberMatched: int64 = 0;
+    var numberDeleted: int64 = 0;
+    var unconfirmedServiceTag: uint64 = 0;
+    var eventEnrollmentScope: uint64 = 0;
+    var eventEnrollmentDomain: string;
+    var eventEnrollmentName: string;
+    var eventConditionScope: uint64 = 0;
+    var eventConditionDomain: string;
+    var eventConditionName: string;
+    var eventSeverity: int64 = -1;
+    var eventCurrentStatePresent: bool = False;
+    var eventCurrentState: int64 = -1;
+    var eventTransitionTimeChoice: uint64 = 0;
+    var eventTransitionTimeRaw: bytes;
+    var eventTransitionTimeSequenceIdentifier: int64 = -1;
+    var eventNotificationLost: bool = False;
+    var eventAlarmAcknowledgmentRulePresent: bool = False;
+    var eventAlarmAcknowledgmentRule: int64 = -1;
+    var eventActionResultPresent: bool = False;
+    var iccpRequiredService: bool = False;
+    var firstVariableScope: uint64 = 0;
+    var firstVariableDomain: string;
+    var firstVariableName: string;
+    var firstResultChoice: uint64 = 0;
+    var firstResultRaw: bytes;
+    var firstResultComponentIntegerCount: uint64 = 0;
+    var firstResultFirstInteger: int64 = 0;
+    var firstResultSecondInteger: int64 = 0;
+    var firstResultComponentCount: uint64 = 0;
+    var firstResultFirstChoice: uint64 = 0;
+    var firstResultSecondChoice: uint64 = 0;
+    var firstResultThirdChoice: uint64 = 0;
+    var firstResultIntegerValue: int64 = 0;
+    var firstResultFloatingValue: real = 0.0;
+    var firstResultFirstRaw: bytes;
+    var firstResultSecondRaw: bytes;
+    var firstResultFlagsRaw: bytes;
+    var firstResultThirdRaw: bytes;
+    var firstResultTimestampValue: int64 = 0;
+    var pointComponentChoices: vector<uint64>;
+    var pointComponentRaws: vector<bytes>;
+    var pointComponentIntegerValues: vector<int64>;
+    var pointNestedComponentIndex: uint64 = 0;
+    var pointNestedChoices: vector<uint64>;
+    var pointNestedRaws: vector<bytes>;
+    var pointNestedIntegerValues: vector<int64>;
+    var pointShapeState: DataState& = new DataState;
+    var reportResultChoices: vector<uint64>;
+    var reportResultErrors: vector<int64>;
+    var reportResultRaws: vector<bytes>;
+    var reportVariableScopes: vector<uint64>;
+    var reportVariableDomains: vector<string>;
+    var reportVariableNames: vector<string>;
+    var reportResultIntegerValues: vector<int64>;
+    var reportResultFloatingValues: vector<real>;
+    var reportResultBooleanValues: vector<bool>;
+    var reportResultStringValues: vector<string>;
+
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    : void {
+        if (
+            self.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            self.identifier.tagNumber <= 13
+        ) {
+            if (
+                knownPduRequiresConstructed(
+                    self.identifier.tagNumber
+                ) &&
+                ! self.identifier.first.constructed
+            )
+                throw "MMS top-level PDU requires constructed encoding";
+
+            if (
+                knownPduRequiresPrimitive(
+                    self.identifier.tagNumber
+                ) &&
+                self.identifier.first.constructed
+            )
+                throw "MMS top-level PDU requires primitive encoding";
+
+            if (
+                (
+                    self.identifier.tagNumber == 11 ||
+                    self.identifier.tagNumber == 12
+                ) &&
+                self.length.value != 0
+            )
+                throw "MMS conclude PDU must have an empty body";
+
+            self.pduType =
+                cast<ICCP_MMS_TYPES::TopLevelPDU>(
+                    self.identifier.tagNumber
+                );
+            self.recognized = True;
+            if (
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::CONCLUDE_REQUEST ||
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::CONCLUDE_RESPONSE
+            )
+                self.semanticDecoded = True;
+        }
+    }
+
+    body: bytes &size=self.length.value {
+        self.bodyLength = |$$|;
+    }
+
+    confirmedRequest: ConfirmedRequest(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST
+        ) {
+            self.invokeId = $$.invokeId.value.value.value;
+            self.modifierCount = $$.modifierCount;
+            self.serviceTag = $$.serviceTag;
+            self.serviceConstructed = $$.serviceConstructed;
+            self.serviceBody = $$.serviceValue;
+            self.iccpRequiredService =
+                isIccpRequiredConfirmedService(self.serviceTag);
+        }
+
+    confirmedResponse: ConfirmedResponse(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE
+        ) {
+            self.invokeId = $$.invokeId.value.value.value;
+            self.serviceTag = $$.serviceTag;
+            self.serviceConstructed = $$.serviceConstructed;
+            self.serviceBody = $$.serviceValue;
+            self.iccpRequiredService =
+                isIccpRequiredConfirmedService(self.serviceTag);
+        }
+
+    confirmedError: ConfirmedError(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_ERROR
+        ) {
+            self.invokeId = $$.invokeId;
+            self.modifierPosition = $$.modifierPosition;
+            self.errorClass = $$.errorClass;
+            self.errorCode = $$.errorCode;
+            self.additionalCodePresent = $$.haveAdditionalCode;
+            self.additionalCode = $$.additionalCode;
+            self.additionalDescription = $$.additionalDescription;
+            # ServiceSpecificInfo alternatives are bounded but not decoded by
+            # this profile. Preserve the outer error without claiming that its
+            # nested service-specific semantics were validated.
+            self.semanticDecoded = ! $$.haveServiceSpecificInfo;
+        }
+
+    getNameListRequest: GetNameListRequest(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 1 && self.serviceConstructed
+        ) {
+            self.objectClassChoice = $$.objectClassChoice;
+            self.objectClass = $$.objectClass;
+            self.objectScope = $$.objectScope;
+            self.objectDomain = $$.domainId;
+            self.continueAfter = $$.continueAfter;
+            self.semanticDecoded = True;
+        }
+
+    getNameListResponse: GetNameListResponse(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 1 && self.serviceConstructed
+        ) {
+            self.identifierCount = $$.identifierCount;
+            # Returned GetNameList identifiers are not ObjectNames. Keep them
+            # exclusively in the dedicated identifier vector so the aggregate
+            # MMS event cannot combine the first result with its neutral VMD
+            # scope default and manufacture a Named Variable identity.
+            self.getNameListIdentifiers = $$.identifiers;
+            self.moreFollows = $$.moreFollows;
+            self.semanticDecoded = True;
+        }
+
+    identifyRequest: IdentifyRequest(
+        |self.serviceBody|, self.serviceConstructed
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 2
+        ) {
+            self.semanticDecoded = True;
+        }
+
+    identifyResponse: IdentifyResponse(
+        |self.serviceBody|, self.serviceConstructed
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 2
+        ) {
+            self.identifyVendorRaw = $$.vendorRaw;
+            self.identifyModelRaw = $$.modelRaw;
+            self.identifyRevisionRaw = $$.revisionRaw;
+            self.identifyVendorName = $$.vendorName;
+            self.identifyModelName = $$.modelName;
+            self.identifyRevision = $$.revision;
+            self.identifyAbstractSyntaxCount = $$.abstractSyntaxCount;
+            self.identifyFirstAbstractSyntax = $$.firstAbstractSyntax;
+            self.semanticDecoded = True;
+        }
+
+    readRequest: ReadRequest(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 4 && self.serviceConstructed
+        ) {
+            self.specificationWithResult =
+                $$.specificationWithResult;
+            self.accessChoice = $$.accessChoice;
+            self.variableCount = $$.variableCount;
+            self.firstVariableScope = $$.access.value.nameScope;
+            self.firstVariableDomain = $$.access.value.domainId;
+            self.firstVariableName = $$.access.value.itemId;
+            self.semanticDecoded = True;
+        }
+
+    readResponse: ReadResponse(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 4 && self.serviceConstructed
+        ) {
+            self.accessChoice = $$.accessChoice;
+            self.resultCount = $$.resultCount;
+            self.failureCount = $$.failureCount;
+            self.successCount =
+                self.resultCount - self.failureCount;
+            self.firstResultChoice = $$.firstResultChoice;
+            self.firstResultRaw = $$.firstResultRaw;
+            self.firstResultComponentIntegerCount =
+                $$.firstResultComponentIntegerCount;
+            self.firstResultFirstInteger =
+                $$.firstResultFirstInteger;
+            self.firstResultSecondInteger =
+                $$.firstResultSecondInteger;
+            self.firstResultComponentCount =
+                $$.results.firstComponentCount;
+            self.firstResultFirstChoice =
+                $$.results.firstComponentChoice;
+            self.firstResultSecondChoice =
+                $$.results.secondComponentChoice;
+            self.firstResultThirdChoice =
+                $$.results.thirdComponentChoice;
+            self.firstResultIntegerValue =
+                $$.results.firstComponentIntegerValue;
+            self.firstResultFloatingValue =
+                $$.results.firstComponentFloatingValue;
+            self.firstResultFirstRaw =
+                $$.firstResultFirstRaw;
+            self.firstResultSecondRaw =
+                $$.firstResultSecondRaw;
+            if (self.firstResultFirstChoice == 4) {
+                # State-family values combine state and quality flags in
+                # their first BIT STRING component.
+                self.firstResultFlagsRaw =
+                    $$.firstResultFirstRaw;
+                self.firstResultTimestampValue =
+                    $$.firstResultFirstInteger;
+            }
+            else {
+                self.firstResultFlagsRaw =
+                    $$.firstResultFlagsRaw;
+                self.firstResultThirdRaw =
+                    $$.firstResultThirdRaw;
+                self.firstResultTimestampValue =
+                    $$.firstResultTimestampValue;
+            }
+            self.semanticDecoded = True;
+        }
+
+    writeRequest: WriteRequest(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 5 && self.serviceConstructed
+        ) {
+            self.accessChoice = $$.accessChoice;
+            self.variableCount = $$.variableCount;
+            self.firstVariableScope = $$.access.nameScope;
+            self.firstVariableDomain = $$.access.domainId;
+            self.firstVariableName = $$.access.itemId;
+            # accessChoice 1 identifies a NamedVariableList selector, not a
+            # Named Variable. Retain it as firstVariable* for the dedicated
+            # Write/list evidence, but expose aggregate object identity only
+            # for an explicit listOfVariable (choice 0).
+            if (
+                self.accessChoice == 0 &&
+                self.firstVariableName != ""
+            ) {
+                self.objectScope = self.firstVariableScope;
+                self.objectDomain = self.firstVariableDomain;
+                self.firstIdentifier = self.firstVariableName;
+            }
+            self.dataCount = $$.dataCount;
+            self.dataNodeCount = $$.dataNodeCount;
+            self.writeTargetCount = $$.targetCount;
+            self.writeTargetCountKnown = $$.targetCountKnown;
+            self.writeValueCount = $$.valueCount;
+            self.writeTargetScopes = $$.targetScopes;
+            self.writeTargetDomains = $$.targetDomains;
+            self.writeTargetNames = $$.targetNames;
+            self.writeValueChoices = $$.valueChoices;
+            self.writeValueRaws = $$.valueRaws;
+            self.writeValueIntegerValues = $$.valueIntegerValues;
+            self.writeValueFloatingValues = $$.valueFloatingValues;
+            self.writeValueBooleanValues = $$.valueBooleanValues;
+            self.writeValueStringValues = $$.valueStringValues;
+            self.writeFirstDataChoice = $$.firstDataChoice;
+            self.writeFirstDataBoolean = $$.firstDataBoolean;
+            self.writeFirstDataChildCount = $$.firstDataChildCount;
+            self.writeFirstDataTwelfthChoice =
+                $$.firstDataTwelfthChoice;
+            self.writeFirstDataTwelfthBoolean =
+                $$.firstDataTwelfthBoolean;
+            self.writeFirstDataDSTransferSetShape =
+                $$.firstDataDSTransferSetShape;
+            self.writeFirstDataRaw = $$.firstDataRaw;
+            self.writeFirstDataIntegerValue = $$.firstDataIntegerValue;
+            self.writeFirstDataFloatingValue = $$.firstDataFloatingValue;
+            self.semanticDecoded = True;
+        }
+
+    writeResponse: WriteResponse(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 5 && self.serviceConstructed
+        ) {
+            self.resultCount = $$.count;
+            self.successCount = $$.successCount;
+            self.failureCount = $$.failureCount;
+            self.writeResultErrors = $$.resultErrors;
+            self.writeResultSuccesses = $$.resultSuccesses;
+            self.semanticDecoded = True;
+        }
+
+    # Preserve the exact first structured Write value for standardized
+    # control types such as Tag_Value. This is parser evidence only; policy
+    # still requires exact object identity and correlated named-type state.
+    writeShape: DataChildren(
+        |self.writeFirstDataRaw|,
+        1,
+        self.writeShapeState
+    )
+        &parse-from=self.writeFirstDataRaw
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 5 && self.writeFirstDataChoice == 2 &&
+            |self.writeFirstDataRaw| > 0
+        ) {
+            self.writeComponentChoices = $$.choices;
+            self.writeComponentRaws = $$.raws;
+            self.writeComponentIntegerValues = $$.integerValues;
+            self.writeNestedComponentChoices = $$.nestedChoices;
+            self.writeNestedComponentRaws = $$.nestedRaws;
+            self.writeNestedComponentIntegerValues = $$.nestedIntegerValues;
+        }
+
+    variableAttributesRequest: GetVariableAccessAttributesRequest(
+        |self.serviceBody|
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 6 && self.serviceConstructed
+        ) {
+            self.accessChoice = $$.choice;
+            self.objectScope = $$.nameScope;
+            self.objectDomain = $$.domainId;
+            self.firstIdentifier = $$.itemId;
+            self.semanticDecoded = True;
+        }
+
+    variableAttributesResponse: GetVariableAccessAttributesResponse(
+        |self.serviceBody|
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 6 && self.serviceConstructed
+        ) {
+            self.mmsDeletable = $$.deletable;
+            self.typeChoice = $$.typeChoice;
+            self.typeDescriptionConstructed = $$.typeConstructed;
+            self.typeDescriptionSignedValue = $$.typeSignedValue;
+            self.typeDescriptionBooleanValue = $$.typeBooleanValue;
+            self.typeDescriptionFormatWidth = $$.typeFormatWidth;
+            self.typeDescriptionExponentWidth = $$.typeExponentWidth;
+            self.typeDescriptionRaw = $$.typeRaw;
+            self.typeDescriptionPacked = $$.typePacked;
+            self.typeDescriptionNumberOfElements =
+                $$.typeNumberOfElements;
+            self.typeDescriptionComponentCount = $$.typeComponentCount;
+            self.typeDescriptionNodeCount = $$.typeNodeCount;
+            self.typeDescriptionMaximumDepth = $$.typeMaximumDepth;
+            self.typeDescriptionUnresolvedNameCount =
+                $$.typeUnresolvedNameCount;
+            self.typeDescriptionSignatureChoices =
+                $$.typeSignatureChoices;
+            self.typeDescriptionSignaturePrimary =
+                $$.typeSignaturePrimary;
+            self.typeDescriptionSignatureSecondary =
+                $$.typeSignatureSecondary;
+            self.typeDescriptionSignatureChildCounts =
+                $$.typeSignatureChildCounts;
+            self.typeDescriptionSignaturePacked =
+                $$.typeSignaturePacked;
+            self.semanticDecoded = True;
+        }
+
+    defineNamedVariableListRequest: DefineNamedVariableListRequest(
+        |self.serviceBody|
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 11 && self.serviceConstructed
+        ) {
+            self.namedListScope = $$.nameScope;
+            self.namedListDomain = $$.domainId;
+            self.namedListName = $$.itemId;
+            self.variableCount = $$.variableCount;
+            self.namedListFirstVariableScope = $$.firstVariableScope;
+            self.namedListFirstVariableDomain = $$.firstVariableDomain;
+            self.namedListFirstVariableName = $$.firstVariableName;
+            self.namedListMemberScopes = $$.memberScopes;
+            self.namedListMemberDomains = $$.memberDomains;
+            self.namedListMemberNames = $$.memberNames;
+            self.namedListMemberAlternateAccessCounts =
+                $$.memberAlternateAccessCounts;
+            self.semanticDecoded = True;
+        }
+
+    defineNamedVariableListResponse: ImplicitNullService(
+        |self.serviceBody|, self.serviceConstructed
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 11
+        ) {
+            self.semanticDecoded = True;
+        }
+
+    getNamedVariableListAttributesRequest: BoundedObjectName(
+        |self.serviceBody|
+    )
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 12 && self.serviceConstructed
+        ) {
+            self.namedListScope = $$.value.scope;
+            self.namedListDomain = $$.value.domainId;
+            self.namedListName = $$.value.itemId;
+            self.semanticDecoded = True;
+        }
+
+    getNamedVariableListAttributesResponse:
+        GetNamedVariableListAttributesResponse(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 12 && self.serviceConstructed
+        ) {
+            self.mmsDeletable = $$.deletable;
+            self.variableCount = $$.variableCount;
+            self.namedListFirstVariableScope = $$.firstVariableScope;
+            self.namedListFirstVariableDomain = $$.firstVariableDomain;
+            self.namedListFirstVariableName = $$.firstVariableName;
+            self.namedListMemberScopes = $$.memberScopes;
+            self.namedListMemberDomains = $$.memberDomains;
+            self.namedListMemberNames = $$.memberNames;
+            self.namedListMemberAlternateAccessCounts =
+                $$.memberAlternateAccessCounts;
+            self.semanticDecoded = True;
+        }
+
+    deleteNamedVariableListRequest: DeleteNamedVariableListRequest(
+        |self.serviceBody|
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.serviceTag == 13 && self.serviceConstructed
+        ) {
+            self.deleteScope = $$.scope;
+            self.nameCount = $$.nameCount;
+            self.namedListDomain = $$.domainId;
+            if ($$.firstName != "") {
+                self.namedListScope = $$.firstNameScope;
+                self.namedListDomain = $$.firstNameDomain;
+                self.namedListName = $$.firstName;
+            }
+            self.namedListMemberScopes = $$.memberScopes;
+            self.namedListMemberDomains = $$.memberDomains;
+            self.namedListMemberNames = $$.memberNames;
+            self.semanticDecoded = True;
+        }
+
+    deleteNamedVariableListResponse: DeleteNamedVariableListResponse(
+        |self.serviceBody|
+    ) &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE &&
+            self.serviceTag == 13 && self.serviceConstructed
+        ) {
+            self.numberMatched = $$.numberMatched;
+            self.numberDeleted = $$.numberDeleted;
+            self.semanticDecoded = True;
+        }
+
+    unconfirmed: Unconfirmed(self.bodyLength) &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::UNCONFIRMED
+        ) {
+            self.unconfirmedServiceTag = $$.serviceTag;
+            self.serviceConstructed = $$.serviceConstructed;
+            self.serviceBody = $$.serviceValue;
+            self.iccpRequiredService = self.unconfirmedServiceTag == 0;
+        }
+
+    informationReport: InformationReport(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::UNCONFIRMED &&
+            self.unconfirmedServiceTag == 0 && self.serviceConstructed
+        ) {
+            self.accessChoice = $$.accessChoice;
+            self.variableCount = $$.variableCount;
+            self.resultCount = $$.resultCount;
+            self.failureCount = $$.failureCount;
+            self.successCount =
+                self.resultCount - self.failureCount;
+            self.firstVariableScope = $$.firstVariableScope;
+            self.firstVariableDomain = $$.firstVariableDomain;
+            self.firstVariableName = $$.firstVariableName;
+            if ($$.accessChoice == 1) {
+                self.namedListScope = $$.access.nameScope;
+                self.namedListDomain = $$.access.domainId;
+                self.namedListName = $$.access.itemId;
+            }
+            if (self.firstVariableName != "") {
+                self.objectScope = $$.firstVariableScope;
+                self.objectDomain = $$.firstVariableDomain;
+                self.firstIdentifier = $$.firstVariableName;
+            }
+            self.firstResultChoice = $$.firstResultChoice;
+            self.firstResultRaw = $$.firstResultRaw;
+            self.firstResultComponentIntegerCount =
+                $$.firstResultComponentIntegerCount;
+            self.firstResultFirstInteger =
+                $$.firstResultFirstInteger;
+            self.firstResultSecondInteger =
+                $$.firstResultSecondInteger;
+            self.firstResultComponentCount =
+                $$.firstResultComponentCount;
+            self.firstResultFirstChoice =
+                $$.firstResultFirstChoice;
+            self.firstResultSecondChoice =
+                $$.firstResultSecondChoice;
+            self.firstResultThirdChoice =
+                $$.firstResultThirdChoice;
+            self.firstResultIntegerValue =
+                $$.firstResultIntegerValue;
+            self.firstResultFloatingValue =
+                $$.firstResultFloatingValue;
+            self.firstResultFirstRaw =
+                $$.firstResultFirstRaw;
+            self.firstResultSecondRaw =
+                $$.firstResultSecondRaw;
+            self.firstResultFlagsRaw =
+                $$.firstResultFlagsRaw;
+            self.firstResultTimestampValue =
+                $$.firstResultTimestampValue;
+            self.firstResultThirdRaw =
+                $$.firstResultThirdRaw;
+            self.reportResultChoices = $$.resultChoices;
+            self.reportResultErrors = $$.resultErrors;
+            self.reportResultRaws = $$.resultRaws;
+            self.reportVariableScopes = $$.variableScopes;
+            self.reportVariableDomains = $$.variableDomains;
+            self.reportVariableNames = $$.variableNames;
+            self.reportResultIntegerValues = $$.resultIntegerValues;
+            self.reportResultFloatingValues = $$.resultFloatingValues;
+            self.reportResultBooleanValues = $$.resultBooleanValues;
+            self.reportResultStringValues = $$.resultStringValues;
+            self.semanticDecoded = True;
+        }
+
+    eventNotification: EventNotification(|self.serviceBody|)
+        &parse-from=self.serviceBody
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::UNCONFIRMED &&
+            self.unconfirmedServiceTag == 2 && self.serviceConstructed
+        ) {
+            self.eventEnrollmentScope = $$.enrollmentScope;
+            self.eventEnrollmentDomain = $$.enrollmentDomain;
+            self.eventEnrollmentName = $$.enrollmentName;
+            self.eventConditionScope = $$.conditionScope;
+            self.eventConditionDomain = $$.conditionDomain;
+            self.eventConditionName = $$.conditionName;
+            self.eventSeverity = $$.severity;
+            self.eventCurrentStatePresent = $$.haveCurrentState;
+            self.eventCurrentState = $$.currentState;
+            self.eventTransitionTimeChoice = $$.transitionTimeChoice;
+            self.eventTransitionTimeRaw = $$.transitionTimeValueRaw;
+            self.eventTransitionTimeSequenceIdentifier =
+                $$.transitionTimeSequenceIdentifier;
+            self.eventNotificationLost = $$.notificationLost;
+            self.eventAlarmAcknowledgmentRulePresent =
+                $$.haveAlarmAcknowledgmentRule;
+            self.eventAlarmAcknowledgmentRule =
+                $$.alarmAcknowledgmentRule;
+            self.eventActionResultPresent = $$.haveActionResult;
+
+            # The EventActionResult alternatives embed the complete
+            # ConfirmedServiceResponse/ServiceError schemas. Until those
+            # alternatives are decoded here, preserve the outer evidence but
+            # do not treat an opaque nonempty TLV bag as semantically trusted.
+            self.semanticDecoded = ! $$.haveActionResult;
+        }
+
+    # Re-parse only the first structured result into a compact shape vector.
+    # This evidence is additive to the stable MMS event and lets policy verify
+    # four-component COV values and nested TimeStampExtended values without
+    # decoding BER in Zeek or changing the legacy event signature.
+    pointShape: DataChildren(
+        |self.firstResultRaw|,
+        1,
+        self.pointShapeState
+    )
+        &parse-from=self.firstResultRaw
+        if (self.firstResultChoice == 2 && |self.firstResultRaw| > 0) {
+            self.pointComponentChoices = $$.choices;
+            self.pointComponentRaws = $$.raws;
+            self.pointComponentIntegerValues = $$.integerValues;
+            self.pointNestedComponentIndex = $$.nestedComponentIndex;
+            self.pointNestedChoices = $$.nestedChoices;
+            self.pointNestedRaws = $$.nestedRaws;
+            self.pointNestedIntegerValues = $$.nestedIntegerValues;
+        }
+
+    rejectPdu: Reject(self.bodyLength) &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType == ICCP_MMS_TYPES::TopLevelPDU::REJECT
+        ) {
+            self.invokeId = $$.invokeId;
+            self.rejectReasonTag = $$.reasonTag;
+            self.rejectReason = $$.reason;
+            self.semanticDecoded = True;
+        }
+
+    cancelInvokeId: MMSUnsigned32Value(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            (
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::CANCEL_REQUEST ||
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::CANCEL_RESPONSE
+            )
+        ) {
+            self.invokeId = $$.value.value;
+            self.semanticDecoded = True;
+        }
+
+    cancelError: CancelError(self.bodyLength) &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CANCEL_ERROR
+        ) {
+            self.invokeId = $$.invokeId.value.value;
+            self.errorClass = $$.errorClass;
+            self.errorCode = $$.errorCode;
+            self.additionalCodePresent = $$.haveAdditionalCode;
+            self.additionalCode = $$.additionalCode;
+            self.additionalDescription = $$.additionalDescription;
+            self.semanticDecoded = ! $$.haveServiceSpecificInfo;
+        }
+
+    initiate: Initiate(self.bodyLength) &parse-from=self.body
+        if (
+            self.recognized &&
+            (
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::INITIATE_REQUEST ||
+                self.pduType ==
+                    ICCP_MMS_TYPES::TopLevelPDU::INITIATE_RESPONSE
+            )
+        ) {
+            self.localDetail = $$.localDetail;
+            self.maxCalling = $$.maxCalling;
+            self.maxCalled = $$.maxCalled;
+            self.nestingLevel = $$.nestingLevel;
+            self.version = $$.version;
+            self.parameterCbbUnusedBits =
+                $$.parameterCbbUnusedBits;
+            self.parameterCbb = $$.parameterCbb;
+            self.servicesUnusedBits = $$.servicesUnusedBits;
+            self.services = $$.services;
+            self.semanticDecoded = True;
+        }
+
+    serviceError: ServiceError(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::INITIATE_ERROR
+        ) {
+            self.errorClass = $$.errorClass;
+            self.errorCode = $$.errorCode;
+            self.additionalCodePresent = $$.haveAdditionalCode;
+            self.additionalCode = $$.additionalCode;
+            self.additionalDescription = $$.additionalDescription;
+            self.semanticDecoded = ! $$.haveServiceSpecificInfo;
+        }
+
+    concludeError: ServiceError(self.bodyLength)
+        &parse-from=self.body
+        if (
+            self.recognized &&
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONCLUDE_ERROR
+        ) {
+            self.errorClass = $$.errorClass;
+            self.errorCode = $$.errorCode;
+            self.additionalCodePresent = $$.haveAdditionalCode;
+            self.additionalCode = $$.additionalCode;
+            self.additionalDescription = $$.additionalDescription;
+            self.semanticDecoded = ! $$.haveServiceSpecificInfo;
+        }
+
+    on %done {
+        # Modifier is a negotiated CHOICE whose nested alternatives are not
+        # decoded by this profile. A service body can remain visible, but it is
+        # ineligible for semantic confirmation when an opaque modifier exists.
+        if (
+            self.pduType ==
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+            self.modifierCount != 0
+        )
+            self.semanticDecoded = False;
+    }
+@if SPICY_VERSION >= 11700
+} &on-heap;
+@else
+};
+@endif
+
+@if SPICY_VERSION >= 11600
+@if SPICY_VERSION < 11700
+# Spicy 1.16 moved parsed unit instances onto the fiber stack, but MMSpdu is
+# intentionally large enough to exhaust the default stack on some hosts.
+# Holding an explicit reference makes 1.16 allocate this unit on the heap.
+# Spicy 1.17 and newer provide the dedicated &on-heap type attribute instead.
+global mmSpduHeapAnchor = new MMSpdu();
+@endif
+@endif
+
+# Production dispatch wraps the stable standalone MMSpdu entry point so parser
+# provenance can reach Zeek without parameterizing MMSpdu and changing its
+# default-initialization behavior.
+public type ProvenancedMMSpdu = unit(provenance: uint8) {
+    var provenanceCode: uint8 = provenance;
+    pdu: MMSpdu;
+    trailing: bytes &eod;
+
+    on %done {
+        if (|self.trailing| != 0)
+            throw "MMS presentation payload has trailing data";
+    }
+};

@@ -1,0 +1,2 @@
+select	requested	vcc	BREAKER_SBO	SBO_CheckBackName	-	-	-	verified	contiguous_observation
+select	confirmed	vcc	BREAKER_SBO	SBO_CheckBackName	42	1	0	verified	contiguous_observation

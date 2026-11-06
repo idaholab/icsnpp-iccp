@@ -1,0 +1,120 @@
+module ICCP_PRESENTATION_TEST;
+
+import spicy;
+import ICCP_PRESENTATION;
+
+public type DataCase = unit {
+    var state: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    data: ICCP_PRESENTATION::Data(self.state);
+
+    on %done {
+        print "type=%s recognized=%s definitions=%d results=%d pdvs=%d context=%d abstract=%s transfer=%s result=%d acse=%s mms=%s inferred=%s payload=%s" % (
+            self.data.ppduType,
+            self.data.recognized,
+            self.data.contextDefinitionCount,
+            self.data.contextResultCount,
+            self.data.pdvCount,
+            self.data.contextIdentifier,
+            self.data.abstractSyntax,
+            self.data.transferSyntax,
+            self.data.selectedResult,
+            self.data.dispatchAcse,
+            self.data.dispatchMms,
+            self.data.inferredMms,
+            self.data.payload
+        );
+    }
+};
+
+public type FramedData = unit(state: ICCP_PRESENTATION::State&) {
+    length: uint16;
+    data: ICCP_PRESENTATION::Data(state) &size=self.length;
+};
+
+public type StreamCase = unit {
+    var state: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    frames: FramedData(self.state)[] &eod foreach {
+        print "definitions=%d results=%d context=%d result=%d acse=%s mms=%s inferred=%s contexts=%d payload=%s" % (
+            $$.data.contextDefinitionCount,
+            $$.data.contextResultCount,
+            $$.data.contextIdentifier,
+            $$.data.selectedResult,
+            $$.data.dispatchAcse,
+            $$.data.dispatchMms,
+            $$.data.inferredMms,
+            |self.state.contexts|,
+            $$.data.payload
+        );
+    }
+};
+
+public type SessionFramedData = unit(state: ICCP_PRESENTATION::State&) {
+    sessionSpdu: uint8;
+    length: uint16;
+    data: ICCP_PRESENTATION::Data(state, self.sessionSpdu) &size=self.length;
+};
+
+public type AssociationStreamCase = unit {
+    var state: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    frames: SessionFramedData(self.state)[] &eod foreach {
+        local apduType: int64 = -1;
+        local embeddedMms = False;
+        local opaque = False;
+        if ($$.data.dispatchAcse) {
+            apduType = cast<int64>($$.data.acse.apduType);
+            embeddedMms = $$.data.acse.dispatchMms;
+            opaque = $$.data.acse.opaqueUserInformation;
+        }
+
+        print "session=%d definitions=%d results=%d contexts=%d context=%d result=%d acse=%s directMms=%s apdu=%d embeddedMms=%s opaque=%s" % (
+            $$.sessionSpdu,
+            $$.data.contextDefinitionCount,
+            $$.data.contextResultCount,
+            |self.state.contexts|,
+            $$.data.contextIdentifier,
+            $$.data.selectedResult,
+            $$.data.dispatchAcse,
+            $$.data.dispatchMms,
+            apduType,
+            embeddedMms,
+            opaque
+        );
+    }
+};
+
+public type PresenceCase = unit {
+    var state: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    sessionSpdu: uint8;
+    data: ICCP_PRESENTATION::Data(self.state, self.sessionSpdu);
+
+    on %done {
+        print "definitionsPresent=%s definitions=%d resultsPresent=%s results=%d contexts=%d" % (
+            self.data.contextDefinitionPresent,
+            self.data.contextDefinitionCount,
+            self.data.contextResultPresent,
+            self.data.contextResultCount,
+            |self.state.contexts|
+        );
+    }
+};
+
+public type TransactionalStreamCase = unit {
+    var state: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    frames: SessionFramedData(self.state)[] &eod;
+
+    on %error(msg: string) {
+        local firstOutcome: int64 = -2;
+        if (|self.state.contexts| > 0)
+            firstOutcome = self.state.contexts[0].outcome;
+        print "contexts-after-error=%d next-result=%d first-outcome=%d" % (
+            |self.state.contexts|,
+            self.state.nextResult,
+            firstOutcome
+        );
+    }
+};

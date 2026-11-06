@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+test_dir="$(mktemp -d /tmp/iccp-local-corpus-tools.XXXXXX)"
+trap 'rm -r "${test_dir}"' EXIT
+
+input_pcap="${test_dir}/input.pcap"
+output_pcap="${test_dir}/mms.pcap"
+confirmed_pcap="${test_dir}/confirmed-mms.pcap"
+causal_pcap="${test_dir}/causal-mms.pcap"
+summary="${test_dir}/summary"
+metadata="${test_dir}/metadata.tsv"
+
+# A private validation run must never create artifacts within its raw-capture
+# source (or choose an output parent that contains that source).
+corpus_dir="${test_dir}/raw-corpus"
+mkdir -p "${corpus_dir}"
+for unsafe_output in \
+    "${corpus_dir}" \
+    "${corpus_dir}/nested-output" \
+    "${test_dir}"; do
+    if bash "${script_dir}/validate-local-corpus" \
+        "${corpus_dir}" "${unsafe_output}" \
+        > /dev/null 2> "${test_dir}/unsafe-output.stderr"; then
+        echo "local corpus validator accepted overlapping output: ${unsafe_output}" >&2
+        exit 1
+    fi
+done
+if [[ -e "${corpus_dir}/nested-output" ]]; then
+    echo "local corpus validator created output inside the raw corpus" >&2
+    exit 1
+fi
+
+# Resolve directory aliases for overlap checks, but reject an output-directory
+# symlink itself because its name can later be retargeted independently.
+symlink_target="${test_dir}/symlink-target"
+symlink_output="${test_dir}/symlink-output"
+mkdir -m 700 "${symlink_target}"
+ln -s "${symlink_target}" "${symlink_output}"
+if bash "${script_dir}/validate-local-corpus" \
+    "${corpus_dir}" "${symlink_output}" \
+    > /dev/null 2> "${test_dir}/symlink-output.stderr"; then
+    echo "local corpus validator accepted an output-directory symlink" >&2
+    exit 1
+fi
+if [[ -n "$(find "${symlink_target}" -mindepth 1 -print -quit)" ]]; then
+    echo "local corpus validator wrote through an output-directory symlink" >&2
+    exit 1
+fi
+
+weak_output="${test_dir}/weak-output"
+mkdir -m 755 "${weak_output}"
+if bash "${script_dir}/validate-local-corpus" \
+    "${corpus_dir}" "${weak_output}" \
+    > /dev/null 2> "${test_dir}/weak-output.stderr"; then
+    echo "local corpus validator accepted non-private output permissions" >&2
+    exit 1
+fi
+
+if bash "${script_dir}/validate-local-corpus" \
+    "${corpus_dir}" "${project_dir}/testing" \
+    > /dev/null 2> "${test_dir}/repository-output.stderr"; then
+    echo "local corpus validator accepted output inside the repository" >&2
+    exit 1
+fi
+
+# An existing artifact symlink in an otherwise private-looking output tree
+# must be rejected before a shell redirection can follow it.
+printf 'not-a-pcap\n' > "${corpus_dir}/source.pcap"
+protected_file="${test_dir}/protected-artifact"
+poisoned_output="${test_dir}/poisoned-output"
+printf 'retain me\n' > "${protected_file}"
+mkdir -m 700 "${poisoned_output}"
+ln -s "${protected_file}" "${poisoned_output}/capture-manifest.sha256"
+if bash "${script_dir}/validate-local-corpus" \
+    "${corpus_dir}" "${poisoned_output}" \
+    > /dev/null 2> "${test_dir}/poisoned-output.stderr"; then
+    echo "local corpus validator accepted a pre-populated output directory" >&2
+    exit 1
+fi
+if [[ "$(cat "${protected_file}")" != "retain me" ]]; then
+    echo "local corpus validator followed an existing artifact symlink" >&2
+    exit 1
+fi
+
+# Admission ceilings must fire before hashing/filtering an unbounded source
+# inventory and before mergecap sees an oversized set of filtered parts. The
+# test-only environment knobs can only lower the hard limits.
+for invalid_limit in 18446744073709551617 -1 1x; do
+    invalid_limit_output="${test_dir}/invalid-limit-${invalid_limit//[^a-zA-Z0-9]/_}"
+    if ICCP_VALIDATE_TEST_MAX_SOURCE_FILES="${invalid_limit}" \
+        bash "${script_dir}/validate-local-corpus" \
+            "${corpus_dir}" "${invalid_limit_output}" \
+            > /dev/null 2> "${test_dir}/invalid-limit.stderr"; then
+        echo "local corpus validator accepted unsafe numeric limit: ${invalid_limit}" >&2
+        exit 1
+    fi
+    if [[ -e "${invalid_limit_output}" ]]; then
+        echo "invalid limit was rejected after creating output artifacts" >&2
+        exit 1
+    fi
+done
+
+source_bytes_output="${test_dir}/source-bytes-output"
+mkdir -m 700 "${source_bytes_output}"
+if ICCP_VALIDATE_TEST_MAX_SOURCE_BYTES=1 \
+    bash "${script_dir}/validate-local-corpus" \
+        "${corpus_dir}" "${source_bytes_output}" \
+        > /dev/null 2> "${test_dir}/source-bytes.stderr"; then
+    echo "local corpus validator accepted excess aggregate source bytes" >&2
+    exit 1
+fi
+if [[ -n "$(find "${source_bytes_output}" -mindepth 1 -print -quit)" ]]; then
+    echo "source-byte ceiling ran after validation artifacts were written" >&2
+    exit 1
+fi
+
+touch "${corpus_dir}/second.pcap"
+source_count_output="${test_dir}/source-count-output"
+mkdir -m 700 "${source_count_output}"
+if ICCP_VALIDATE_TEST_MAX_SOURCE_FILES=1 \
+    bash "${script_dir}/validate-local-corpus" \
+        "${corpus_dir}" "${source_count_output}" \
+        > /dev/null 2> "${test_dir}/source-count.stderr"; then
+    echo "local corpus validator accepted excess source files" >&2
+    exit 1
+fi
+if [[ -n "$(find "${source_count_output}" -mindepth 1 -print -quit)" ]]; then
+    echo "source-file ceiling ran after validation artifacts were written" >&2
+    exit 1
+fi
+
+rm "${corpus_dir}/source.pcap" "${corpus_dir}/second.pcap"
+"${script_dir}/generate-synthetic-pcap" \
+    "${corpus_dir}/filtered-source.pcap" direct-mms-midstream > /dev/null
+filtered_bytes_output="${test_dir}/filtered-bytes-output"
+mkdir -m 700 "${filtered_bytes_output}"
+if ICCP_VALIDATE_TEST_MAX_FILTERED_BYTES=1 \
+    bash "${script_dir}/validate-local-corpus" \
+        "${corpus_dir}" "${filtered_bytes_output}" \
+        > /dev/null 2> "${test_dir}/filtered-bytes.stderr"; then
+    echo "local corpus validator accepted excess filtered bytes" >&2
+    exit 1
+fi
+if [[ -e "${filtered_bytes_output}/corpus-tcp102.pcap" ]]; then
+    echo "filtered-byte ceiling ran after mergecap" >&2
+    exit 1
+fi
+
+"${script_dir}/generate-synthetic-pcap" \
+    "${input_pcap}" direct-mms-midstream > /dev/null
+python3 "${script_dir}/extract-local-mms.py" \
+    "${input_pcap}" "${output_pcap}" "${summary}" \
+    --confirmed-output "${confirmed_pcap}" \
+    --causal-output "${causal_pcap}" \
+    --metadata-output "${metadata}" > /dev/null
+
+expect_counter() {
+    local counter_name="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        awk -F '\t' -v name="${counter_name}" \
+            '$1 == name { print $2 }' "${summary}"
+    )"
+    if [[ "${actual:-0}" != "${expected}" ]]; then
+        echo "unexpected ${counter_name}: expected ${expected}, got ${actual:-0}" >&2
+        exit 1
+    fi
+}
+
+expect_counter tpkt.records 1
+expect_counter cotp.tsdus 1
+expect_counter session.data_transfer 1
+expect_counter presentation.pdvs 1
+expect_counter presentation.context_3 1
+expect_counter mms.tag_0 1
+expect_counter mms.extracted_pdus 1
+expect_counter mms.confirmed_extracted_pdus 1
+expect_counter causal.mms.tag_0 1
+expect_counter causal.mms.extracted_pdus 1
+expect_counter causal.mms.confirmed_extracted_pdus 1
+
+if [[ "$(capinfos -T -r -c "${output_pcap}" | tail -n 1 | awk -F '\t' '{print $2}')" != 1 ]]; then
+    echo "independent extractor did not write exactly one MMS packet" >&2
+    exit 1
+fi
+
+if [[ "$(capinfos -T -r -c "${confirmed_pcap}" | tail -n 1 | awk -F '\t' '{print $2}')" != 1 ]]; then
+    echo "independent extractor did not write exactly one confirmed MMS packet" >&2
+    exit 1
+fi
+
+if [[ "$(capinfos -T -r -c "${causal_pcap}" | tail -n 1 | awk -F '\t' '{print $2}')" != 1 ]]; then
+    echo "causal extractor did not write exactly one MMS packet" >&2
+    exit 1
+fi
+
+if [[ "$(awk -F '\t' 'NR == 2 {print $1 ":" $2 ":" $3}' "${metadata}")" != "1:1:0" ]]; then
+    echo "independent extractor did not emit aligned private flow metadata" >&2
+    exit 1
+fi
+
+# Prove the complete positive trust path with a generated bidirectional
+# request/response/report exchange before a representative capture exists.
+gva_input="${test_dir}/gva-input.pcap"
+gva_mms="${test_dir}/gva-mms.pcap"
+gva_metadata="${test_dir}/gva-metadata.tsv"
+gva_summary="${test_dir}/gva-extract.summary"
+gva_oracle_summary="${test_dir}/gva-oracle.summary"
+gva_type_mapping="${test_dir}/gva-types.tsv"
+printf '%s\n' \
+    $'flow_id\tserver_direction\tscope\tdomain\tobject_name\tnamed_type' \
+    $'1\t1\t0\t\tPoint1\tData_RealQ' > "${gva_type_mapping}"
+"${script_dir}/generate-synthetic-pcap" \
+    "${gva_input}" direct-mms-type-discovery > /dev/null
+python3 "${script_dir}/extract-local-mms.py" \
+    "${gva_input}" "${gva_mms}" "${gva_summary}" \
+    --metadata-output "${gva_metadata}" > /dev/null
+python3 "${script_dir}/information-report-oracle.py" \
+    "${gva_mms}" "${test_dir}/gva-records.tsv" \
+    "${gva_oracle_summary}" --metadata "${gva_metadata}" \
+    --type-mappings "${gva_type_mapping}" > /dev/null
+if [[ "$(awk -F '\t' '$1 == "information_report.tase2_verified_results" {print $2}' "${gva_oracle_summary}")" != 1 ]]; then
+    echo "independent type-discovery oracle did not verify the synthetic point" >&2
+    exit 1
+fi
+
+read_input="${test_dir}/read-input.pcap"
+read_mms="${test_dir}/read-mms.pcap"
+read_metadata="${test_dir}/read-metadata.tsv"
+read_oracle_summary="${test_dir}/read-oracle.summary"
+read_classifications="${test_dir}/read-classifications.tsv"
+"${script_dir}/generate-synthetic-pcap" \
+    "${read_input}" direct-mms-read-classification > /dev/null
+python3 "${script_dir}/extract-local-mms.py" \
+    "${read_input}" "${read_mms}" "${test_dir}/read-extract.summary" \
+    --metadata-output "${read_metadata}" > /dev/null
+python3 "${script_dir}/information-report-oracle.py" \
+    "${read_mms}" "${test_dir}/read-records.tsv" \
+    "${read_oracle_summary}" --metadata "${read_metadata}" \
+    --type-mappings "${gva_type_mapping}" \
+    --classifications "${read_classifications}" > /dev/null
+if [[ "$(awk -F '\t' '$1 == "information_report.tase2_read_verified_results" {print $2}' "${read_oracle_summary}")" != 1 ]]; then
+    echo "independent Read oracle did not verify the synthetic point" >&2
+    exit 1
+fi
+if [[ "$(awk -F '\t' 'NR == 2 {print $3 ":" $7 ":" $8 ":" $9}' "${read_classifications}")" != "read_response:Point1:Data_RealQ:real_q" ]]; then
+    echo "independent Read oracle emitted an unexpected classification" >&2
+    exit 1
+fi
+
+# Exercise ACK-established capture-gap recovery through the actual PCAP reader.
+# The generator's editcap output defaults to pcapng, while the deliberately
+# small independent reader accepts classic PCAP only, matching the corpus
+# harness's tcpdump/mergecap normalization.
+gap_pcapng="${test_dir}/gap.pcapng"
+gap_pcap="${test_dir}/gap.pcap"
+gap_summary="${test_dir}/gap.summary"
+"${script_dir}/generate-synthetic-pcap" \
+    "${gap_pcapng}" direct-mms-gap-recovery > /dev/null
+editcap -F pcap "${gap_pcapng}" "${gap_pcap}"
+python3 "${script_dir}/extract-local-mms.py" \
+    "${gap_pcap}" "${test_dir}/gap-ideal.pcap" "${gap_summary}" \
+    --causal-output "${test_dir}/gap-causal.pcap" > /dev/null
+summary="${gap_summary}"
+expect_counter tcp.gaps 1
+expect_counter mms.extracted_pdus 4
+expect_counter causal.tcp.ack_gap_events 1
+expect_counter causal.tcp.ack_gap_bytes 17
+expect_counter causal.mms.extracted_pdus 4
+
+# After a direction is first observed in an ACK-only packet, a peer ACK before
+# that direction's first payload establishes the same lower delivery floor that
+# Zeek's TCP reassembler uses. The sequence-sorted ideal may still find the
+# later-arriving old TPKT, but the causal output must exclude it and retain the
+# next record beginning at the ACK boundary.
+prebaseline_pcap="${test_dir}/prebaseline.pcap"
+prebaseline_summary="${test_dir}/prebaseline.summary"
+"${script_dir}/generate-synthetic-pcap" \
+    "${prebaseline_pcap}" direct-mms-prebaseline-ack > /dev/null
+python3 "${script_dir}/extract-local-mms.py" \
+    "${prebaseline_pcap}" "${test_dir}/prebaseline-ideal.pcap" \
+    "${prebaseline_summary}" \
+    --causal-output "${test_dir}/prebaseline-causal.pcap" > /dev/null
+summary="${prebaseline_summary}"
+expect_counter mms.extracted_pdus 3
+expect_counter mms.tag_3 1
+expect_counter causal.mms.extracted_pdus 2
+expect_counter causal.mms.tag_3 0
+expect_counter causal.tcp.ack_without_payload_baseline 1
+expect_counter causal.tcp.late_segments 1
+expect_counter causal.tcp.late_bytes 37
+
+# Reproduce Zeek's partial-stream one-byte initial-ACK rule at the complete
+# extractor boundary. The sequence-sorted ideal can scan past the acknowledged
+# prefix and find the complete Identify TPKT. The causal pass must retain the
+# unacknowledged suffix as a capture-boundary buffer and emit no MMS PDU until a
+# later cumulative ACK makes that suffix deliverable.
+partial_initial_pcap="${test_dir}/partial-initial-ack.pcap"
+partial_initial_summary="${test_dir}/partial-initial-ack.summary"
+partial_initial_ideal="${test_dir}/partial-initial-ack-ideal.pcap"
+partial_initial_causal="${test_dir}/partial-initial-ack-causal.pcap"
+"${script_dir}/generate-synthetic-pcap" \
+    "${partial_initial_pcap}" direct-mms-partial-initial-ack > /dev/null
+if [[ "$(capinfos -T -r -c "${partial_initial_pcap}" | tail -n 1 | awk -F '\t' '{print $2}')" != 3 ]]; then
+    echo "one-byte initial-ACK fixture must end after exactly three packets" >&2
+    exit 1
+fi
+python3 "${script_dir}/extract-local-mms.py" \
+    "${partial_initial_pcap}" "${partial_initial_ideal}" \
+    "${partial_initial_summary}" \
+    --causal-output "${partial_initial_causal}" > /dev/null
+summary="${partial_initial_summary}"
+expect_counter mms.extracted_pdus 1
+expect_counter mms.tag_0 1
+expect_counter causal.mms.extracted_pdus 0
+expect_counter causal.mms.confirmed_extracted_pdus 0
+expect_counter causal.tcp.partial_initial_gap_suppressions 1
+expect_counter causal.tcp.late_prefix_bytes 1
+expect_counter causal.tcp.capture_boundary_bytes 25
+expect_counter causal.tcp.ack_gap_events 0
+
+if [[ "$(capinfos -T -r -c "${partial_initial_ideal}" | tail -n 1 | awk -F '\t' '{print $2}')" != 1 ]]; then
+    echo "one-byte initial-ACK ideal did not contain one MMS packet" >&2
+    exit 1
+fi
+if [[ "$(capinfos -T -r -c "${partial_initial_causal}" | tail -n 1 | awk -F '\t' '{print $2}')" != 0 ]]; then
+    echo "one-byte initial-ACK causal output fabricated an unacknowledged MMS packet" >&2
+    exit 1
+fi
+
+# Adding only the later peer ACK must release the already buffered complete
+# suffix through both the causal extractor and Zeek's production reassembler.
+partial_release_pcap="${test_dir}/partial-initial-ack-release.pcap"
+partial_release_summary="${test_dir}/partial-initial-ack-release.summary"
+partial_release_ideal="${test_dir}/partial-initial-ack-release-ideal.pcap"
+partial_release_causal="${test_dir}/partial-initial-ack-release-causal.pcap"
+"${script_dir}/generate-synthetic-pcap" \
+    "${partial_release_pcap}" \
+    direct-mms-partial-initial-ack-release > /dev/null
+if [[ "$(capinfos -T -r -c "${partial_release_pcap}" | tail -n 1 | awk -F '\t' '{print $2}')" != 4 ]]; then
+    echo "one-byte initial-ACK release fixture must add exactly one packet" >&2
+    exit 1
+fi
+python3 "${script_dir}/extract-local-mms.py" \
+    "${partial_release_pcap}" "${partial_release_ideal}" \
+    "${partial_release_summary}" \
+    --causal-output "${partial_release_causal}" > /dev/null
+summary="${partial_release_summary}"
+expect_counter mms.extracted_pdus 1
+expect_counter mms.tag_0 1
+expect_counter causal.mms.extracted_pdus 1
+expect_counter causal.mms.confirmed_extracted_pdus 1
+expect_counter causal.mms.tag_0 1
+expect_counter causal.tcp.partial_initial_gap_suppressions 1
+expect_counter causal.tcp.late_prefix_bytes 1
+expect_counter causal.tcp.ack_gap_events 1
+expect_counter causal.tcp.ack_gap_bytes 1
+expect_counter causal.tcp.capture_boundary_bytes 0
+
+if [[ "$(capinfos -T -r -c "${partial_release_causal}" | tail -n 1 | awk -F '\t' '{print $2}')" != 1 ]]; then
+    echo "later ACK did not release exactly one causal MMS packet" >&2
+    exit 1
+fi
+
+python3 -m py_compile "${script_dir}/extract-local-mms.py"
+python3 -m py_compile "${script_dir}/information-report-oracle.py"
+python3 -m py_compile "${script_dir}/identify-oracle.py"
+python3 -m py_compile "${script_dir}/event-notification-oracle.py"
+python3 -m py_compile "${script_dir}/ds-transfer-set-oracle.py"
+python3 -m unittest \
+    "${script_dir}/test-causal-oracle.py" \
+    "${script_dir}/test-information-report-oracle.py" \
+    "${script_dir}/test-identify-oracle.py" \
+    "${script_dir}/test-event-notification-oracle.py" \
+    "${script_dir}/test-ds-transfer-set-oracle.py"
+echo "local corpus validation tools passed"

@@ -1,0 +1,651 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses and reassembles the COTP transport layer used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_COTP;
+
+import spicy;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+
+const MAX_PARAMETER_COUNT: uint64 = 64;
+const MAX_REASSEMBLED_TSDU_LENGTH: uint64 = 16 * 1024 * 1024;
+const MAX_TSDU_FRAGMENTS: uint64 = 256;
+
+# Result of applying the state-dependent part of a captured COTP transport
+# boundary.  The value is retained with the stream offset so a synchronized
+# retry observes the decision made before the first transition mutated state.
+const BOUNDARY_ACCEPTED: uint8 = 0;
+const BOUNDARY_REJECT_DC: uint8 = 1;
+const BOUNDARY_REJECT_CC: uint8 = 2;
+
+public type ReassemblyState = struct {
+    directionToken: uint64;
+    pending: bytes;
+    fragmentCount: uint64;
+    fragmentLimitExceeded: bool;
+    transportEpoch: uint64;
+    haveCotpLifecycleMarker: bool;
+    lastCotpLifecycleOffset: uint64;
+    lastCotpLifecycleCode: uint8;
+    lastCotpBoundaryDisposition: uint8;
+    lastCotpBoundaryEpoch: uint64;
+    lastCotpBoundaryHadPendingConnectionRequest: bool;
+    lastCotpBoundaryExpectedSourceReference: uint16;
+    haveSessionLifecycleMarker: bool;
+    lastSessionLifecycleOffset: uint64;
+    lastSessionLifecycleCode: uint8;
+};
+
+# Assign each TCP direction parser a stable connection-scoped identity. The
+# shared Presentation state can then distinguish a CC from the CR direction
+# from a confirmation observed on its peer direction.
+public function ensureTransportDirection(
+    state: ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    if (state.directionToken == 0) {
+        presentationState.nextCotpDirectionToken += 1;
+        state.directionToken = presentationState.nextCotpDirectionToken;
+    }
+}
+
+function clearPendingConnectionRequest(
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    presentationState.haveCotpConnectionRequest = False;
+    presentationState.cotpConnectionRequestSourceReference = 0;
+    presentationState.cotpConnectionRequestDirectionToken = 0;
+}
+
+public function hasOppositeDirectionConnectionRequest(
+    state: ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+): bool {
+    ensureTransportDirection(state, presentationState);
+    return (
+        presentationState.haveCotpConnectionRequest &&
+        presentationState.cotpConnectionRequestDirectionToken != 0 &&
+        presentationState.cotpConnectionRequestDirectionToken !=
+            state.directionToken
+    );
+}
+
+function clearDirectionReassembly(
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&
+) {
+    state.pending = b"";
+    state.fragmentCount = 0;
+    state.fragmentLimitExceeded = False;
+    sessionState.pending = b"";
+    sessionState.fragmentCount = 0;
+    sessionState.active = False;
+}
+
+function beginTransportBoundary(
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    ensureTransportDirection(state, presentationState);
+    presentationState.cotpTransportEpoch += 1;
+    clearDirectionReassembly(state, sessionState);
+    state.transportEpoch = presentationState.cotpTransportEpoch;
+    ICCP_PRESENTATION::resetContextNegotiation(presentationState);
+    clearPendingConnectionRequest(presentationState);
+    presentationState.cotpClassZeroKnown = False;
+    presentationState.cotpReconnectRequired = True;
+}
+
+public function isTransportBoundary(typeCode: uint8): bool {
+    return (
+        typeCode == 0xe0 || typeCode == 0xd0 ||
+        typeCode == 0x80 || typeCode == 0xc0 ||
+        typeCode == 0x70
+    );
+}
+
+# Keep direction-local fragment state synchronized with a transport boundary
+# already observed by the peer parser. TPKT calls this as soon as its complete
+# four-octet header is available; TPDU retains the call as an idempotent
+# fallback for direct/future callers.
+public function synchronizeTransportEpoch(
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    ensureTransportDirection(state, presentationState);
+    if (state.transportEpoch != presentationState.cotpTransportEpoch) {
+        clearDirectionReassembly(state, sessionState);
+        state.transportEpoch = presentationState.cotpTransportEpoch;
+    }
+}
+
+public function invalidateCorrelatedConnectionConfirm(
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    beginTransportBoundary(state, sessionState, presentationState);
+}
+
+# Apply the conservative high-nibble transport transition as soon as the LI
+# and type-code octets have been captured. This function deliberately does not
+# throw: the caller must first publish its lifecycle marker, then reject an
+# unsupported DC or state-invalid CC using the returned disposition. That
+# preserves envelope-first policy cleanup even for a partial or malformed
+# record.
+public function applyTransportBoundary(
+    typeCode: uint8,
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+): uint8 {
+    ensureTransportDirection(state, presentationState);
+
+    if (typeCode == 0xc0) {
+        beginTransportBoundary(state, sessionState, presentationState);
+        return BOUNDARY_REJECT_DC;
+    }
+
+    if (typeCode == 0xe0 || typeCode == 0x80 || typeCode == 0x70) {
+        beginTransportBoundary(state, sessionState, presentationState);
+        return BOUNDARY_ACCEPTED;
+    }
+
+    if (typeCode == 0xd0) {
+        # Consume a correlated CR at the CC prefix, while its expected source
+        # reference is retained by the caller's retry-stable marker cache. A
+        # malformed or stalled CC can then never leave the old request token
+        # available to a later confirmation.
+        if (presentationState.haveCotpConnectionRequest) {
+            if (hasOppositeDirectionConnectionRequest(
+                state, presentationState)) {
+                clearPendingConnectionRequest(presentationState);
+                return BOUNDARY_ACCEPTED;
+            }
+
+            # A request observed on this same TCP direction cannot be
+            # confirmed here. Fail closed even if surrounding state was
+            # already degraded by an earlier malformed capture boundary.
+            beginTransportBoundary(state, sessionState, presentationState);
+            return BOUNDARY_REJECT_CC;
+        }
+
+        if (
+            presentationState.cotpReconnectRequired ||
+            presentationState.cotpClassZeroKnown
+        ) {
+            beginTransportBoundary(state, sessionState, presentationState);
+            return BOUNDARY_REJECT_CC;
+        }
+
+        beginGapEpoch(state, sessionState, presentationState);
+    }
+
+    return BOUNDARY_ACCEPTED;
+}
+
+# An unobserved TCP interval may contain a transport or upper-layer lifecycle
+# boundary.  Drop all exact connection/association trust and synchronize both
+# direction parsers through a new epoch, but leave DT eligible for bounded
+# midstream recovery. An observed replacement/disconnect family, and the
+# analyzer's conservative treatment of ER as a trust boundary, are stricter
+# and use beginTransportBoundary() above to require a fresh CR/CC handshake.
+public function beginGapEpoch(
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    ensureTransportDirection(state, presentationState);
+    presentationState.cotpTransportEpoch += 1;
+    clearDirectionReassembly(state, sessionState);
+    state.transportEpoch = presentationState.cotpTransportEpoch;
+    ICCP_PRESENTATION::resetContextNegotiation(presentationState);
+    clearPendingConnectionRequest(presentationState);
+    presentationState.cotpClassZeroKnown = False;
+    presentationState.cotpReconnectRequired = False;
+}
+
+public type Parameter = unit {
+    code: uint8;
+    length: uint8;
+
+    switch (self.code) {
+        0xc0 -> tpduSize: uint8 &requires=self.length == 1;
+        0xc1 -> callingTsap: bytes &size=self.length;
+        0xc2 -> calledTsap: bytes &size=self.length;
+        0xc3 -> checksum: uint16 &requires=self.length == 2;
+        0xc4 -> version: uint8 &requires=self.length == 1;
+        0xc5 -> protectionParameters: bytes &size=self.length;
+        0xc6 -> additionalOptions: uint8 &requires=self.length == 1;
+        0xc7 -> alternativeClasses: bytes &size=self.length;
+        * -> raw: bytes &size=self.length;
+    };
+};
+
+public type ConnectionHeader = unit(length: uint64) {
+    : void &requires=length >= 5;
+    destinationReference: uint16;
+    sourceReference: uint16;
+    classOptions: uint8;
+    : void &requires=self.classOptions == 0;
+
+    var parameterCount: uint64 = 0;
+    parameters: Parameter[] &eod foreach {
+        self.parameterCount += 1;
+        if (self.parameterCount > MAX_PARAMETER_COUNT)
+            throw "COTP connection header exceeds configured parameter limit";
+    }
+} &size=length;
+
+public type DisconnectRequestHeader = unit(length: uint64) {
+    : void &requires=length >= 5;
+    destinationReference: uint16;
+    sourceReference: uint16;
+    reason: uint8;
+    var parameterCount: uint64 = 0;
+    parameters: Parameter[] &eod foreach {
+        self.parameterCount += 1;
+        if (self.parameterCount > MAX_PARAMETER_COUNT)
+            throw "COTP disconnect-request header exceeds configured parameter limit";
+    }
+} &size=length;
+
+public type ErrorHeader = unit(length: uint64) {
+    : void &requires=length >= 3;
+    destinationReference: uint16;
+    rejectCause: uint8;
+    invalidTpdu: bytes &eod;
+} &size=length;
+
+public type DataControl = bitfield(8) {
+    tpduNumber: 0..6;
+    endOfTsdu: 7 &convert=cast<bool>($$);
+};
+
+public type DataTransfer = unit(
+    headerLength: uint64,
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&,
+    streamOffset: uint64
+) {
+    : void &requires=headerLength == 1;
+    control: DataControl;
+    : void &requires=self.control.tpduNumber == 0;
+
+    var tsduComplete: bool = False;
+    var reassembled: bytes;
+    var sessionFrameSafe: bool = False;
+    var sessionSpduCode: uint8 = 0;
+    var sessionAssociationBoundary: bool = False;
+    var publishSessionLifecycleMarker: bool = False;
+
+    payload: bytes &eod {
+        if (
+            |state.pending| + |$$| >
+            MAX_REASSEMBLED_TSDU_LENGTH
+        )
+            throw "COTP TSDU exceeds configured reassembly length limit";
+
+        state.pending += $$;
+        state.fragmentCount += 1;
+
+        if (state.fragmentCount > MAX_TSDU_FRAGMENTS) {
+            state.fragmentLimitExceeded = True;
+            throw "COTP TSDU exceeds configured fragment limit";
+        }
+
+        if (self.control.endOfTsdu) {
+            self.reassembled = state.pending;
+            self.tsduComplete = True;
+            state.pending = b"";
+            state.fragmentCount = 0;
+        }
+    }
+
+    : void {
+        # TPKT synchronization is confirmed after the complete bounded COTP
+        # record succeeds, before detached upper-layer parsing. A malformed
+        # Session candidate is retained as lower-layer evidence and skipped;
+        # it must not terminate recovery for all later TPKTs on the direction.
+        confirm;
+        if (self.tsduComplete) {
+            self.sessionFrameSafe =
+                ICCP_SESSION::frameIsSafe(self.reassembled);
+            if (|self.reassembled| > 0) {
+                self.sessionSpduCode = *self.reassembled.at(0);
+                self.sessionAssociationBoundary =
+                    ICCP_SESSION::isAssociationBoundary(
+                        self.sessionSpduCode);
+            }
+
+            # A malformed Session boundary has no Session unit to invalidate
+            # state on its identifier hook.  Treat the bounded leading SPDU
+            # identifier conservatively and prevent stale contexts/fragments
+            # from authorizing a later TSDU on the same TCP connection.
+            if (
+                ! self.sessionFrameSafe &&
+                self.sessionAssociationBoundary
+            ) {
+                sessionState.pending = b"";
+                sessionState.fragmentCount = 0;
+                sessionState.active = False;
+                ICCP_PRESENTATION::resetContextNegotiation(
+                    presentationState);
+            }
+        }
+    }
+
+    # Detached Session parsing can fail after its identifier is available,
+    # which makes TPKT synchronization retry the same candidate. Capture the
+    # lifecycle envelope on the underlying TCP stream before entering that
+    # child parser, and publish it only once for a given absolute offset/code.
+    lifecycleMarkerState: bytes &size=0 {
+        if (self.tsduComplete && self.sessionAssociationBoundary) {
+            local markerOffset = streamOffset;
+            self.publishSessionLifecycleMarker =
+                ! state.haveSessionLifecycleMarker ||
+                state.lastSessionLifecycleOffset != markerOffset ||
+                state.lastSessionLifecycleCode != self.sessionSpduCode;
+
+            if (self.publishSessionLifecycleMarker) {
+                state.haveSessionLifecycleMarker = True;
+                state.lastSessionLifecycleOffset = markerOffset;
+                state.lastSessionLifecycleCode = self.sessionSpduCode;
+            }
+        }
+    }
+    lifecycleMarker: bytes &size=0;
+
+    # Session sees a complete TSDU only; individual COTP fragments are never
+    # dispatched independently.
+    session: ICCP_SESSION::Data(
+        sessionState,
+        presentationState
+    ) &parse-from=self.reassembled
+        if (self.tsduComplete && self.sessionFrameSafe);
+};
+
+# One TPDU bounded by its enclosing TPKT record. Connection establishment and
+# normal data are restricted to the supported strict class-0 profile; the
+# RFC 1006/2126 initial-data and expedited-data extensions are not enabled
+# because the analyzer does not retain their required negotiation state.
+public type TPDU = unit(
+    totalLength: uint64,
+    state: ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&,
+    streamOffset: uint64,
+    boundaryPrefixProcessed: bool,
+    boundaryDisposition: uint8,
+    boundaryEpoch: uint64,
+    boundaryHadPendingConnectionRequest: bool,
+    boundaryExpectedSourceReference: uint16
+) {
+    on %init {
+        # The shared epoch invalidates direction-local COTP/Session fragments
+        # when a transport boundary was observed in the peer direction.
+        synchronizeTransportEpoch(state, sessionState, presentationState);
+    }
+
+    : void &requires=totalLength >= 3;
+
+    lengthIndicator: uint8;
+    : void &requires=(
+        self.lengthIndicator > 0 &&
+        self.lengthIndicator != 255 &&
+        uint64(self.lengthIndicator) < totalLength
+    );
+
+    code: uint8;
+    var publishCotpLifecycleMarker: bool = False;
+    var typeCode: uint8 = 0;
+    var payloadLength: uint64 = 0;
+    var destinationReference: uint16 = 0;
+    var sourceReference: uint16 = 0;
+    var parameterCount: uint64 = 0;
+    var tpduNumber: uint8 = 0;
+    var endOfTsdu: bool = False;
+    var tsduComplete: bool = False;
+    var reassembledLength: uint64 = 0;
+    var effectiveBoundaryDisposition: uint8 = boundaryDisposition;
+    var effectiveBoundaryEpoch: uint64 = boundaryEpoch;
+    var hadPendingConnectionRequest: bool =
+        boundaryHadPendingConnectionRequest;
+    var expectedSourceReference: uint16 =
+        boundaryExpectedSourceReference;
+    var correlatedCcMayFail: bool = False;
+
+    # A late failure causes the enclosing synchronized Packet to be retried
+    # at the same stream position. Preserve envelope-first lifecycle reporting
+    # without publishing the same candidate on every retry.
+    lifecycleMarkerState: bytes &size=0 {
+        local markerCode = self.code & 0xf0;
+        if (! boundaryPrefixProcessed && isTransportBoundary(markerCode)) {
+            local markerOffset = streamOffset;
+            self.publishCotpLifecycleMarker =
+                ! state.haveCotpLifecycleMarker ||
+                state.lastCotpLifecycleOffset != markerOffset ||
+                state.lastCotpLifecycleCode != markerCode;
+
+            if (self.publishCotpLifecycleMarker) {
+                state.haveCotpLifecycleMarker = True;
+                state.lastCotpLifecycleOffset = markerOffset;
+                state.lastCotpLifecycleCode = markerCode;
+            }
+        }
+    }
+    lifecycleMarker: bytes &size=0;
+
+    : void {
+        self.typeCode = self.code & 0xf0;
+
+        # CR begins a new transport epoch; DR and the unsupported DC family
+        # invalidate it. ER is conservatively treated as a trust boundary even
+        # though this is an analyzer policy,
+        # not a claim that ER is a wire-level disconnect service. An
+        # uncorrelated CC begins a bounded midstream epoch only
+        # when neither a class nor a reconnect requirement is known; otherwise
+        # it invalidates the observed epoch and requires a new CR. A CC
+        # correlated to the current CR does not reset twice. Clear at the type
+        # boundary so even a subsequently malformed header cannot preserve
+        # stale upper-layer authorization or partial reassembly.
+        if (! boundaryPrefixProcessed &&
+            isTransportBoundary(self.typeCode)) {
+            if (self.publishCotpLifecycleMarker) {
+                if (self.typeCode == 0xd0 &&
+                    hasOppositeDirectionConnectionRequest(
+                        state, presentationState)) {
+                    self.hadPendingConnectionRequest = True;
+                    self.expectedSourceReference =
+                        presentationState.cotpConnectionRequestSourceReference;
+                }
+
+                self.effectiveBoundaryDisposition = applyTransportBoundary(
+                    self.typeCode, state, sessionState, presentationState);
+                self.effectiveBoundaryEpoch =
+                    presentationState.cotpTransportEpoch;
+                state.lastCotpBoundaryDisposition =
+                    self.effectiveBoundaryDisposition;
+                state.lastCotpBoundaryEpoch =
+                    self.effectiveBoundaryEpoch;
+                state.lastCotpBoundaryHadPendingConnectionRequest =
+                    self.hadPendingConnectionRequest;
+                state.lastCotpBoundaryExpectedSourceReference =
+                    self.expectedSourceReference;
+            }
+            else {
+                self.effectiveBoundaryDisposition =
+                    state.lastCotpBoundaryDisposition;
+                self.effectiveBoundaryEpoch = state.lastCotpBoundaryEpoch;
+                self.hadPendingConnectionRequest =
+                    state.lastCotpBoundaryHadPendingConnectionRequest;
+                self.expectedSourceReference =
+                    state.lastCotpBoundaryExpectedSourceReference;
+            }
+        }
+
+        # A peer-side boundary or gap that advances the shared epoch while this
+        # record is incomplete supersedes it. In particular, a stale CR/CC
+        # completion must never recreate a pending request or re-enable DATA.
+        if (isTransportBoundary(self.typeCode) &&
+            self.effectiveBoundaryEpoch !=
+                presentationState.cotpTransportEpoch)
+            throw "COTP boundary was superseded before record completion";
+
+        if (self.effectiveBoundaryDisposition == BOUNDARY_REJECT_DC)
+            throw "COTP DC TPDU is unavailable in class 0";
+        if (self.effectiveBoundaryDisposition == BOUNDARY_REJECT_CC)
+            throw "COTP CC has no opposite-direction pending connection request";
+
+        if (self.typeCode == 0x10)
+            throw "COTP expedited data requires unsupported RFC 2126 negotiation";
+
+        if (self.typeCode == 0xd0 && self.hadPendingConnectionRequest)
+            self.correlatedCcMayFail = True;
+    }
+    : void &requires=self.typeCode != 0;
+
+    switch (self.typeCode) {
+        0xe0,
+        0xd0 -> {
+            : void &requires=(
+                (self.code == 0xe0 || self.code == 0xd0) &&
+                totalLength <= 128
+            );
+            connection: ConnectionHeader(
+                uint64(self.lengthIndicator) - 1
+            ) {
+                self.destinationReference = $$.destinationReference;
+                self.sourceReference = $$.sourceReference;
+                self.parameterCount = $$.parameterCount;
+            }
+            payload: bytes &eod {
+                self.payloadLength = |$$|;
+            }
+        }
+
+        0xf0 -> {
+            : void &requires=self.code == 0xf0;
+            : void &requires=! presentationState.cotpReconnectRequired;
+            data: DataTransfer(
+                uint64(self.lengthIndicator) - 1,
+                state,
+                sessionState,
+                presentationState,
+                streamOffset
+            ) {
+                self.tpduNumber = $$.control.tpduNumber;
+                self.endOfTsdu = $$.control.endOfTsdu;
+                self.payloadLength = |$$.payload|;
+                self.tsduComplete = $$.tsduComplete;
+                self.reassembledLength = |$$.reassembled|;
+            }
+        }
+
+        0x80 -> {
+            : void &requires=self.code == 0x80;
+            disconnectRequest: DisconnectRequestHeader(
+                uint64(self.lengthIndicator) - 1
+            ) {
+                self.destinationReference = $$.destinationReference;
+                self.sourceReference = $$.sourceReference;
+                self.parameterCount = $$.parameterCount;
+            }
+            payload: bytes &eod {
+                self.payloadLength = |$$|;
+            }
+        }
+
+        0x70 -> {
+            : void &requires=self.code == 0x70;
+            error: ErrorHeader(uint64(self.lengthIndicator) - 1) {
+                self.destinationReference = $$.destinationReference;
+            }
+            payload: bytes &eod {
+                self.payloadLength = |$$|;
+            }
+        }
+
+        * -> {
+            header: bytes &size=(uint64(self.lengthIndicator) - 1);
+            payload: bytes &eod {
+                self.payloadLength = |$$|;
+            }
+        }
+    };
+
+    : void {
+        if (self.typeCode == 0xe0) {
+            if (self.destinationReference != 0)
+                throw "COTP class-0 CR destination reference must be zero";
+            if (self.sourceReference == 0)
+                throw "COTP class-0 CR source reference must be nonzero";
+            if (self.payloadLength != 0)
+                throw "COTP class-0 CR user data is unsupported";
+
+            # Every exact CR already began a replacement transport epoch, so
+            # its source reference intentionally replaces any earlier one.
+            presentationState.haveCotpConnectionRequest = True;
+            presentationState.cotpConnectionRequestSourceReference =
+                self.sourceReference;
+            presentationState.cotpConnectionRequestDirectionToken =
+                state.directionToken;
+            presentationState.cotpClassZeroKnown = True;
+        }
+        else if (self.typeCode == 0xd0) {
+            if (self.destinationReference == 0)
+                throw "COTP class-0 CC destination reference must be nonzero";
+            if (self.sourceReference == 0)
+                throw "COTP class-0 CC source reference must be nonzero";
+            if (self.payloadLength != 0)
+                throw "COTP class-0 CC user data is unsupported";
+            if (self.hadPendingConnectionRequest &&
+                self.destinationReference != self.expectedSourceReference)
+                throw "COTP CC destination reference does not match CR source reference";
+
+            self.correlatedCcMayFail = False;
+            presentationState.cotpClassZeroKnown = True;
+            presentationState.cotpReconnectRequired = False;
+            # Consume the request/confirm correlation token.  Leaving it live
+            # would let a repeated CC reuse an old CR and masquerade as a new
+            # connection establishment without invalidating upper layers.
+            clearPendingConnectionRequest(presentationState);
+        }
+    }
+
+    on %error {
+        # The prefix consumed a correlated CR so it cannot be reused. If the
+        # remainder later proves malformed, advance to a terminal epoch once;
+        # synchronized retries reuse the cached rejection disposition. A peer
+        # epoch that already superseded this record remains authoritative.
+        if (
+            self.typeCode == 0xd0 &&
+            self.correlatedCcMayFail &&
+            self.effectiveBoundaryEpoch ==
+                presentationState.cotpTransportEpoch
+        ) {
+            invalidateCorrelatedConnectionConfirm(
+                state, sessionState, presentationState);
+            self.effectiveBoundaryDisposition = BOUNDARY_REJECT_CC;
+            self.effectiveBoundaryEpoch =
+                presentationState.cotpTransportEpoch;
+            state.lastCotpBoundaryDisposition =
+                self.effectiveBoundaryDisposition;
+            state.lastCotpBoundaryEpoch = self.effectiveBoundaryEpoch;
+            self.correlatedCcMayFail = False;
+        }
+    }
+} &size=totalLength;

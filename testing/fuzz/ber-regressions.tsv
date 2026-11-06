@@ -1,0 +1,5 @@
+# name	parser	hex	error-substring
+high-tag-leading-zero	ICCP_BER_TEST::IdentifierCase	9f801f	not minimally encoded
+long-length-leading-zero	ICCP_BER_TEST::LengthCase	820080	not minimally encoded
+constructed-child-crosses-boundary	ICCP_BER_TEST::DocumentCase	3003020200	expected 2 bytes
+unterminated-oid-component	ICCP_BER_TEST::ObjectIdentifierCase	06022a81	component is truncated

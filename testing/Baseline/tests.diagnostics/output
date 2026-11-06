@@ -1,0 +1,3 @@
+presentation	2	recognized_not_dispatched	3	-	12	F	0	F	unknown	unknown	-	-	-	context is unknown, rejected, unsupported, or not ACSE/MMS with supported BER
+acse	0	opaque	-	1.3.6.1.4.1	24	T	9	T	unknown	originator	-	-	-	ACSE user information uses an unsupported or opaque encoding
+mms	8	raw	-	-	32	F	0	F	unknown	responder	-	-	-	recognized MMS top-level PDU body preserved for semantic decoding

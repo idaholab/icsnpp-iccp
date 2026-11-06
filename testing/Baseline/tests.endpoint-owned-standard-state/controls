@@ -1,0 +1,6 @@
+T	operate_command	requested	40	vcc	SHARED_CONTROL	Control_Command	1
+F	operate_command	confirmed	40	vcc	SHARED_CONTROL	Control_Command	1
+F	operate_setpoint_discrete	requested	41	vcc	SHARED_CONTROL	Control_Setpoint_Discrete	2
+T	operate_setpoint_discrete	confirmed	41	vcc	SHARED_CONTROL	Control_Setpoint_Discrete	2
+T	write_candidate	requested	42	aa	AA_CONTROL	-	-
+F	write_candidate	confirmed	42	aa	AA_CONTROL	-	-

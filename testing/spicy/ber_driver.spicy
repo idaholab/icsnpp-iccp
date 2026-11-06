@@ -1,0 +1,189 @@
+module ICCP_BER_TEST;
+
+import spicy;
+import ICCP_BER;
+
+public type IdentifierCase = unit {
+    identifier: ICCP_BER::Identifier;
+
+    on %done {
+        print "class=%s constructed=%s tag=%d octets=%d" % (
+            self.identifier.first.class_,
+            self.identifier.first.constructed,
+            self.identifier.tagNumber,
+            self.identifier.highTagOctetCount + 1
+        );
+    }
+};
+
+public type LengthCase = unit {
+    length: ICCP_BER::DefiniteLength;
+
+    on %done {
+        print "length=%d long=%s octets=%d" % (
+            self.length.value,
+            self.length.first.longForm,
+            self.length.encodedOctets
+        );
+    }
+};
+
+public type TLVCase = unit {
+    tlv: ICCP_BER::RawTLV;
+
+    on %done {
+        print "class=%s constructed=%s tag=%d length=%d value=%s" % (
+            self.tlv.identifier.first.class_,
+            self.tlv.identifier.first.constructed,
+            self.tlv.identifier.tagNumber,
+            self.tlv.length.value,
+            self.tlv.value
+        );
+    }
+};
+
+public type EnvelopeCase = unit {
+    value: bytes &eod;
+
+    on %done {
+        print "safe=%s" % ICCP_BER::tlvEnvelopeIsSafe(self.value);
+    }
+};
+
+type ExpectedUniversalHeader = unit(tagNumber: uint64, constructed: bool) {
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed == constructed &&
+        self.identifier.tagNumber == tagNumber
+    );
+};
+
+public type BooleanCase = unit {
+    header: ExpectedUniversalHeader(1, False);
+    value: ICCP_BER::BooleanValue(self.header.length.value);
+
+    on %done {
+        print "boolean=%s encoded=%d" % (self.value.value, self.value.encoded);
+    }
+};
+
+public type IntegerCase = unit {
+    header: ExpectedUniversalHeader(2, False);
+    value: ICCP_BER::IntegerValue(self.header.length.value);
+
+    on %done {
+        print "integer=%d encoded=%s" % (self.value.value, self.value.encoded);
+    }
+};
+
+public type EnumeratedCase = unit {
+    header: ExpectedUniversalHeader(10, False);
+    value: ICCP_BER::IntegerValue(self.header.length.value);
+
+    on %done {
+        print "enumerated=%d" % self.value.value;
+    }
+};
+
+public type NullCase = unit {
+    header: ExpectedUniversalHeader(5, False);
+    value: ICCP_BER::NullValue(self.header.length.value);
+
+    on %done {
+        print "null=true";
+    }
+};
+
+public type BitStringCase = unit {
+    header: ExpectedUniversalHeader(3, False);
+    value: ICCP_BER::BitStringValue(self.header.length.value);
+
+    on %done {
+        print "unused=%d value=%s" % (
+            self.value.unusedBits,
+            self.value.value
+        );
+    }
+};
+
+public type OctetStringCase = unit {
+    header: ExpectedUniversalHeader(4, False);
+    value: ICCP_BER::OctetStringValue(self.header.length.value);
+
+    on %done {
+        print "octets=%s" % self.value.value;
+    }
+};
+
+public type ObjectIdentifierCase = unit {
+    header: ExpectedUniversalHeader(6, False);
+    value: ICCP_BER::ObjectIdentifierValue(self.header.length.value);
+
+    on %done {
+        print "oid=%s" % self.value.value;
+    }
+};
+
+public type UTF8StringCase = unit {
+    header: ExpectedUniversalHeader(12, False);
+    value: ICCP_BER::CharacterStringValue(
+        self.header.length.value,
+        True
+    );
+
+    on %done {
+        print "utf8=%s" % self.value.value;
+    }
+};
+
+public type VisibleStringCase = unit {
+    header: ExpectedUniversalHeader(26, False);
+    value: ICCP_BER::CharacterStringValue(
+        self.header.length.value,
+        False
+    );
+
+    on %done {
+        print "visible=%s" % self.value.value;
+    }
+};
+
+public type UTCTimeCase = unit {
+    header: ExpectedUniversalHeader(23, False);
+    value: ICCP_BER::CharacterStringValue(
+        self.header.length.value,
+        False
+    );
+
+    on %done {
+        print "utc=%s" % self.value.value;
+    }
+};
+
+public type GeneralizedTimeCase = unit {
+    header: ExpectedUniversalHeader(24, False);
+    value: ICCP_BER::CharacterStringValue(
+        self.header.length.value,
+        False
+    );
+
+    on %done {
+        print "generalized=%s" % self.value.value;
+    }
+};
+
+public type DocumentCase = unit {
+    document: ICCP_BER::Document;
+
+    on %done {
+        print "class=%s constructed=%s tag=%d elements=%d depth=%d" % (
+            self.document.element.identifier.first.class_,
+            self.document.element.identifier.first.constructed,
+            self.document.element.identifier.tagNumber,
+            self.document.state.elements,
+            self.document.state.depth
+        );
+    }
+};

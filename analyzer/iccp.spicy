@@ -1,0 +1,194 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file defines the top-level ICCP/TASE.2 stream analyzer.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP;
+
+import spicy;
+import ICCP_TPKT;
+import ICCP_COTP;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+
+# Spicy 1.14 resolves an imported %context value reliably when it is passed as
+# a child-unit argument, but a member initializer runs before Zeek attaches
+# that context. Bind it through a zero-length first child so gap hooks always
+# have a valid shared reference, including before the first TPKT begins.
+type SharedContextReference = struct {
+    presentationState: ICCP_PRESENTATION::State&;
+};
+
+type BindSharedContext = unit(
+    target: SharedContextReference&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    : void {
+        target.presentationState = presentationState;
+    }
+};
+
+# Keep synchronization on the unit registered directly with Zeek. TCP gaps
+# enter Spicy as missing stream regions; the statistics delta observed by
+# %synced distinguishes a crossed gap from ordinary malformed-byte recovery.
+public type ICCP_Connection = unit {
+    # Zeek supplies the same context instance to both top-level TCP direction
+    # parsers. Presentation negotiation therefore remains connection-scoped
+    # and is released automatically with the analyzer connection.
+    %context = ICCP_PRESENTATION::State;
+    %sync-advance-block-size = ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE;
+
+    var cotpState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var recoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var sharedContext: SharedContextReference& =
+        new SharedContextReference;
+    var packetCount: uint64 = 0;
+    var lastConfirmedOffset: uint64 = 0;
+    var gapBytesAtLastConfirmation: uint64 = 0;
+    var gapBytesAtLastEpochReset: uint64 = 0;
+    var gapBytesAtLastEvent: uint64 = 0;
+    var recoveryCrossedGap: bool = False;
+    var recoveryNewGap: bool = False;
+    var recoveryNewGapBytes: uint64 = 0;
+    var recoveryNewEpisode: bool = False;
+    var recoveryScanBytes: uint64 = 0;
+    var lastRecoveryAdvanceOffset: uint64 = 0;
+
+    contextBinding: BindSharedContext(
+        self.sharedContext,
+        self.context()
+    );
+
+    : (ICCP_TPKT::Packet(
+        self.cotpState,
+        self.sessionState,
+        self.sharedContext.presentationState,
+        self.recoveryState
+    ) &synchronize)[] foreach {
+        if ($$.complete) {
+            self.packetCount += 1;
+            confirm;
+            self.lastConfirmedOffset = self.offset();
+            self.lastRecoveryAdvanceOffset = self.lastConfirmedOffset;
+            # Snapshot at the packet's start: Spicy may defer the foreach hook
+            # until the delivery containing the next gap has already arrived.
+            self.gapBytesAtLastConfirmation = $$.gapBytesAtStart;
+            self.recoveryScanBytes = 0;
+            self.recoveryState.active = False;
+            self.recoveryNewEpisode = False;
+        }
+    }
+
+    on %synced {
+        local currentGapBytes =
+            self.stream().statistics().num_gap_bytes;
+        self.recoveryCrossedGap =
+            currentGapBytes > self.gapBytesAtLastConfirmation;
+        self.recoveryNewGap =
+            currentGapBytes > self.gapBytesAtLastEvent;
+        self.recoveryNewGapBytes = 0;
+        if (self.recoveryNewGap) {
+            self.recoveryNewGapBytes =
+                currentGapBytes - self.gapBytesAtLastEvent;
+            self.gapBytesAtLastEvent = currentGapBytes;
+        }
+        self.recoveryNewEpisode = ! self.recoveryState.active;
+        self.recoveryState.active = True;
+        self.recoveryState.crossedGap = self.recoveryCrossedGap;
+
+        # %sync_advance normally performs this reset as soon as it encounters
+        # the missing region. Keep this fallback for runtimes that locate a
+        # synchronization token without first reporting an advance.
+        if (currentGapBytes > self.gapBytesAtLastEpochReset) {
+            ICCP_COTP::beginGapEpoch(
+                self.cotpState,
+                self.sessionState,
+                self.sharedContext.presentationState
+            );
+            self.gapBytesAtLastEpochReset = currentGapBytes;
+        }
+        else {
+            self.cotpState.pending = b"";
+            self.cotpState.fragmentCount = 0;
+            self.sessionState.pending = b"";
+            self.sessionState.fragmentCount = 0;
+            self.sessionState.active = False;
+        }
+    }
+
+    on %sync_advance(offset: uint64) {
+        local currentGapBytes =
+            self.stream().statistics().num_gap_bytes;
+
+        # Record the recovery episode when scanning begins, not only when a
+        # later synchronization token is found. Otherwise a malformed terminal
+        # tail after valid ICCP traffic would incorrectly retain a contiguous
+        # direction verdict. The event bridge publishes this once per episode.
+        self.recoveryNewEpisode = ! self.recoveryState.active;
+        if (self.recoveryNewEpisode) {
+            self.recoveryCrossedGap =
+                currentGapBytes > self.gapBytesAtLastConfirmation;
+            self.recoveryState.active = True;
+            self.recoveryState.crossedGap = self.recoveryCrossedGap;
+        }
+
+        # Reset the shared parser context at the missing region itself, even
+        # when no later DT synchronization token exists in this direction.
+        # The top-level analyzer's typed Zeek context is available even when
+        # no Packet was initialized before the gap.
+        if (currentGapBytes > self.gapBytesAtLastEpochReset) {
+            ICCP_COTP::beginGapEpoch(
+                self.cotpState,
+                self.sessionState,
+                self.sharedContext.presentationState
+            );
+            self.gapBytesAtLastEpochReset = currentGapBytes;
+        }
+
+        # A second policy cleanup must follow any pre-gap Packet hooks that
+        # Zeek deferred until this delivery. Queue it here; %synced retains a
+        # fallback for runtimes that find a token without an advance hook.
+        self.recoveryNewGap =
+            currentGapBytes > self.gapBytesAtLastEvent;
+        self.recoveryNewGapBytes = 0;
+        if (self.recoveryNewGap) {
+            self.recoveryNewGapBytes =
+                currentGapBytes - self.gapBytesAtLastEvent;
+            self.gapBytesAtLastEvent = currentGapBytes;
+        }
+
+        local baseline = self.lastConfirmedOffset;
+        if (self.lastRecoveryAdvanceOffset > baseline)
+            baseline = self.lastRecoveryAdvanceOffset;
+
+        if (offset > baseline) {
+            local advance = offset - baseline;
+            if (advance > ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE)
+                advance = ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE;
+            self.recoveryScanBytes += advance;
+            self.lastRecoveryAdvanceOffset = offset;
+        }
+
+        if (self.recoveryScanBytes > ICCP_TPKT::MAX_RECOVERY_SCAN_BYTES)
+            throw "TPKT recovery scan exceeds configured byte limit";
+    }
+
+    on %done {
+        if (self.cotpState.fragmentLimitExceeded)
+            throw "COTP TSDU exceeds configured fragment limit";
+        if (self.packetCount == 0)
+            throw "TPKT stream contains no complete records";
+    }
+};

@@ -1,0 +1,6 @@
+Ctransfer-legacy-first	define	requested	1	L_LEGACY	F	-	-
+Ctransfer-legacy-first	define	confirmed	1	L_LEGACY	T	-	-
+Ctransfer-aggregate-first	define	requested	2	L_AGGREGATE	F	-	-
+Ctransfer-aggregate-first	define	confirmed	2	L_AGGREGATE	T	-	-
+Ctransfer-v3-first	define	requested	3	L_V3	F	-	-
+Ctransfer-v3-first	define	confirmed	3	L_V3	T	-	-

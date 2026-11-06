@@ -1,0 +1,1249 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-mms-tests.XXXXXX")"
+testPlugin="${testBuildDir}/mms-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" \
+    "${projectDir}/testing/spicy/mms_driver.spicy" \
+    "${projectDir}/analyzer/mms.spicy" \
+    "${projectDir}/analyzer/mms_types.spicy" \
+    "${projectDir}/analyzer/ber.spicy"
+
+passCount=0
+
+# ISO 9506-1 fixes ParameterSupportOptions at 18 bits and
+# ServiceSupportOptions at 93 bits. The first octet of each IMPLICIT BIT STRING
+# content is the unused-bit count.
+initDetailHex="a418800101810406f00000820d03aa5500000000000000000000"
+initRequestHex="a820810105820105${initDetailHex}"
+initResponseHex="a92780020400810105820105830110${initDetailHex}"
+
+runValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_MMS_TEST::PDUCase" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected MMS output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_MMS_TEST::PDUCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid MMS input unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected MMS error for ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runCaseValid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expected="$3"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected MMS output for ${parser} ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runCaseInvalid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expectedError="$3"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid MMS input unexpectedly parsed by ${parser}: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected MMS error for ${parser} ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runValid "a005020101a300" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST recognized=true decoded=false constructed=true length=5 body=\\x02\\x01\\x01\\xa3\\x00"
+runValid "a1050201018300" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE recognized=true decoded=false constructed=true length=5 body=\\x02\\x01\\x01\\x83\\x00"
+runValid "a20a800101a205a003800102" \
+    "type=TopLevelPDU::CONFIRMED_ERROR recognized=true decoded=true constructed=true length=10 body=\\x80\\x01\\x01\\xa2\\x05\\xa0\\x03\\x80\\x01\\x02"
+runValid "a303810100" \
+    "type=TopLevelPDU::UNCONFIRMED recognized=true decoded=false constructed=true length=3 body=\\x81\\x01\\x00"
+runValid "a0050201018400" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST recognized=true decoded=false constructed=true length=5 body=\\x02\\x01\\x01\\x84\\x00"
+runValid "a3028000" \
+    "type=TopLevelPDU::UNCONFIRMED recognized=true decoded=false constructed=true length=2 body=\\x80\\x00"
+runValid "a1050201018b00" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE recognized=true decoded=true constructed=true length=5 body=\\x02\\x01\\x01\\x8b\\x00"
+runValid "a406800107850101" \
+    "type=TopLevelPDU::REJECT recognized=true decoded=true constructed=true length=6 body=\\x80\\x01\\x07\\x85\\x01\\x01"
+runValid "850101" "type=TopLevelPDU::CANCEL_REQUEST recognized=true decoded=true constructed=false length=1 body=\\x01"
+runValid "860101" "type=TopLevelPDU::CANCEL_RESPONSE recognized=true decoded=true constructed=false length=1 body=\\x01"
+runValid "a70a800109a105a003800102" \
+    "type=TopLevelPDU::CANCEL_ERROR recognized=true decoded=true constructed=true length=10 body=\\x80\\x01\\x09\\xa1\\x05\\xa0\\x03\\x80\\x01\\x02"
+runValid "${initRequestHex}" \
+    "type=TopLevelPDU::INITIATE_REQUEST recognized=true decoded=true constructed=true length=32 body=\\x81\\x01\\x05\\x82\\x01\\x05\\xa4\\x18\\x80\\x01\\x01\\x81\\x04\\x06\\xf0\\x00\\x00\\x82\\x0d\\x03\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runValid "${initResponseHex}" \
+    "type=TopLevelPDU::INITIATE_RESPONSE recognized=true decoded=true constructed=true length=39 body=\\x80\\x02\\x04\\x00\\x81\\x01\\x05\\x82\\x01\\x05\\x83\\x01\\x10\\xa4\\x18\\x80\\x01\\x01\\x81\\x04\\x06\\xf0\\x00\\x00\\x82\\x0d\\x03\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runValid "aa0da0038001028101078203626164" \
+    "type=TopLevelPDU::INITIATE_ERROR recognized=true decoded=true constructed=true length=13 body=\\xa0\\x03\\x80\\x01\\x02\\x81\\x01\\x07\\x82\\x03bad"
+runValid "8b00" "type=TopLevelPDU::CONCLUDE_REQUEST recognized=true decoded=true constructed=false length=0 body="
+runValid "8c00" "type=TopLevelPDU::CONCLUDE_RESPONSE recognized=true decoded=true constructed=false length=0 body="
+runValid "ad05a003800102" \
+    "type=TopLevelPDU::CONCLUDE_ERROR recognized=true decoded=true constructed=true length=5 body=\\xa0\\x03\\x80\\x01\\x02"
+
+runValid "8e02aabb" \
+    "type=TopLevelPDU::UNKNOWN recognized=false decoded=false constructed=false length=2 body=\\xaa\\xbb"
+runValid "3000" \
+    "type=TopLevelPDU::UNKNOWN recognized=false decoded=false constructed=true length=0 body="
+
+runInvalid "8000" "requires constructed encoding"
+runInvalid "a500" "requires primitive encoding"
+runInvalid "8b0100" "must have an empty body"
+runInvalid "a0030102" "expected 3 bytes"
+runInvalid "a0820080" "not minimally encoded"
+
+initiateParser="ICCP_MMS_TEST::InitiateCase"
+errorParser="ICCP_MMS_TEST::ErrorCase"
+additionalCodeParser="ICCP_MMS_TEST::AdditionalCodeCase"
+confirmedParser="ICCP_MMS_TEST::ConfirmedCase"
+identifyParser="ICCP_MMS_TEST::IdentifyCase"
+associationParser="ICCP_MMS_TEST::AssociationCase"
+eventNotificationParser="ICCP_MMS_TEST::EventNotificationCase"
+confirmationParser="ICCP_MMS_TEST::ProtocolConfirmationCase"
+provenancedParser="ICCP_MMS_TEST::ProvenancedPDUCase"
+
+runCaseValid "${confirmationParser}" "a0050201018200" \
+    "recognized=true decoded=true confirmation=true"
+runCaseValid "${confirmationParser}" "a008020101bf4d02aabb" \
+    "recognized=true decoded=false confirmation=false"
+runCaseValid "${confirmationParser}" "8e02aabb" \
+    "recognized=false decoded=false confirmation=false"
+runCaseValid "${confirmationParser}" \
+    "a20f800101a20aa003800100a303860100" \
+    "recognized=true decoded=false confirmation=false"
+runCaseValid "${provenancedParser}" "a0050201018200" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST decoded=true provenance=2"
+runCaseInvalid "${provenancedParser}" "a00502010182000500" \
+    "trailing data"
+runCaseValid "${confirmationParser}" \
+    "a00a02010130038001018200" \
+    "recognized=true decoded=false confirmation=false"
+
+runCaseValid "${associationParser}" \
+    "a403810101" \
+    "type=TopLevelPDU::REJECT decoded=true invoke=-1 reasonTag=1 reason=1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "a406800107850101" \
+    "type=TopLevelPDU::REJECT decoded=true invoke=7 reasonTag=5 reason=1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "85012a" \
+    "type=TopLevelPDU::CANCEL_REQUEST decoded=true invoke=42 reasonTag=0 reason=-1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "86012a" \
+    "type=TopLevelPDU::CANCEL_RESPONSE decoded=true invoke=42 reasonTag=0 reason=-1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "a70a800109a105a003800102" \
+    "type=TopLevelPDU::CANCEL_ERROR decoded=true invoke=9 reasonTag=0 reason=-1 class=0 code=2 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "ad08a003800102810107" \
+    "type=TopLevelPDU::CONCLUDE_ERROR decoded=true invoke=-1 reasonTag=0 reason=-1 class=0 code=2 additional=7 description="
+runCaseValid "${associationParser}" \
+    "a40980047fffffff850101" \
+    "type=TopLevelPDU::REJECT decoded=true invoke=2147483647 reasonTag=5 reason=1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "85047fffffff" \
+    "type=TopLevelPDU::CANCEL_REQUEST decoded=true invoke=2147483647 reasonTag=0 reason=-1 class=0 code=0 additional=-1 description="
+runCaseValid "${associationParser}" \
+    "a70d80047fffffffa105a003800102" \
+    "type=TopLevelPDU::CANCEL_ERROR decoded=true invoke=2147483647 reasonTag=0 reason=-1 class=0 code=2 additional=-1 description="
+runCaseInvalid "${associationParser}" \
+    "a40a80050080000000850101" "requires failed"
+runCaseInvalid "${associationParser}" \
+    "85050080000000" "requires failed"
+runCaseInvalid "${associationParser}" \
+    "a70e80050080000000a105a003800102" "requires failed"
+runCaseInvalid "${associationParser}" \
+    "a403810107" "reject reason is out of range"
+runCaseInvalid "${associationParser}" \
+    "a403820104" "reject reason is out of range"
+
+runCaseValid "${confirmedParser}" \
+    "a01202012a3006800101810100a3053003020101" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST decoded=false invoke=42 modifiers=2 modifierPosition=-1 service=3 constructed=true serviceLength=5 class=0 code=0"
+runCaseValid "${confirmedParser}" \
+    "a1080201028300bf4f00" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE decoded=false invoke=2 modifiers=0 modifierPosition=-1 service=3 constructed=false serviceLength=0 class=0 code=0"
+runCaseValid "${confirmedParser}" \
+    "a20d800103810101a205a003800102" \
+    "type=TopLevelPDU::CONFIRMED_ERROR decoded=true invoke=3 modifiers=0 modifierPosition=1 service=0 constructed=false serviceLength=0 class=0 code=2"
+runCaseValid "${confirmedParser}" \
+    "a00802047fffffff8200" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST decoded=true invoke=2147483647 modifiers=0 modifierPosition=-1 service=2 constructed=false serviceLength=0 class=0 code=0"
+runCaseValid "${confirmedParser}" \
+    "a21380047fffffff81047fffffffa205a003800102" \
+    "type=TopLevelPDU::CONFIRMED_ERROR decoded=true invoke=2147483647 modifiers=0 modifierPosition=2147483647 service=0 constructed=false serviceLength=0 class=0 code=2"
+runCaseInvalid "${confirmedParser}" \
+    "a009020500800000008200" "requires failed"
+runCaseInvalid "${confirmedParser}" \
+    "a20e80050080000000a205a003800102" "requires failed"
+runCaseInvalid "${confirmedParser}" \
+    "a21180010181050080000000a205a003800102" "requires failed"
+runCaseInvalid "${confirmedParser}" \
+    "a212800101810100a20aa003800100a303860100" \
+    "modifier position conflicts"
+
+runCaseValid "${identifyParser}" \
+    "a0050201018200" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=2 invoke=1 constructed=false vendor= model= revision= syntaxes=0 first="
+runCaseValid "${identifyParser}" \
+    "a114020101a20f800441636d6581024d318203312e30" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=2 invoke=1 constructed=true vendor=Acme model=M1 revision=1.0 syntaxes=0 first="
+runCaseValid "${identifyParser}" \
+    "a11d020101a218800441636d6581024d318203312e30a307060528ca220201" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=2 invoke=1 constructed=true vendor=Acme model=M1 revision=1.0 syntaxes=1 first=1.0.9506.2.1"
+
+runCaseInvalid "${identifyParser}" "a006020101820100" "requires failed"
+runCaseInvalid "${identifyParser}" "a005020101a200" "requires failed"
+runCaseInvalid "${identifyParser}" "a1050201018200" "requires failed"
+runCaseInvalid "${identifyParser}" \
+    "a10f020101a20a800441636d6581024d31" "missing a mandatory field"
+runCaseInvalid "${identifyParser}" \
+    "a114020101a20f810441636d6580024d318203312e30" \
+    "invalid or out of order"
+runCaseInvalid "${identifyParser}" \
+    "a116020101a211800441636d6581024d318203312e308300" \
+    "invalid or out of order"
+runCaseInvalid "${identifyParser}" \
+    "a112020101a20d8002c32881024d318203312e30" "illegal UTF8"
+runCaseInvalid "${identifyParser}" \
+    "a118020101a213800441636d6581024d318203312e30a3020600" \
+    "empty value"
+
+runCaseValid "${eventNotificationParser}" \
+    "a32ba229a0098007454e524f4c4c31a111800f425245414b45525f73756363657373820100830102a40381012a" \
+    "type=TopLevelPDU::UNCONFIRMED service=2 enrollment=0//ENROLL1 condition=0//BREAKER_success severity=0 state=true/2 time=1/42/* lost=false ack=false/-1 action=false"
+runCaseValid "${eventNotificationParser}" \
+    "a328a226a0098007454e524f4c4c31a10e800c425245414b45525f74696d65820100a406800400000001" \
+    "type=TopLevelPDU::UNCONFIRMED service=2 enrollment=0//ENROLL1 condition=0//BREAKER_time severity=0 state=false/-1 time=0/-1/\\x00\\x00\\x00\\x01 lost=false ack=false/-1 action=false"
+runCaseValid "${confirmationParser}" \
+    "a330a22ea0098007454e524f4c4c31a111800f425245414b45525f73756363657373820100830102a40381012aa803800141" \
+    "recognized=true decoded=false confirmation=false"
+runCaseInvalid "${eventNotificationParser}" \
+    "a326a224a0098007454e524f4c4c31a111800f425245414b45525f73756363657373820100830102" \
+    "missing mandatory fields"
+runCaseInvalid "${eventNotificationParser}" \
+    "a32ba229a0098007454e524f4c4c31a111800f425245414b45525f73756363657373820180830102a40381012a" \
+    "severity is out of range"
+runCaseInvalid "${eventNotificationParser}" \
+    "a32da22ba00b8007454e524f4c4c310500a111800f425245414b45525f73756363657373820100830102a40381012a" \
+    "size amount not consumed"
+runCaseInvalid "${eventNotificationParser}" \
+    "a328a226a0098007454e524f4c4c31a10e800c425245414b45525f74696d65820100a4068004f0000000" \
+    "requires failed"
+
+runCaseValid "${initiateParser}" "${initRequestHex}" \
+    "type=TopLevelPDU::INITIATE_REQUEST decoded=true local=-1 maxCalling=5 maxCalled=5 nesting=-1 version=1 parameterUnused=6 parameter=\\xf0\\x00\\x00 servicesUnused=3 services=\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runCaseValid "${initiateParser}" "${initResponseHex}" \
+    "type=TopLevelPDU::INITIATE_RESPONSE decoded=true local=1024 maxCalling=5 maxCalled=5 nesting=16 version=1 parameterUnused=6 parameter=\\xf0\\x00\\x00 servicesUnused=3 services=\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+# Local Detail is an implementation-defined Integer32, not a negotiation
+# limit, so negative values remain syntactically and semantically valid.
+runCaseValid "${initiateParser}" \
+    "a8238001fe810105820105a418800101810406f00000820d03aa5500000000000000000000" \
+    "type=TopLevelPDU::INITIATE_REQUEST decoded=true local=-2 maxCalling=5 maxCalled=5 nesting=-1 version=1 parameterUnused=6 parameter=\\xf0\\x00\\x00 servicesUnused=3 services=\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runCaseValid "${initiateParser}" \
+    "a82f810105820105a427800101810406f00000820d03aa5500000000000000000000830401800000840205408503505249" \
+    "type=TopLevelPDU::INITIATE_REQUEST decoded=true local=-1 maxCalling=5 maxCalled=5 nesting=-1 version=1 parameterUnused=6 parameter=\\xf0\\x00\\x00 servicesUnused=3 services=\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runCaseValid "${initiateParser}" \
+    "a823810105820105a418800101810406f00000820d03aa55000000000000000000008501aa" \
+    "type=TopLevelPDU::INITIATE_REQUEST decoded=true local=-1 maxCalling=5 maxCalled=5 nesting=-1 version=1 parameterUnused=6 parameter=\\xf0\\x00\\x00 servicesUnused=3 services=\\xaaU\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
+runCaseValid "${errorParser}" \
+    "aa0da0038001028101078203626164" \
+    "type=TopLevelPDU::INITIATE_ERROR decoded=true class=0 code=2 additional=7 description=bad"
+runCaseValid "${additionalCodeParser}" \
+    "aa05a003800100" \
+    "type=TopLevelPDU::INITIATE_ERROR decoded=true present=false additional=-1"
+runCaseValid "${additionalCodeParser}" \
+    "aa08a0038001008101ff" \
+    "type=TopLevelPDU::INITIATE_ERROR decoded=true present=true additional=-1"
+runCaseValid "${errorParser}" "aa0aa003800100a303860100" \
+    "type=TopLevelPDU::INITIATE_ERROR decoded=false class=0 code=0 additional=-1 description="
+runCaseInvalid "${errorParser}" "aa05a003840103" "requires failed"
+runCaseInvalid "${errorParser}" "aa05a003880101" "requires failed"
+runCaseInvalid "${errorParser}" "aa05a003880102" "requires failed"
+runCaseInvalid "${errorParser}" "aa0aa003800100a3039f6300" \
+    "requires failed"
+
+runInvalid "a806810105820105" "missing a mandatory field"
+runInvalid "a823810105810106820105a418800101810406f00000820d03aa5500000000000000000000" \
+    "duplicated or out of order"
+runInvalid "a8208101ff820105a418800101810406f00000820d03aa5500000000000000000000" \
+    "negative negotiation value"
+runInvalid "a8238101058201058301ffa418800101810406f00000820d03aa5500000000000000000000" \
+    "negative negotiation value"
+runInvalid "a820810105820105a418800100810406f00000820d03aa5500000000000000000000" \
+    "version is out of range"
+runInvalid "a820810105820105a418800101810408f00000820d03aa5500000000000000000000" \
+    "requires failed"
+runInvalid "a81e810105820105a416800101810200f0820d03aa5500000000000000000000" \
+    "requires failed"
+runInvalid "a821810105820105a419800101810506f0000000820d03aa5500000000000000000000" \
+    "requires failed"
+runInvalid "a816810105820105a40e800101810406f00000820300aa55" \
+    "requires failed"
+runInvalid "a820810105820105a418800101810406f00000820d02aa5500000000000000000000" \
+    "requires failed"
+runInvalid "a8228103008000820105a418800101810406f00000820d03aa5500000000000000000000" \
+    "requires failed"
+runInvalid "a822810105820105a41a8003008000810406f00000820d03aa5500000000000000000000" \
+    "requires failed"
+runInvalid "aa03810101" "missing error-class"
+runInvalid "aa05a003800105" "requires failed"
+runInvalid "aa058003800102" "requires failed"
+runInvalid "aa08a003800102a10107" "requires failed"
+runInvalid "aa08a00380010282010a" "requires failed"
+runInvalid "aa0ba003800102820161810101" \
+    "duplicated or out of order"
+runInvalid "a002a400" "requires failed"
+runInvalid "a003020101" "missing service request"
+runInvalid "a007020101a400a500" "invalid or out of order"
+runInvalid "a0070201013000a400" "modifier list must not be empty"
+runInvalid "a1050201ff8500" "requires failed"
+runInvalid "a205800101a200" "missing error-class"
+runInvalid "a20a800101a200a203800100" "invalid or out of order"
+runInvalid "a20d8001018101ffa205a003800100" "requires failed"
+runInvalid "a400" "missing reject reason"
+runInvalid "a406810101820101" "invalid or out of order"
+runInvalid "a4068001ff810101" "requires failed"
+runInvalid "a4038101ff" "reject reason is out of range"
+runInvalid "a403850103" "reject reason is out of range"
+runInvalid "a40381010a" "reject reason is out of range"
+runInvalid "a403a10101" "invalid or out of order"
+runInvalid "8500" "requires failed"
+runInvalid "8501ff" "requires failed"
+runInvalid "a703800101" "expecting"
+runInvalid "ad00" "missing error-class"
+
+identifierParser="ICCP_MMS_TEST::IdentifierCase"
+visibleStringParser="ICCP_MMS_TEST::VisibleStringCase"
+mmsStringParser="ICCP_MMS_TEST::MMSStringCase"
+objectNameParser="ICCP_MMS_TEST::ObjectNameCase"
+objectScopeParser="ICCP_MMS_TEST::ObjectScopeCase"
+
+runCaseValid "${identifierParser}" "1a0141" "identifier=A"
+runCaseValid "${identifierParser}" "1a0841617a5a3039245f" \
+    'identifier=AazZ09$_'
+runCaseValid "${identifierParser}" "1a0431616263" "identifier=1abc"
+runCaseValid "${identifierParser}" \
+    "1a204162434445464748494a4b4c4d4e4f505152535455565758595a303132333435" \
+    "identifier=AbCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+runCaseValid "${visibleStringParser}" "1a00" "visibleString="
+runCaseValid "${visibleStringParser}" "1a03412d2e" \
+    "visibleString=A-."
+runCaseValid "${mmsStringParser}" "0c04f09f9880" "mmsString=😀"
+runCaseValid "${mmsStringParser}" "1a03412d2e" "mmsString=A-."
+runCaseValid "${objectNameParser}" "800474656d70" \
+    "scope=0 domain= item=temp"
+runCaseValid "${objectNameParser}" \
+    "800e544153452e325f56657273696f6e" \
+    "scope=0 domain= item=TASE.2_Version"
+runCaseValid "${objectNameParser}" "a10b1a03444f4d1a044974656d" \
+    "scope=1 domain=DOM item=Item"
+runCaseValid "${objectNameParser}" "820178" \
+    "scope=2 domain= item=x"
+runCaseValid "${objectScopeParser}" "8000" "scope=0 domain="
+runCaseValid "${objectScopeParser}" "8103444f4d" "scope=1 domain=DOM"
+runCaseValid "${objectScopeParser}" "8200" "scope=2 domain="
+
+runCaseInvalid "${identifierParser}" "1a00" "requires failed"
+runCaseInvalid "${identifierParser}" \
+    "1a214142434445464748494a4b4c4d4e4f505152535455565758595a30313233343536" \
+    "requires failed"
+runCaseInvalid "${identifierParser}" "1a0140" "requires failed"
+runCaseInvalid "${identifierParser}" "1a012d" "requires failed"
+runCaseInvalid "${identifierParser}" "1a010a" "requires failed"
+runCaseInvalid "${identifierParser}" "1a02c328" "requires failed"
+runCaseInvalid "${identifierParser}" "1a02c3a9" "requires failed"
+runCaseInvalid "${identifierParser}" "0c0161" "requires failed"
+runCaseInvalid "${identifierParser}" "0c02c328" "requires failed"
+runCaseInvalid "${visibleStringParser}" "1a010a" "requires failed"
+runCaseInvalid "${mmsStringParser}" "0c02c328" "illegal UTF8"
+runCaseInvalid "${mmsStringParser}" "1a010a" "requires failed"
+runCaseInvalid "${objectNameParser}" "810178" "requires failed"
+runCaseInvalid "${objectNameParser}" "a1051a01411a0142" "expected 1 bytes"
+runCaseInvalid "${objectNameParser}" \
+    "820e544153452e325f56657273696f6e" "requires failed"
+runCaseInvalid "${objectNameParser}" \
+    "a1151a03444f4d1a0e544153452e325f56657273696f6e" \
+    "requires failed"
+runCaseInvalid "${objectNameParser}" \
+    "800e544153452d325f56657273696f6e" "requires failed"
+runCaseInvalid "${objectScopeParser}" "800100" "requires failed"
+runCaseInvalid "${objectScopeParser}" "a100" "requires failed"
+
+objectClassParser="ICCP_MMS_TEST::ObjectClassCase"
+addressParser="ICCP_MMS_TEST::AddressCase"
+eventTimeParser="ICCP_MMS_TEST::EventTimeCase"
+typeSpecParser="ICCP_MMS_TEST::TypeSpecificationCase"
+typeDescriptionParser="ICCP_MMS_TEST::TypeDescriptionCase"
+typeDescriptionTreeParser="ICCP_MMS_TEST::TypeDescriptionTreeCase"
+alternateParser="ICCP_MMS_TEST::AlternateAccessCase"
+variableSpecParser="ICCP_MMS_TEST::VariableSpecificationCase"
+responseVariableSpecParser="ICCP_MMS_TEST::ResponseVariableSpecificationCase"
+variableAccessParser="ICCP_MMS_TEST::VariableAccessSpecificationCase"
+accessResultParser="ICCP_MMS_TEST::AccessResultCase"
+
+nestedTypeDescriptionHex() {
+    python3 - "$1" <<'PY'
+import sys
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(tag, value):
+    return bytes([tag]) + encode_length(len(value)) + value
+
+
+value = bytes.fromhex("850101")
+for _ in range(int(sys.argv[1])):
+    value = tlv(0xA1, bytes.fromhex("810101") + tlv(0xA2, value))
+print(value.hex())
+PY
+}
+
+twoStructuredForestHex() {
+    python3 - "$1" <<'PY'
+import sys
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(tag, value):
+    return bytes([tag]) + encode_length(len(value)) + value
+
+
+child_count = int(sys.argv[1])
+structured = tlv(0xA2, bytes.fromhex("a100") * child_count)
+print(tlv(0x30, structured + structured).hex())
+PY
+}
+
+mixedAccessResultForestHex() {
+    python3 - "$1" <<'PY'
+import sys
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(tag, value):
+    return bytes([tag]) + encode_length(len(value)) + value
+
+
+failure_count = int(sys.argv[1])
+failures = bytes.fromhex("800100") * failure_count
+structured = tlv(0xA2, bytes.fromhex("a100") * 2047)
+print(tlv(0x30, failures + structured).hex())
+PY
+}
+
+runInformationReportOracleBudgetTest() {
+    python3 - \
+        "${projectDir}/testing/scripts/information-report-oracle.py" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+
+oracle_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "iccp_information_report_oracle", oracle_path
+)
+if spec is None or spec.loader is None:
+    raise SystemExit("could not load InformationReport oracle")
+oracle = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = oracle
+spec.loader.exec_module(oracle)
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(tag, value):
+    return bytes([tag]) + encode_length(len(value)) + value
+
+
+def fields(failure_count):
+    failures = bytes.fromhex("800100") * failure_count
+    structured = tlv(0xA2, bytes.fromhex("a100") * 2047)
+    return oracle.read_children(failures + structured)
+
+
+budget = [0]
+for field in fields(2048):
+    oracle.decode_access_result(field, budget)
+if budget[0] != oracle.MAX_ELEMENT_COUNT:
+    raise SystemExit(
+        f"InformationReport oracle counted {budget[0]} nodes, "
+        f"expected {oracle.MAX_ELEMENT_COUNT}"
+    )
+
+try:
+    overflow_budget = [0]
+    for field in fields(2049):
+        oracle.decode_access_result(field, overflow_budget)
+except oracle.OracleError as exc:
+    if "MMS Data elements exceed bound" not in str(exc):
+        raise
+else:
+    raise SystemExit("InformationReport oracle accepted a 4,097-node forest")
+PY
+
+    passCount=$((passCount + 1))
+}
+
+twoVariableAlternateForestsHex() {
+    python3 - "$1" <<'PY'
+import sys
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(tag, value):
+    return bytes([tag]) + encode_length(len(value)) + value
+
+
+selection_count = int(sys.argv[1])
+variable = bytes.fromhex("a003800176")
+alternate_access = tlv(0xA5, bytes.fromhex("810141") * selection_count)
+entry = tlv(0x30, variable + alternate_access)
+print(tlv(0xA0, entry + entry).hex())
+PY
+}
+
+runCaseValid "${objectClassParser}" "020100" "class=0"
+runCaseValid "${objectClassParser}" "02010b" "class=11"
+runCaseValid "${objectClassParser}" "02010c" "class=12"
+runCaseValid "${objectClassParser}" "02010d" "class=13"
+runCaseValid "${addressParser}" "80012a" \
+    "choice=0 numeric=42 symbolic= rawLength=0"
+runCaseValid "${addressParser}" "80047fffffff" \
+    "choice=0 numeric=2147483647 symbolic= rawLength=0"
+runCaseValid "${addressParser}" "a1050c0353594d" \
+    "choice=1 numeric=-1 symbolic=SYM rawLength=0"
+runCaseValid "${addressParser}" "a1051a03412d2e" \
+    "choice=1 numeric=-1 symbolic=A-. rawLength=0"
+runCaseValid "${addressParser}" "8203aabbcc" \
+    "choice=2 numeric=-1 symbolic= rawLength=3"
+runCaseValid "${eventTimeParser}" "81047fffffff" \
+    "choice=1 sequence=2147483647 rawLength=4"
+runCaseValid "${typeSpecParser}" "8300" \
+    "choice=3 value=0 boolean=false rawLength=0"
+runCaseValid "${typeSpecParser}" "850108" \
+    "choice=5 value=8 boolean=false rawLength=0"
+runCaseValid "${typeSpecParser}" "85017f" \
+    "choice=5 value=127 boolean=false rawLength=0"
+runCaseValid "${typeSpecParser}" "8c01ff" \
+    "choice=12 value=0 boolean=true rawLength=0"
+runCaseValid "${typeSpecParser}" "a0058003766172" \
+    "choice=0 value=0 boolean=false rawLength=5"
+runCaseValid "${typeSpecParser}" "a706020120020108" \
+    "choice=7 value=0 boolean=false rawLength=0"
+runCaseValid "${typeSpecParser}" "b003020120" \
+    "choice=16 value=32 boolean=false rawLength=0"
+runCaseValid "${typeDescriptionParser}" "850108" \
+    "choice=5 constructed=false value=8 boolean=false format=0 exponent=0 rawLength=1"
+runCaseValid "${typeDescriptionParser}" "8a01e0" \
+    "choice=10 constructed=false value=-32 boolean=false format=0 exponent=0 rawLength=1"
+runCaseValid "${typeDescriptionParser}" "b0040202ff01" \
+    "choice=16 constructed=true value=-255 boolean=false format=0 exponent=0 rawLength=4"
+runCaseValid "${typeDescriptionParser}" "a706020120020108" \
+    "choice=7 constructed=true value=0 boolean=false format=32 exponent=8 rawLength=6"
+runCaseValid "${typeDescriptionParser}" "b003020120" \
+    "choice=16 constructed=true value=32 boolean=false format=0 exponent=0 rawLength=3"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "a108810102a203850108" \
+    "choice=1 packed=false elements=2 components=0 nodes=2 depth=2"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "a10b800100810102a203850108" \
+    "choice=1 packed=false elements=2 components=0 nodes=2 depth=2"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "a10b8001ff810102a203850108" \
+    "choice=1 packed=true elements=2 components=0 nodes=2 depth=2"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "a21da11b3008800141a103850108300f800142a10aa108810102a203850108" \
+    "choice=2 packed=false elements=-1 components=2 nodes=6 depth=3"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "$(nestedTypeDescriptionHex 31)" \
+    "choice=1 packed=false elements=1 components=0 nodes=32 depth=32"
+runCaseValid "${alternateParser}" "3003810141" "count=1 total=1"
+runCaseValid "${alternateParser}" "3003820102" "count=1 total=1"
+runCaseValid "${alternateParser}" "300682047fffffff" \
+    "count=1 total=1"
+runCaseValid "${alternateParser}" "3008a306800101810102" \
+    "count=1 total=1"
+runCaseValid "${alternateParser}" "30028400" "count=1 total=1"
+runCaseValid "${alternateParser}" "300aa0088001413003810142" \
+    "count=1 total=3"
+runCaseValid "${alternateParser}" "300aa50680014e8201018400" \
+    "count=2 total=3"
+runCaseValid "${alternateParser}" \
+    "300fa50b80014ea3068001018101028400" \
+    "count=2 total=3"
+runCaseValid "${variableSpecParser}" "a0058003766172" \
+    "choice=0 scope=0 domain= item=var rawLength=5"
+runCaseValid "${variableSpecParser}" "a10380012a" \
+    "choice=1 scope=0 domain= item= rawLength=3"
+runCaseValid "${responseVariableSpecParser}" "8400" \
+    "choice=4 scope=0 domain= item= rawLength=0"
+runCaseValid "${variableAccessParser}" "a0093007a0058003766172" \
+    "choice=0 count=1 scope=0 domain= item=var"
+runCaseValid "${variableAccessParser}" \
+    "a00e300ca0058003766172a503810141" \
+    "choice=0 count=1 scope=0 domain= item=var"
+# Two entries with 2,047 AlternateAccess selections each consume exactly the
+# shared 4,096-node forest budget once their two entry roots are included.
+runCaseValid "${variableAccessParser}" \
+    "$(twoVariableAlternateForestsHex 2047)" \
+    "choice=0 count=2 scope=0 domain= item=v"
+runCaseValid "${variableAccessParser}" "a1058003766172" \
+    "choice=1 count=0 scope=0 domain= item=var"
+runCaseValid "${accessResultParser}" "800103" \
+    "success=false choice=0 error=3 rawLength=0 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=0 floating=0 flagsLength=0 timestamp=0"
+runCaseValid "${accessResultParser}" "850101" \
+    "success=true choice=5 error=-1 rawLength=1 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=1 floating=0 flagsLength=0 timestamp=0"
+runCaseValid "${accessResultParser}" "a100" \
+    "success=true choice=1 error=-1 rawLength=0 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=0 floating=0 flagsLength=0 timestamp=0"
+runCaseValid "${accessResultParser}" "a207850207d0850108" \
+    "success=true choice=2 error=-1 rawLength=7 integers=2 first=2000 second=8 components=2 choices=5/5/0 integer=2000 floating=0 flagsLength=1 timestamp=0"
+runCaseValid "${accessResultParser}" \
+    "a211870508412000008402002a85046553f100" \
+    "success=true choice=2 error=-1 rawLength=17 integers=1 first=1700000000 second=0 components=3 choices=7/4/5 integer=0 floating=10 flagsLength=2 timestamp=1700000000"
+
+scalarAccessResultParser="ICCP_MMS_TEST::ScalarAccessResultCase"
+runCaseValid "${scalarAccessResultParser}" "8301ff" \
+    "choice=3 integer=0 floating=0 boolean=true string= rawLength=1"
+runCaseValid "${scalarAccessResultParser}" "8501fe" \
+    "choice=5 integer=-2 floating=0 boolean=false string= rawLength=1"
+runCaseValid "${scalarAccessResultParser}" "86017f" \
+    "choice=6 integer=127 floating=0 boolean=false string= rawLength=1"
+runCaseValid "${scalarAccessResultParser}" "87050841200000" \
+    "choice=7 integer=0 floating=10 boolean=false string= rawLength=5"
+runCaseValid "${scalarAccessResultParser}" "8a03414243" \
+    "choice=10 integer=0 floating=0 boolean=false string=ABC rawLength=3"
+runCaseValid "${scalarAccessResultParser}" "8d0109" \
+    "choice=13 integer=9 floating=0 boolean=false string= rawLength=1"
+runCaseValid "${scalarAccessResultParser}" "8f022a03" \
+    "choice=15 integer=0 floating=0 boolean=false string=1.2.3 rawLength=2"
+runCaseValid "${scalarAccessResultParser}" "9002c3a9" \
+    "choice=16 integer=0 floating=0 boolean=false string=é rawLength=2"
+runCaseValid "${scalarAccessResultParser}" "91080000000000000000" \
+    "choice=17 integer=0 floating=0 boolean=false string= rawLength=8"
+runCaseValid "${accessResultParser}" "9200" \
+    "success=true choice=18 error=-1 rawLength=0 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=0 floating=0 flagsLength=0 timestamp=0"
+
+runCaseInvalid "${objectClassParser}" "02010e" "requires failed"
+runCaseInvalid "${objectClassParser}" "0201ff" "requires failed"
+runCaseInvalid "${addressParser}" "8001ff" "requires failed"
+runCaseInvalid "${addressParser}" "80050080000000" "requires failed"
+runCaseInvalid "${addressParser}" "810353594d" "requires failed"
+runCaseInvalid "${addressParser}" "a1080c0353594d0500" \
+    "size amount not consumed"
+runCaseInvalid "${eventTimeParser}" "81050080000000" "requires failed"
+runCaseInvalid "${addressParser}" "a100" "expecting 1 bytes"
+runCaseInvalid "${typeSpecParser}" "8501ff" "Unsigned8 is out of range"
+runCaseInvalid "${typeSpecParser}" "830100" "requires failed"
+runCaseInvalid "${typeDescriptionParser}" "a0058003766172" "requires failed"
+runCaseInvalid "${typeSpecParser}" "a00780037661720500" \
+    "size amount not consumed"
+runCaseInvalid "${typeDescriptionParser}" "8501010500" \
+    "trailing data"
+runCaseInvalid "${typeDescriptionParser}" "8706020120020108" "requires failed"
+runCaseInvalid "${typeDescriptionParser}" "900120" "requires failed"
+runCaseInvalid "${typeDescriptionParser}" "b0050201200500" \
+    "size amount not consumed"
+runCaseInvalid "${typeDescriptionParser}" "85020080" "Unsigned8 is out of range"
+runCaseInvalid "${typeDescriptionTreeParser}" "a103810102" \
+    "missing a mandatory field"
+runCaseInvalid "${typeDescriptionTreeParser}" \
+    "a10a810101a2058501010500" "size amount not consumed"
+runCaseInvalid "${typeDescriptionTreeParser}" \
+    "a207a1053003a10108" "requires failed"
+runCaseInvalid "${typeDescriptionTreeParser}" \
+    "$(nestedTypeDescriptionHex 32)" "requires failed"
+runCaseInvalid "${typeDescriptionTreeParser}" "a202a100" \
+    "component list must not be empty"
+runCaseValid "${typeDescriptionTreeParser}" \
+    "a10a810101a205a003800154" \
+    "choice=1 packed=false elements=1 components=0 nodes=2 depth=2"
+runCaseInvalid "${alternateParser}" "3000" \
+    "alternate access list must not be empty"
+runCaseInvalid "${alternateParser}" "3008a50680014e820101" \
+    "single alternate access selection"
+runCaseInvalid "${alternateParser}" "3003800101" "requires failed"
+runCaseInvalid "${alternateParser}" "3003a10141" "requires failed"
+runCaseInvalid "${alternateParser}" "30038201ff" "requires failed"
+runCaseInvalid "${alternateParser}" "300782050080000000" \
+    "requires failed"
+runCaseInvalid "${alternateParser}" "3003020101" "requires failed"
+runCaseInvalid "${variableSpecParser}" "8000" "requires failed"
+runCaseInvalid "${variableSpecParser}" "840100" "requires failed"
+runCaseInvalid "${variableSpecParser}" "8400" "requires failed"
+runCaseInvalid "${variableSpecParser}" "a00780037661720500" \
+    "size amount not consumed"
+runCaseInvalid "${variableSpecParser}" "a200" "requires failed"
+runCaseInvalid "${variableSpecParser}" "a300" "requires failed"
+runCaseInvalid "${variableAccessParser}" "a000" \
+    "variable list must not be empty"
+runCaseInvalid "${variableAccessParser}" "a10780037661720500" \
+    "size amount not consumed"
+runCaseInvalid "${variableAccessParser}" "a003800100" \
+    "&requires failed"
+runCaseInvalid "${variableAccessParser}" \
+    "a011300fa0058003766172a503810141020101" \
+    "trailing data after AlternateAccess"
+runCaseInvalid "${variableAccessParser}" \
+    "$(twoVariableAlternateForestsHex 2048)" \
+    "alternate access exceeds configured element limit"
+runCaseInvalid "${accessResultParser}" "80010c" \
+    "data access error is out of range"
+runCaseInvalid "${scalarAccessResultParser}" "8601ff" \
+    "unsigned access result is negative"
+runCaseInvalid "${accessResultParser}" "8800" "requires failed"
+runCaseInvalid "${accessResultParser}" "8100" "requires failed"
+runCaseInvalid "${accessResultParser}" "a500" "requires failed"
+runCaseInvalid "${accessResultParser}" "8d01ff" \
+    "BCD access result is negative"
+runCaseInvalid "${accessResultParser}" "84020801" "requires failed"
+runCaseInvalid "${accessResultParser}" "840203af" "requires failed"
+runCaseInvalid "${accessResultParser}" "8c03000000" "requires failed"
+runCaseInvalid "${accessResultParser}" "8c04f0000000" "requires failed"
+runCaseInvalid "${accessResultParser}" "910700000000000000" "requires failed"
+
+dataParser="ICCP_MMS_TEST::DataCase"
+accessResultForestParser="ICCP_MMS_TEST::AccessResultForestCase"
+dataForestParser="ICCP_MMS_TEST::DataForestCase"
+
+# Each structured root contributes itself plus its children. Two roots with
+# 2,047 children therefore hit the 4,096-node limit exactly; adding one child
+# to each proves that neither AccessResultList nor DataList resets the budget
+# between roots.
+runCaseValid "${accessResultForestParser}" \
+    "$(twoStructuredForestHex 2047)" \
+    "count=2 nodes=4096"
+runCaseInvalid "${accessResultForestParser}" \
+    "$(twoStructuredForestHex 2048)" \
+    "Data forest exceeds configured aggregate element limit"
+# Failures are AccessResult roots too: 2,048 failures plus one structured root
+# and its 2,047 children exactly consume the same shared budget.
+runCaseValid "${accessResultForestParser}" \
+    "$(mixedAccessResultForestHex 2048)" \
+    "count=2049 nodes=4096"
+runCaseInvalid "${accessResultForestParser}" \
+    "$(mixedAccessResultForestHex 2049)" \
+    "Data forest exceeds configured aggregate element limit"
+runInformationReportOracleBudgetTest
+runCaseValid "${dataForestParser}" \
+    "$(twoStructuredForestHex 2047)" \
+    "count=2 nodes=4096"
+runCaseInvalid "${dataForestParser}" \
+    "$(twoStructuredForestHex 2048)" \
+    "Data forest exceeds configured aggregate element limit"
+
+runCaseValid "${dataParser}" "a1068301ff8501fe" \
+    "choice=1 known=true nodes=3 children=2 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=6"
+runCaseValid "${dataParser}" "a202a100" \
+    "choice=2 known=true nodes=2 children=1 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=2"
+runCaseValid "${dataParser}" "8301ff" \
+    "choice=3 known=true nodes=1 children=0 depth=0 boolean=true integer=0 unused=0 string= oid= rawLength=1"
+runCaseValid "${dataParser}" "840203a8" \
+    "choice=4 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=3 string= oid= rawLength=2"
+runCaseValid "${dataParser}" "8501fe" \
+    "choice=5 known=true nodes=1 children=0 depth=0 boolean=false integer=-2 unused=0 string= oid= rawLength=1"
+runCaseValid "${dataParser}" "86017f" \
+    "choice=6 known=true nodes=1 children=0 depth=0 boolean=false integer=127 unused=0 string= oid= rawLength=1"
+runCaseValid "${dataParser}" "87050841200000" \
+    "choice=7 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=5"
+runCaseValid "${dataParser}" "8903aabbcc" \
+    "choice=9 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=3"
+runCaseValid "${dataParser}" "8a03414243" \
+    "choice=10 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string=ABC oid= rawLength=3"
+runCaseValid "${dataParser}" "8c0401020304" \
+    "choice=12 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=4"
+runCaseValid "${dataParser}" "8d0109" \
+    "choice=13 known=true nodes=1 children=0 depth=0 boolean=false integer=9 unused=0 string= oid= rawLength=1"
+runCaseValid "${dataParser}" "8e0200ff" \
+    "choice=14 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=2"
+runCaseValid "${dataParser}" "8f022a03" \
+    "choice=15 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid=1.2.3 rawLength=2"
+runCaseValid "${dataParser}" "9002c3a9" \
+    "choice=16 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string=é oid= rawLength=2"
+runCaseValid "${dataParser}" "91080000000000000000" \
+    "choice=17 known=true nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=8"
+runCaseValid "${dataParser}" "9f2002aabb" \
+    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=2"
+
+runCaseInvalid "${dataParser}" "8100" "requires failed"
+runCaseInvalid "${dataParser}" "a300" "requires failed"
+runCaseInvalid "${dataParser}" "800100" "requires failed"
+runCaseInvalid "${dataParser}" "8800" "requires failed"
+runCaseInvalid "${dataParser}" "8601ff" "unsigned Data value is negative"
+runCaseInvalid "${dataParser}" "8d01ff" "BCD Data value is negative"
+runCaseInvalid "${dataParser}" "84020801" "requires failed"
+runCaseInvalid "${dataParser}" "840203af" "requires failed"
+runCaseInvalid "${dataParser}" "8a010a" "requires failed"
+runCaseInvalid "${dataParser}" "8b0f32303236303930393132303030305a" \
+    "requires failed"
+runCaseInvalid "${dataParser}" "8b01ff" "requires failed"
+runCaseInvalid "${dataParser}" "9002c328" "illegal UTF8"
+runCaseInvalid "${dataParser}" "8c050000000000" "requires failed"
+runCaseInvalid "${dataParser}" "8c04f0000000" "requires failed"
+runCaseInvalid "${dataParser}" "910700000000000000" "requires failed"
+
+floatingParser="ICCP_MMS_TEST::FloatingDataCase"
+getNameListParser="ICCP_MMS_TEST::GetNameListCase"
+getNameListEvidenceParser="ICCP_MMS_TEST::GetNameListEvidenceCase"
+
+runCaseValid "${floatingParser}" "87050841200000" \
+    "choice=7 floating=10 rawLength=5"
+runCaseValid "${floatingParser}" "87090b4024000000000000" \
+    "choice=7 floating=10 rawLength=9"
+runCaseInvalid "${floatingParser}" "87050700000000" "requires failed"
+runCaseInvalid "${floatingParser}" "87090a4024000000000000" "requires failed"
+runCaseInvalid "${floatingParser}" "870408000000" "requires failed"
+
+runCaseValid "${getNameListParser}" \
+    "a014020101a10fa003800109a1058103444f4d820178" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST invoke=1 classChoice=0 class=9 scope=1 domain=DOM continue=x count=0 first= more=true"
+runCaseValid "${getNameListParser}" \
+    "a00e020101a109a003800100a1028000" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST invoke=1 classChoice=0 class=0 scope=0 domain= continue= count=0 first= more=true"
+runCaseValid "${getNameListParser}" \
+    "a01e020101a119a003800100a1028000820e544153452e325f56657273696f6e" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST invoke=1 classChoice=0 class=0 scope=0 domain= continue=TASE.2_Version count=0 first= more=true"
+runCaseValid "${getNameListParser}" \
+    "a00e020101a109a00380010da1028000" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST invoke=1 classChoice=0 class=13 scope=0 domain= continue= count=0 first= more=true"
+runCaseValid "${getNameListParser}" \
+    "a00e020101a109a003810101a1028000" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST invoke=1 classChoice=1 class=1 scope=0 domain= continue= count=0 first= more=true"
+runCaseValid "${getNameListParser}" \
+    "a110020101a10ba0061a01411a0142810100" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE invoke=1 classChoice=0 class=-1 scope=0 domain= continue= count=2 first= more=false"
+runCaseValid "${getNameListParser}" \
+    "a10d020101a108a0061a01411a0142" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE invoke=1 classChoice=0 class=-1 scope=0 domain= continue= count=2 first= more=true"
+runCaseValid "${getNameListEvidenceParser}" \
+    "a116020101a111a00c1a01411a0262321a03435f31810100" \
+    $'count=3 more=false\nidentifier[0]=A\nidentifier[1]=b2\nidentifier[2]=C_1'
+runCaseValid "${getNameListEvidenceParser}" \
+    "a11a020101a115a0101a0e544153452e325f56657273696f6e810100" \
+    $'count=1 more=false\nidentifier[0]=TASE.2_Version'
+runCaseValid "${getNameListEvidenceParser}" \
+    "a11a020101a115a0100c0e544153452e325f56657273696f6e810100" \
+    $'count=1 more=false\nidentifier[0]=TASE.2_Version'
+
+runInvalid "a009020101a104a1028000" "invalid or out of order"
+runInvalid "a00e020101a109a00380010ea1028000" "requires failed"
+runInvalid "a00e020101a109a003810102a1028000" "requires failed"
+runInvalid "a00f020101a10aa003800100a103800100" "requires failed"
+runInvalid "a016020101a111a0058001090500a1058103444f4d820178" \
+    "size amount not consumed"
+runInvalid "a016020101a111a003800109a1078103444f4d0500820178" \
+    "size amount not consumed"
+runInvalid "a10a020101a105810100a000" "invalid or out of order"
+runInvalid "a109020101a104a0020200" "requires failed"
+runInvalid \
+    "a021020101a11ca003800100a1058103444f4d820e544153452e325f56657273696f6e" \
+    "requires failed"
+runInvalid \
+    "a113020101a10ea00c1a0a4f746865722e4e616d65" \
+    "requires failed"
+runInvalid "a10a020101a105a0030c0141" "requires failed"
+
+criticalParser="ICCP_MMS_TEST::CriticalServiceCase"
+readIdentityParser="ICCP_MMS_TEST::ReadIdentityCase"
+writeEvidenceParser="ICCP_MMS_TEST::WriteEvidenceCase"
+
+runCaseValid "${criticalParser}" \
+    "a011020101a40c8001ffa107a1058003766172" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=4 invoke=1 specResult=true access=1 variables=0 data=0 nodes=0 results=0 success=0 failure=0 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a01d020101a418a116a0143012a010800e544153452e325f56657273696f6e" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=4 invoke=1 specResult=false access=0 variables=1 data=0 nodes=0 results=0 success=0 failure=0 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${readIdentityParser}" \
+    "a01d020101a418a116a0143012a010800e544153452e325f56657273696f6e" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=4 access=0 variables=1 scope=0 domain= item=TASE.2_Version"
+runCaseValid "${criticalParser}" \
+    "a00e020101a409a107a1058003766172" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=4 invoke=1 specResult=false access=1 variables=0 data=0 nodes=0 results=0 success=0 failure=0 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a10d020101a408a106800103850101" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=4 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=2 success=1 failure=1 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a014020101a50fa1058003766172a0068301ff850101" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=5 invoke=1 specResult=false access=1 variables=0 data=2 nodes=2 results=0 success=0 failure=0 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a10a020101a5058001038100" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=5 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=2 success=1 failure=1 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a112020101a40da006a00430028400a103850101" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=4 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=1 success=1 failure=0 deletable=false typeChoice=0 scope=0 domain= item="
+runCaseValid "${writeEvidenceParser}" \
+    "a023020101a51ea0143008a0068004766172313008a006800476617232a0068501018301ff" \
+    $'targetsKnown=true targets=2 values=2 results=0 success=0 failure=0\ntarget[0]=0//var1\ntarget[1]=0//var2\nvalue[0]=5/1/1/1/0/false/\nvalue[1]=3/1/255/0/0/true/'
+runCaseValid "${writeEvidenceParser}" \
+    "a014020101a50fa1058003766172a0068301ff850101" \
+    $'targetsKnown=false targets=0 values=2 results=0 success=0 failure=0\nvalue[0]=3/1/255/0/0/true/\nvalue[1]=5/1/1/1/0/false/'
+runCaseValid "${writeEvidenceParser}" \
+    "a10d020101a5088001038100800107" \
+    $'targetsKnown=false targets=0 values=0 results=3 success=1 failure=2\nresult[0]=false/3\nresult[1]=true/-1\nresult[2]=false/7'
+runCaseInvalid "${writeEvidenceParser}" \
+    "a026020101a521a0143008a0068004766172313008a006800476617232a0098501018301ff860102" \
+    "target/value count mismatch"
+runCaseValid "${criticalParser}" \
+    "a00c020101a607a0058003766172" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=6 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=0 success=0 failure=0 deletable=false typeChoice=0 scope=0 domain= item=var"
+runCaseValid "${criticalParser}" \
+    "a10d020101a6088001ffa203850108" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=0 success=0 failure=0 deletable=true typeChoice=5 scope=0 domain= item="
+runCaseValid "${criticalParser}" \
+    "a118020101a6138001ffa203850108830341434c84044d65616e" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 specResult=false access=0 variables=0 data=0 nodes=0 results=0 success=0 failure=0 deletable=true typeChoice=5 scope=0 domain= item="
+
+runCaseValid "ICCP_MMS_TEST::VariableTypeCase" \
+    "a112020101a60d800100a208a706020120020108" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 typeChoice=7 constructed=true value=0 boolean=false format=32 exponent=8 rawLength=6 packed=false elements=-1 components=0 nodes=1 depth=1 typeScope=0 typeDomain= typeName="
+runCaseValid "ICCP_MMS_TEST::VariableTypeCase" \
+    "a10f020101a60a800100a205b003020120" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 typeChoice=16 constructed=true value=32 boolean=false format=0 exponent=0 rawLength=3 packed=false elements=-1 components=0 nodes=1 depth=1 typeScope=0 typeDomain= typeName="
+runCaseValid "ICCP_MMS_TEST::VariableTypeCase" \
+    "a114020101a60f800100a20aa108810102a203850108" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 typeChoice=1 constructed=true value=0 boolean=false format=0 exponent=0 rawLength=8 packed=false elements=2 components=0 nodes=2 depth=2 typeScope=0 typeDomain= typeName="
+runCaseValid "ICCP_MMS_TEST::VariableTypeCase" \
+    "a116020101a611800100a20ca10a810101a205a003800154" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=6 invoke=1 typeChoice=1 constructed=true value=0 boolean=false format=0 exponent=0 rawLength=10 packed=false elements=1 components=0 nodes=2 depth=2 typeScope=0 typeDomain= typeName="
+runCaseInvalid "ICCP_MMS_TEST::VariableTypeCase" \
+    "a11b020101a616800100a211a00f800d44535472616e73666572536574" \
+    "requires failed"
+
+runCaseValid "ICCP_MMS_TEST::TransferSetDataCase" \
+    "a230a2098601008a01448a0154850100850100850100850100850100840200008301008301008301008301008301ff850100" \
+    "choice=2 children=13 shape=true statusChoice=3 status=true"
+runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
+    "a10d020101a408a10685046553f100" \
+    "choice=5 rawLength=4 components=0 c1=0 c2=0 c3=0 integer=1700000000 second= third="
+runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
+    "a127020101a422a120a21e8601018a10434f4e54524f4c5f43454e5445525f428a0754535f4e455854" \
+    "choice=2 rawLength=30 components=3 c1=6 c2=10 c3=10 integer=1 second=CONTROL_CENTER_B third=TS_NEXT"
+
+runInvalid "a008020101a4038001ff" \
+    "missing variable access specification"
+runInvalid "a011020101a40ca107a1058003766172800100" \
+    "invalid or out of order"
+runInvalid "a105020101a400" \
+    "missing access result list"
+runInvalid "a107020101a402a100" \
+    "access result list must not be empty"
+runInvalid "a00d020101a408a106a00430028400" \
+    "requires failed"
+runInvalid "a00e020101a509a1058003766172a000" \
+    "Data list must not be empty"
+runInvalid "a108020101a50380010c" \
+    "out of range"
+runInvalid "a107020101a5028101" \
+    "requires failed"
+runInvalid "a007020101a6028000" \
+    "request choice is invalid"
+runInvalid "a00e020101a609a00780037661720500" \
+    "size amount not consumed"
+runInvalid "a108020101a6038001ff" \
+    "missing a mandatory field"
+runInvalid "a10d020101a6088001ffa103800101a200" \
+    "missing a mandatory field"
+runInvalid \
+    "a11a020101a415a00ba0093007a0058003766172a106800103850101" \
+    "variable/result count mismatch"
+
+namedListParser="ICCP_MMS_TEST::NamedListCase"
+deleteNamedListEvidenceParser="ICCP_MMS_TEST::DeleteNamedListEvidenceCase"
+
+runCaseValid "${namedListParser}" \
+    "a015020101ab1080034c5354a0093007a0058003766172" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=11 unconfirmed=0 invoke=1 scope=0 domain= name=LST delete_scope=0 names=0 variables=1 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a1050201018b00" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=11 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=0 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a00a020101ac0580034c5354" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=12 unconfirmed=0 invoke=1 scope=0 domain= name=LST delete_scope=0 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a113020101ac0e8001ffa1093007a0058003766172" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=12 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=0 names=0 variables=1 results=0 success=0 failure=0 deletable=true matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a118020101ac138001ffa1093007a0058003766172820341434c" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=12 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=0 names=0 variables=1 results=0 success=0 failure=0 deletable=true matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a00f020101ad0a800100a10580034c5354" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=13 unconfirmed=0 invoke=1 scope=0 domain= name=LST delete_scope=0 names=1 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${deleteNamedListEvidenceParser}" \
+    "a012020101ad0da10b800141a1061a01441a0142" \
+    $'scope=0 names=2 retained=2\nname[0]=0//A\nname[1]=1/D/B'
+runCaseValid "${namedListParser}" \
+    "a00d020101ad088001028203444f4d" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=13 unconfirmed=0 invoke=1 scope=0 domain=DOM name= delete_scope=2 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a008020101ad03800101" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=13 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=1 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a008020101ad03800103" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=13 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=3 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=0 deleted=0"
+runCaseValid "${namedListParser}" \
+    "a10b020101ad06800102810101" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=13 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=0 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=2 deleted=1"
+runCaseValid "${namedListParser}" \
+    "a111020101ad0c80047fffffff81047fffffff" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=13 unconfirmed=0 invoke=1 scope=0 domain= name= delete_scope=0 names=0 variables=0 results=0 success=0 failure=0 deletable=false matched=2147483647 deleted=2147483647"
+runCaseValid "${namedListParser}" \
+    "a311a00fa1058003766172a006800103850101" \
+    "type=TopLevelPDU::UNCONFIRMED service=0 unconfirmed=0 invoke=-1 scope=0 domain= name=var delete_scope=0 names=0 variables=0 results=2 success=1 failure=1 deletable=false matched=0 deleted=0"
+
+runCaseValid "ICCP_MMS_TEST::InformationReportResultsCase" \
+    "a32ea02ca01e3008a0068004766172313008a0068004766172323008a006800476617233a00a85012a8001038a026f6b" \
+    "type=TopLevelPDU::UNCONFIRMED access=0 variables=3/3/3 results=3/1/3/3/3 first=var1/var2/var3 choices=5/0/10 errors=-1/3/-1 integers=42/0/0 strings=//ok"
+
+runInvalid "a30" "expect"
+runInvalid "a300" "missing its service"
+runInvalid "a00a020101ab0580034c5354" "expecting"
+runInvalid "a109020101ac0480034c53" "expected"
+runInvalid "a00c020101ac0780034c53540500" \
+    "size amount not consumed"
+runInvalid "a10a020101ac058001ffa100" "must not be empty"
+runInvalid "a008020101ad03800100" \
+    "scope has invalid selectors"
+runInvalid "a00f020101ad0a800101a10580034c5354" \
+    "scope has invalid selectors"
+runInvalid "a014020101ad0f800102a10580034c53548203444f4d" \
+    "scope has invalid selectors"
+runInvalid "a00d020101ad088001048203444f4d" \
+    "delete scope is out of range"
+runInvalid "a10a020101ad058001018100" \
+    "requires failed"
+runInvalid "a007020101ad02a100" \
+    "ObjectName list must not be empty"
+runInvalid "a112020101ad0d8005008000000081047fffffff" \
+    "requires failed"
+runInvalid "a30aa008a1058003766172a000" "expecting"
+runInvalid "a315a013a0093007a0058003766172a006800103850101" \
+    "variable/result count mismatch"
+
+correlationParser="ICCP_MMS_TEST::CorrelationCase"
+pointMetadataParser="ICCP_MMS_TEST::PointMetadataCase"
+pointShapeParser="ICCP_MMS_TEST::PointShapeCase"
+transferReportParser="ICCP_MMS_TEST::TransferReportCase"
+transferSetMetadataParser="ICCP_MMS_TEST::TransferSetMetadataCase"
+fallbackParser="ICCP_MMS_TEST::FallbackCase"
+controlWriteParser="ICCP_MMS_TEST::ControlWriteCase"
+
+runCaseValid "${controlWriteParser}" \
+    "a011020101a50ca1058003766172a003850101" \
+    "choice=5 rawLength=1 integer=1 floating=0"
+runCaseValid "${controlWriteParser}" \
+    "a015020101a510a1058003766172a00787050841480000" \
+    "choice=7 rawLength=5 integer=0 floating=12.5"
+
+runCaseValid "${correlationParser}" \
+    "a00e020101a409a107a1058003766172a10d020101a408a106800103850101" \
+    "invoke=1 request_service=4 response_service=4"
+runCaseInvalid "${correlationParser}" \
+    "a00e020101a409a107a1058003766172a10d020102a408a106800103850101" \
+    "do not correlate"
+runCaseValid "${pointMetadataParser}" \
+    "a113020101a40ea10ca20a840200aa85046553f100" \
+    "type=2 components=2 choices=4/5/0 integers=1 values=1700000000/0 flagsLength=2 timestamp=1700000000"
+runCaseValid "${pointMetadataParser}" \
+    "a11e020101a419a117a215870508412000008402002a91086553f10000000000" \
+    "type=2 components=3 choices=7/4/17 integers=1 values=1700000000000/0 flagsLength=2 timestamp=1700000000000"
+runCaseValid "${pointMetadataParser}" \
+    "a11a020101a415a113a2118705084120000085046553f1008402002a" \
+    "type=2 components=3 choices=7/5/4 integers=1 values=1700000000/0 flagsLength=2 timestamp=1700000000"
+runCaseValid "${pointMetadataParser}" \
+    "a117020101a412a110a20e840200aa91086553f10000000000" \
+    "type=2 components=2 choices=4/17/0 integers=1 values=1700000000000/0 flagsLength=2 timestamp=1700000000000"
+runCaseValid "${pointMetadataParser}" \
+    "a11d020101a418a116a214870508412000008402002a85046553f10086012a" \
+    "type=2 components=4 choices=7/4/5 integers=2 values=1700000000/42 flagsLength=2 timestamp=1700000000"
+runCaseValid "${pointMetadataParser}" \
+    "a119020101a414a112a2108501078402002a85046553f10086012a" \
+    "type=2 components=4 choices=5/4/5 integers=3 values=1700000000/42 flagsLength=2 timestamp=1700000000"
+runCaseValid "${pointMetadataParser}" \
+    "a116020101a411a10fa20d840200aa85046553f10086012a" \
+    "type=2 components=3 choices=4/5/6 integers=2 values=1700000000/42 flagsLength=2 timestamp=1700000000"
+runCaseValid "${pointShapeParser}" \
+    "a113020101a40ea10ca20a85046553f100840200aa" \
+    "top=2 choices=5/4/0/0 nestedIndex=0 nested=0/0 values=0/0"
+runCaseValid "${pointShapeParser}" \
+    "a11d020101a418a116a2148705084120000085046553f100840200aa86012a" \
+    "top=4 choices=7/5/4/6 nestedIndex=0 nested=0/0 values=0/0"
+runCaseValid "${pointShapeParser}" \
+    "a118020101a413a111a20fa20985046553f10085017b840200aa" \
+    "top=2 choices=2/4/0/0 nestedIndex=1 nested=5/5 values=1700000000/123"
+runCaseValid "${pointShapeParser}" \
+    "a11f020101a41aa118a21687050841200000a20985046553f10085017b840200aa" \
+    "top=3 choices=7/2/4/0 nestedIndex=2 nested=5/5 values=1700000000/123"
+runCaseValid "${transferReportParser}" \
+    "a31ca01aa0093007a0058003766172a00da20b870508412000008402002a" \
+    "access=0 variables=1 scope=0 domain= name=var results=1 type=2 components=2 choices=7/4 value=10 flagsLength=2"
+runCaseValid "${transferSetMetadataParser}" \
+    "a015020101ab1080034c5354a0093007a0058003766172" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=11 access=0 list=0//LST variables=1 first=0//var deletable=false delete=0 names=0 matched=0 deleted=0 results=0 failures=0"
+runCaseValid "${transferSetMetadataParser}" \
+    "a113020101ac0e8001ffa1093007a0058003766172" \
+    "type=TopLevelPDU::CONFIRMED_RESPONSE service=12 access=0 list=0// variables=1 first=0//var deletable=true delete=0 names=0 matched=0 deleted=0 results=0 failures=0"
+runCaseValid "${transferSetMetadataParser}" \
+    "a00f020101ad0a800100a10580034c5354" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=13 access=0 list=0//LST variables=0 first=0// deletable=false delete=0 names=1 matched=0 deleted=0 results=0 failures=0"
+runCaseValid "${transferSetMetadataParser}" \
+    "a311a00fa1058003766172a006800103850101" \
+    "type=TopLevelPDU::UNCONFIRMED service=0 access=1 list=0//var variables=0 first=0// deletable=false delete=0 names=0 matched=0 deleted=0 results=2 failures=1"
+runCaseValid "${fallbackParser}" \
+    "a008020101bf4d02aabb" \
+    "type=TopLevelPDU::CONFIRMED_REQUEST service=77 required=false decoded=false raw_length=2"
+runCaseInvalid "${fallbackParser}" \
+    "a008020101bf4d04aabb" \
+    "expect"
+
+# Compare the independent MMS oracle with the production grammar over a
+# deterministic full-stack report. All detailed records stay in a temporary
+# directory; only the equality result is published by this test.
+oracleTestDir="${testBuildDir}/oracle"
+mkdir -p "${oracleTestDir}"
+"${scriptDir}/generate-synthetic-pcap" \
+    "${oracleTestDir}/input.pcap" direct-mms-negotiated > /dev/null
+python3 "${scriptDir}/extract-local-mms.py" \
+    "${oracleTestDir}/input.pcap" "${oracleTestDir}/mms.pcap" \
+    "${oracleTestDir}/extract.summary" > /dev/null
+python3 "${scriptDir}/information-report-oracle.py" \
+    "${oracleTestDir}/mms.pcap" "${oracleTestDir}/independent.tsv" \
+    "${oracleTestDir}/oracle.summary" \
+    --reports "${oracleTestDir}/reports.bin" > /dev/null
+spicy-driver -p "ICCP_MMS_TEST::InformationReportOracleStream" \
+    -f "${oracleTestDir}/reports.bin" "${testPlugin}" \
+    > "${oracleTestDir}/production.tsv"
+cmp "${oracleTestDir}/independent.tsv" "${oracleTestDir}/production.tsv"
+
+if [[ "$(awk -F '\t' '$1 == "information_report.reports" {print $2}' \
+    "${oracleTestDir}/oracle.summary")" != 1 ]]; then
+    echo "independent oracle did not decode the synthetic InformationReport" >&2
+    exit 1
+fi
+
+echo "independent InformationReport semantic comparison passed"
+
+"${scriptDir}/generate-synthetic-pcap" \
+    "${oracleTestDir}/identify-input.pcap" identify > /dev/null
+python3 "${scriptDir}/extract-local-mms.py" \
+    "${oracleTestDir}/identify-input.pcap" \
+    "${oracleTestDir}/identify-mms.pcap" \
+    "${oracleTestDir}/identify-extract.summary" > /dev/null
+python3 "${scriptDir}/identify-oracle.py" \
+    "${oracleTestDir}/identify-mms.pcap" \
+    "${oracleTestDir}/identify-independent.tsv" \
+    "${oracleTestDir}/identify-oracle.summary" \
+    --pdus "${oracleTestDir}/identify-pdus.bin" > /dev/null
+spicy-driver -p "ICCP_MMS_TEST::IdentifyOracleStream" \
+    -f "${oracleTestDir}/identify-pdus.bin" "${testPlugin}" \
+    > "${oracleTestDir}/identify-production.tsv"
+cmp "${oracleTestDir}/identify-independent.tsv" \
+    "${oracleTestDir}/identify-production.tsv"
+
+if [[ "$(awk -F '\t' '$1 == "identify.requests" {print $2}' \
+    "${oracleTestDir}/identify-oracle.summary")" != 1 ]] || \
+   [[ "$(awk -F '\t' '$1 == "identify.responses" {print $2}' \
+    "${oracleTestDir}/identify-oracle.summary")" != 1 ]]; then
+    echo "independent oracle did not decode the synthetic Identify exchange" >&2
+    exit 1
+fi
+
+echo "independent Identify semantic comparison passed"
+
+echo "${passCount} MMS runtime tests passed"

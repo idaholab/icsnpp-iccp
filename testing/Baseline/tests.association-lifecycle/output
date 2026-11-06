@@ -1,0 +1,22 @@
+presentation phase=presentation_ready kind=unknown
+acse=0 phase=association_requested kind=unknown
+mms=8 phase=association_requested kind=unknown
+acse=1 phase=established kind=mms
+mms=9 phase=established kind=mms
+mms=0 phase=established kind=tase2
+acse=2 phase=release_requested kind=tase2
+acse=3 phase=released kind=unknown
+terminal pending_read=
+acse=0 phase=association_requested kind=unknown
+mms=8 phase=association_requested kind=unknown
+acse=1 phase=established kind=mms
+mms=9 phase=established kind=mms
+acse=4 phase=aborted kind=unknown
+terminal pending_read=
+presentation phase=presentation_ready kind=unknown
+acse=0 phase=association_requested kind=unknown
+mms=8 phase=association_requested kind=unknown
+acse=1 phase=established kind=mms
+mms=9 phase=established kind=mms
+mms=11 phase=conclude_requested kind=mms
+mms=12 phase=concluded kind=unknown

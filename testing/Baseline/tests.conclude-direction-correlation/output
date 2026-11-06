@@ -1,0 +1,12 @@
+pdu=12 is_orig=F phase=established kind=unknown
+pdu=11 is_orig=T phase=conclude_requested kind=unknown
+pdu=12 is_orig=T phase=conclude_requested kind=unknown
+pdu=13 is_orig=T phase=conclude_requested kind=unknown
+pdu=13 is_orig=F phase=established kind=unknown
+result accepted=F response_is_orig=F request_is_orig=T confirmed=1 read=KEEP_READ names=1 provenance=verified
+pdu=11 is_orig=T phase=conclude_requested kind=unknown
+pdu=11 is_orig=F phase=conclude_requested kind=unknown
+pdu=13 is_orig=T phase=conclude_requested kind=unknown
+result accepted=F response_is_orig=T request_is_orig=F confirmed=1 read=KEEP_READ names=1 provenance=verified
+pdu=12 is_orig=F phase=concluded kind=unknown
+result accepted=T response_is_orig=F request_is_orig=T confirmed=0 read= names=0 provenance=unknown

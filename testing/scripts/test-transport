@@ -1,0 +1,749 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+driver="${projectDir}/testing/spicy/transport_driver.spicy"
+testBuildDir=""
+testPlugin="${ICCP_TRANSPORT_TEST_PLUGIN:-}"
+
+if [[ -n "${testPlugin}" ]]; then
+    if [[ ! -f "${testPlugin}" || ! -O "${testPlugin}" || -L "${testPlugin}" ]]; then
+        echo "ICCP_TRANSPORT_TEST_PLUGIN must be a user-owned regular file" >&2
+        exit 2
+    fi
+    testPlugin="$(realpath -e -- "${testPlugin}")"
+else
+    testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-transport-tests.XXXXXX")"
+    testPlugin="${testBuildDir}/transport-tests.hlto"
+    trap 'rm -rf "${testBuildDir}"' EXIT
+    export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+    spicyc -j -o "${testPlugin}" \
+        "${driver}" \
+        "${projectDir}/analyzer/tpkt.spicy" \
+        "${projectDir}/analyzer/cotp.spicy" \
+        "${projectDir}/analyzer/session.spicy" \
+        "${projectDir}/analyzer/presentation.spicy" \
+        "${projectDir}/analyzer/acse.spicy" \
+        "${projectDir}/analyzer/mms.spicy" \
+        "${projectDir}/analyzer/mms_types.spicy" \
+        "${projectDir}/analyzer/ber.spicy"
+fi
+
+passCount=0
+
+parseInput() {
+    local hexInput="$1"
+    local increment="${2:-0}"
+
+    if ((increment > 0)); then
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -i "${increment}" \
+                -p "ICCP_TRANSPORT_TEST::StreamCase" "${testPlugin}"
+    else
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_TRANSPORT_TEST::StreamCase" "${testPlugin}"
+    fi
+}
+
+runValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local increment="${3:-0}"
+    local actual
+
+    actual="$(parseInput "${hexInput}" "${increment}")"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected transport output for input ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(parseInput "${hexInput}" 0 2>&1)"; then
+        echo "invalid transport input unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected transport error for input ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runStateValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::ConnectionStateCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected COTP connection state for input ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runStateInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::ConnectionStateCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid COTP state input unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected COTP state error for input ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runSameDirectionStateInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::SameDirectionConnectionStateCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "same-direction COTP handshake unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected same-direction COTP error for input ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runOppositeDirectionHandshakeValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::OppositeDirectionHandshakeCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected opposite-direction COTP handshake state" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runMalformedCorrelatedCcInvalid() {
+    local hexInput="$1"
+    local expectedState="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::MalformedCorrelatedCcCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "malformed correlated CC unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedState}" <<<"${output}"; then
+        echo "unexpected malformed correlated CC retry state" >&2
+        echo "expected state containing: ${expectedState}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runSharedBoundaryValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::SharedBoundaryCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected shared COTP boundary state for input ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runSupersededBoundaryInvalid() {
+    local hexInput="$1"
+    local expectedState="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver \
+                -p "ICCP_TRANSPORT_TEST::SupersededBoundaryCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "superseded COTP boundary unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "COTP boundary was superseded before record completion" \
+        <<<"${output}"; then
+        echo "superseded COTP boundary did not report epoch rejection" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+    if ! grep -q "${expectedState}" <<<"${output}"; then
+        echo "unexpected state after superseded COTP boundary" >&2
+        echo "expected state containing: ${expectedState}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runGapValid() {
+    local beforeGapHex="$1"
+    local afterGapHex="$2"
+    local expected="$3"
+    local batchFile
+    local actual
+
+    batchFile="$(mktemp "${TMPDIR:-/tmp}/iccp-transport-gap.XXXXXX")"
+
+    {
+        printf '!spicy-batch v2\n'
+        printf '@begin-flow id1 stream 102/tcp\n'
+        printf '@data id1 %d\n' "$(( ${#beforeGapHex} / 2 ))"
+        printf '%s' "${beforeGapHex}" | xxd -r -p
+        printf '\n@gap id1 17\n'
+        printf '@data id1 %d\n' "$(( ${#afterGapHex} / 2 ))"
+        printf '%s' "${afterGapHex}" | xxd -r -p
+        printf '\n@end-flow id1\n'
+    } > "${batchFile}"
+
+    if ! actual="$(spicy-driver -p "ICCP_TRANSPORT_TEST::StreamCase" \
+        -F "${batchFile}" "${testPlugin}" 2>&1)"; then
+        rm -f "${batchFile}"
+        echo "gap recovery input failed to parse" >&2
+        echo "actual output: ${actual}" >&2
+        exit 1
+    fi
+
+    rm -f "${batchFile}"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected gap recovery output" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runGapScanLimit() {
+    local batchFile
+    local scanBytes=$((1024 * 1024 + 65536))
+    local output
+
+    batchFile="$(mktemp "${TMPDIR:-/tmp}/iccp-transport-gap-limit.XXXXXX")"
+    {
+        printf '!spicy-batch v2\n'
+        printf '@begin-flow id1 stream 102/tcp\n'
+        printf '@data id1 %d\n' "$(( ${#singleData} / 2 ))"
+        printf '%s' "${singleData}" | xxd -r -p
+        printf '\n@gap id1 17\n'
+        printf '@data id1 %d\n' "${scanBytes}"
+        head -c "${scanBytes}" /dev/zero
+        printf '\n@end-flow id1\n'
+    } > "${batchFile}"
+
+    output="$(spicy-driver -p "ICCP_TRANSPORT_TEST::StreamCase" \
+        -F "${batchFile}" "${testPlugin}" 2>&1)"
+    rm -f "${batchFile}"
+    if ! grep -q "TPKT recovery scan exceeds configured byte limit" \
+        <<<"${output}"; then
+        echo "unexpected oversized recovery scan error" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runRepeatedGapTailValid() {
+    local batchFile
+    local actual
+
+    batchFile="$(mktemp "${TMPDIR:-/tmp}/iccp-transport-gap-tail.XXXXXX")"
+    {
+        printf '!spicy-batch v2\n'
+        printf '@begin-flow id1 stream 102/tcp\n'
+        printf '@data id1 11\n'
+        printf '\x03\x00\x00\x0b\x02\xf0\x80\x01\x00\x40\x00'
+        printf '\n@gap id1 17\n'
+        printf '@data id1 263\n'
+        printf '\x03\x00\xff\xff\x02\xf0\x80'
+        head -c 256 /dev/zero
+        printf '\n@gap id1 17\n'
+        printf '@data id1 263\n'
+        printf '\x03\x00\xff\xff\x02\xf0\x80'
+        head -c 256 /dev/zero
+        printf '\n@gap id1 17\n'
+        printf '@data id1 33\n'
+        printf '\x03\x00\x00\x0b\x02\xf0\x80\x01\x00\x40\x00'
+        printf '\x03\x00\x00\x0b\x02\xf0\x80\x01\x00\x40\x00'
+        printf '\x03\x00\x00\x0b\x02\xf0\x80\x01\x00\x40\x00'
+        printf '\n@end-flow id1\n'
+    } > "${batchFile}"
+
+    if ! actual="$(spicy-driver \
+        -p "ICCP_TRANSPORT_TEST::StreamCase" \
+        -F "${batchFile}" "${testPlugin}" 2>&1)"; then
+        rm -f "${batchFile}"
+        echo "repeated-gap tail failed to parse" >&2
+        echo "actual output: ${actual}" >&2
+        exit 1
+    fi
+    rm -f "${batchFile}"
+
+    if [[ "${actual}" != \
+        $'packet=1 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4\npacket=2 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4\npacket=3 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4\npacket=4 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4' ]]; then
+        echo "unexpected repeated-gap tail output" >&2
+        echo "actual: ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runLargeFragmentedValid() {
+    local inputFile
+    local actual
+
+    inputFile="$(mktemp "${TMPDIR:-/tmp}/iccp-transport-large.XXXXXX")"
+    {
+        # Maximum-size legal TPKT: four-byte header, three-byte COTP DT header,
+        # and a non-EOT payload. Feed it in uneven chunks so incremental body
+        # collection cannot accidentally depend on a TCP delivery boundary or
+        # reject 0xffff merely because that length is useful to an attacker as
+        # a false recovery candidate.
+        printf '\x03\x00\xff\xff\x02\xf0\x00'
+        head -c 65528 /dev/zero
+    } > "${inputFile}"
+
+    actual="$(
+        spicy-driver -i 4093 \
+            -p "ICCP_TRANSPORT_TEST::StreamCase" \
+            "${testPlugin}" < "${inputFile}"
+    )"
+    rm -f "${inputFile}"
+
+    if [[ "${actual}" != \
+        "packet=1 tpkt=65535 reserved=0 cotp=0xf0 li=2 nr=0 eot=false payload=65528 complete=false tsdu=0" ]]; then
+        echo "unexpected large fragmented TPKT output" >&2
+        echo "actual: ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+singleData="0300000b02f08001004000"
+singleDataOutput="packet=1 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4"
+
+runValid "0300000902f0800100" \
+    "packet=1 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+runValid "${singleData}" "${singleDataOutput}"
+runValid "03ff000b02f08001004000" \
+    "packet=1 tpkt=11 reserved=255 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4"
+
+runValid "0300001611e00000000100c0010ac1020100c2020102" \
+    "packet=1 tpkt=22 reserved=0 cotp=0xe0 li=17 dst=0 src=1 params=3 payload=0"
+runValid "0300000b06d00001000200" \
+    "packet=1 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=1 src=2 params=0 payload=0"
+runValid "0300000b06e000000001000300000b06d00001000200" \
+    $'packet=1 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=1 params=0 payload=0\npacket=2 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=1 src=2 params=0 payload=0'
+
+crPacket="0300000b06e00000000100"
+ccPacket="0300000b06d00001000200"
+freshCrPacket="0300000b06e00000000300"
+freshCcPacket="0300000b06d00003000400"
+establishedPrefix="${crPacket}${ccPacket}${singleData}"
+recoveredSuffix="${freshCrPacket}${freshCcPacket}${singleData}"
+recoveredBoundaryOutput=$'packet=1 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=1 params=0 payload=0\npacket=2 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=1 src=2 params=0 payload=0\npacket=3 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4\npacket=4 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=3 params=0 payload=0\npacket=5 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=3 src=4 params=0 payload=0\npacket=6 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4'
+
+runStateValid "${ccPacket}" \
+    "type=0xd0 epoch=1 class0=true pending-cr=false reconnect=false"
+runStateValid "${crPacket}" \
+    "type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true"
+runStateValid "${crPacket}${ccPacket}" \
+    $'type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true\ntype=0xd0 epoch=1 class0=true pending-cr=false reconnect=false'
+runOppositeDirectionHandshakeValid "${crPacket}${ccPacket}${singleData}" \
+    $'cr-token=1 epoch=1 class0=true pending-cr=true reconnect=true\ncc-token=2 epoch=1 class0=true pending-cr=false reconnect=false data=0xf0'
+runStateValid "${crPacket}${ccPacket}0300000b06800002000100" \
+    $'type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true\ntype=0xd0 epoch=1 class0=true pending-cr=false reconnect=false\ntype=0x80 epoch=2 class0=false pending-cr=false reconnect=true'
+runStateInvalid "0300000a05c000010002" \
+    "COTP DC TPDU is unavailable in class 0"
+runSameDirectionStateInvalid "${crPacket}${ccPacket}" \
+    "COTP CC has no opposite-direction pending connection request"
+
+# A complete boundary must apply once, while a valid boundary prefix must apply
+# before its attacker-controlled remainder arrives. The latter remains an
+# incomplete observation, but its parser state and policy marker are already
+# committed. These epoch values catch a duplicate full-TPDU transition.
+runStateValid "${crPacket}${ccPacket}0300008406e0" \
+    $'type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true\ntype=0xd0 epoch=1 class0=true pending-cr=false reconnect=false\npartial=0xe0 epoch=2 class0=false pending-cr=false reconnect=true marker=true disposition=0'
+runStateValid "${crPacket}${ccPacket}0300ffff0680" \
+    $'type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true\ntype=0xd0 epoch=1 class0=true pending-cr=false reconnect=false\npartial=0x80 epoch=2 class0=false pending-cr=false reconnect=true marker=true disposition=0'
+# A correlated CC consumes its CR token at the two-octet COTP prefix. If the
+# advertised record then stalls, reconnect remains required and the boundary
+# is neither applied nor published a second time.
+runStateValid "${crPacket}0300008406d0" \
+    $'type=0xe0 epoch=1 class0=true pending-cr=true reconnect=true\npartial=0xd0 epoch=1 class0=true pending-cr=false reconnect=true marker=true disposition=0'
+runSharedBoundaryValid "0300ffff0680" \
+    $'boundary=0x80 epoch=1 contexts=0 local-cotp=0 local-session=0 peer-cotp-before=1 peer-session-before=1 reconnect=true\npeer-epoch=1 peer-cotp-after=0 peer-session-after=0'
+runSupersededBoundaryInvalid "06e00000000100" \
+    "stale=0xe0 epoch=2 class0=false pending-cr=false reconnect=true"
+runSupersededBoundaryInvalid "06d00001000200" \
+    "stale=0xd0 epoch=1 class0=false pending-cr=false reconnect=true"
+
+# A CC consumes exactly one pending CR. A repeated CC, or DATA between a new
+# CR and its matching CC, cannot reuse an earlier establishment token.
+runInvalid "${crPacket}${ccPacket}${ccPacket}" \
+    "failed to synchronize"
+runInvalid "${crPacket}${singleData}" \
+    "failed to synchronize"
+
+# A malformed correlated CC consumes and invalidates the pending CR. Neither a
+# later well-formed CC nor DATA may reuse that old request; only a fresh CR/CC
+# establishes another epoch. Cover both a conclusive prefix failure and a late
+# destination-reference failure inside the full header.
+correlatedCcRecoveryOutput=$'packet=1 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=1 params=0 payload=0\npacket=2 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=3 params=0 payload=0\npacket=3 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=3 src=4 params=0 payload=0\npacket=4 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4'
+runValid "${crPacket}0300000b06d10001000200${ccPacket}${singleData}${recoveredSuffix}" \
+    "${correlatedCcRecoveryOutput}"
+runValid "${crPacket}0300000b06d00002000500${ccPacket}${singleData}${recoveredSuffix}" \
+    "${correlatedCcRecoveryOutput}"
+runMalformedCorrelatedCcInvalid \
+    "${crPacket}0300000b06d10001000200" \
+    "malformed-cc epoch=2 disposition=2 marker=true offset=11 code=0xd0 pending-cr=false reconnect=true"
+runMalformedCorrelatedCcInvalid \
+    "${crPacket}0300000b06d00002000500" \
+    "malformed-cc epoch=2 disposition=2 marker=true offset=11 code=0xd0 pending-cr=false reconnect=true"
+
+# Exact CR/DR/DC codes, plus ER under the analyzer's conservative trust policy,
+# establish a parser-side epoch before their remaining header is trusted. Even
+# when that TPDU later fails, stale DATA is skipped until a fresh CR/CC succeeds.
+# These cover malformed replacement/disconnect paths and class-0 DC rejection.
+runValid "${establishedPrefix}0300000b06e00000000501${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}0300000803800000${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}0300000a05c000010002${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}03000007027000${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}${ccPacket}${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+
+# Reserved low nibbles are malformed, but their high-nibble service family is
+# still an untrusted lifecycle boundary. Parser and Zeek lifecycle
+# predicates intentionally agree on this conservative invalidation rule.
+runValid "${establishedPrefix}0300000b06e10000000500${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}0300000b06810002000100${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}0300000a05c100010002${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}030000090471000200${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+runValid "${establishedPrefix}0300000b06d10001000500${singleData}${recoveredSuffix}" \
+    "${recoveredBoundaryOutput}"
+
+# A valid DR, and ER under the analyzer's conservative trust policy, require a
+# new handshake before DATA. Both remain observable as complete bounded TPDUs;
+# this does not describe ER itself as a wire-level disconnect service.
+runInvalid "${crPacket}${ccPacket}0300000b06800002000100${singleData}" \
+    "failed to synchronize"
+runInvalid "${crPacket}${ccPacket}030000090470000200${singleData}" \
+    "failed to synchronize"
+# A terminal epoch has classKnown=false but reconnectRequired=true. A lone CC
+# must not be mistaken for the permitted initial-midstream CC case.
+runInvalid "${crPacket}${ccPacket}0300000b06800002000100${ccPacket}${singleData}" \
+    "failed to synchronize"
+
+# A replacement CR clears a partial TSDU. The post-CC EOT fragment therefore
+# contains only its own payload rather than bytes from the prior epoch.
+runValid "0300000902f0000100${crPacket}${ccPacket}0300000902f0804000" \
+    $'packet=1 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=false payload=2 complete=false tsdu=0\npacket=2 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=1 params=0 payload=0\npacket=3 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=1 src=2 params=0 payload=0\npacket=4 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2'
+# RFC 2126 ED is a negotiated extension whose class-0 wire shape differs from
+# ISO normal-format ED in other classes. Without negotiation state the analyzer
+# rejects every ED family member instead of claiming the wrong profile.
+runInvalid "0300000b0410000180aabb" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000a0410000185aa" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000e0810000180c3021234aa" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "030000190410000180000102030405060708090a0b0c0d0e0f" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+# ICCP's strict RFC 1006 class-0 profile does not use DC, even when a capture
+# begins midstream before the handshake was observed.
+runInvalid "0300000a05c000010002" \
+    "COTP DC TPDU is unavailable in class 0"
+runValid "030000070120aa" \
+    "packet=1 tpkt=7 reserved=0 cotp=0x20 li=1 payload=1"
+
+runValid "${singleData}0300000902f0800100" \
+    "${singleDataOutput}
+packet=2 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+
+# A clean EOF is exhaustive, but any plausible next TPKT that has started and
+# remains incomplete is a capture-boundary truncation. Exercise partial header
+# lengths and an advertised body; none may be confused with clean completion.
+runValid "${singleData}03" \
+    "${singleDataOutput}
+terminal-incomplete=true"
+runValid "${singleData}0300" \
+    "${singleDataOutput}
+terminal-incomplete=true"
+runValid "${singleData}030000" \
+    "${singleDataOutput}
+terminal-incomplete=true"
+runValid "${singleData}0300001402f0800100610b3009" \
+    "${singleDataOutput}
+terminal-incomplete=true"
+
+# Once captured COTP prefix bytes make an incomplete TPKT impossible, classify
+# the tail as malformed recovery rather than a viable truncated record.  An
+# attacker-controlled outer length must not pin a later complete TPKT behind
+# the already-invalid COTP LI.
+runInvalid "${singleData}0300001400" \
+    "failed to synchronize"
+runValid "${singleData}0300001400${singleData}" \
+    "${singleDataOutput}
+packet=2 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4"
+
+# A reserved low nibble still denotes a conservative transport boundary. Its
+# lifecycle transition occurs before the exact-code rejection, and recovery
+# can find the following complete record without waiting for the advertised
+# maximum-size tail.
+runValid "${singleData}0300ffff06e1${freshCrPacket}${freshCcPacket}${singleData}" \
+    "${singleDataOutput}
+packet=2 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=3 params=0 payload=0
+packet=3 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=3 src=4 params=0 payload=0
+packet=4 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4"
+
+fragmentedInput="0300000902f00001000300000902f0804000"
+fragmentedOutput="packet=1 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=false payload=2 complete=false tsdu=0
+packet=2 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=4"
+runValid "${fragmentedInput}" "${fragmentedOutput}"
+
+# Incremental delivery proves that neither the four-byte TPKT header nor its
+# body depends on a TCP delivery boundary.
+runValid "${singleData}" "${singleDataOutput}" 1
+runValid "${singleData}" "${singleDataOutput}" 2
+runValid "${singleData}" "${singleDataOutput}" 3
+runValid "${fragmentedInput}" "${fragmentedOutput}" 1
+runLargeFragmentedValid
+
+# Recovery treats a TPKT/class-0 DT or strict CR prefix only as a candidate
+# marker. The malformed length-six record after the gap must be rejected before
+# the next complete TPKT/COTP record is accepted.
+runGapValid "${singleData}" "0300000602f00300000902f0800100" \
+    "${singleDataOutput}
+packet=2 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+
+# A gap after CR may hide the peer response or a replacement transport. It
+# invalidates the pending request, so the captured old CC is skipped and only
+# a complete fresh opposite-direction CR/CC pair can re-establish DATA.
+runGapValid "${crPacket}" \
+    "${ccPacket}${freshCrPacket}${freshCcPacket}${singleData}" \
+    $'packet=1 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=1 params=0 payload=0\npacket=2 tpkt=11 reserved=0 cotp=0xe0 li=6 dst=0 src=3 params=0 payload=0\npacket=3 tpkt=11 reserved=0 cotp=0xd0 li=6 dst=3 src=4 params=0 payload=0\npacket=4 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4'
+
+# A reserved zero COTP type is not a viable recovery confirmation. Skip the
+# complete false TPKT candidate and continue at the following valid record.
+runGapValid "${singleData}" "030000070100000300000902f0800100" \
+    "${singleDataOutput}
+packet=2 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+
+# A candidate can be a complete TPKT/COTP record while its detached Session
+# payload is malformed. Retain that lower-layer record, skip unsafe upper-layer
+# dispatch, and continue recovery at the following TPKT instead of terminating
+# the entire TCP direction with a bounded-view runtime exception.
+runGapValid "${singleData}" \
+    "0300000c02f08040030205000300000902f0800100" \
+    "${singleDataOutput}
+packet=2 tpkt=12 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=5 complete=true tsdu=5
+packet=3 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+
+# Session safety preflight mirrors semantic parser checks. Duplicate user-data
+# and enclosure parameters, wrong enclosure widths, and reserved enclosure
+# bits are skipped without allowing detached upper-layer parsing to terminate
+# later TPKT recovery.
+runGapValid "${singleData}" \
+    "0300001302f0800d0ac103610100c2036101010300000f02f08001061901031901030300000d02f0800104190200030300000c02f08001031901040300000902f0800100" \
+    "${singleDataOutput}
+packet=2 tpkt=19 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=12 complete=true tsdu=12
+packet=3 tpkt=15 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=8 complete=true tsdu=8
+packet=4 tpkt=13 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=6 complete=true tsdu=6
+packet=5 tpkt=12 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=5 complete=true tsdu=5
+packet=6 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+
+# A gap can bisect a segmented COTP TSDU.  The recovered EOT fragment must not
+# include bytes retained from the incomplete pre-gap fragment.
+runGapValid "0300000902f0000100" "0300000902f0804000" \
+    "packet=1 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=false payload=2 complete=false tsdu=0
+packet=2 tpkt=9 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=2 complete=true tsdu=2"
+runRepeatedGapTailValid
+runGapScanLimit
+
+runInvalid "" "TPKT stream contains no complete records"
+runInvalid "0200000702f080" "self.version == 3"
+runInvalid "0300000602f0" "invalid TPKT packet length"
+# A structurally plausible first TPKT whose advertised body reaches the true
+# capture boundary is incomplete, but remains unconfirmed because no complete
+# record preceded it.
+runInvalid "0300000a02f08061" "TPKT stream contains no complete records"
+runStateInvalid "0300000703f080" "invalid COTP length indicator"
+runStateInvalid "0300000700f080" "invalid COTP length indicator"
+runInvalid "03000007010000" "invalid reserved COTP TPDU type"
+runStateInvalid "03000007fff080" "invalid COTP length indicator"
+runInvalid "0300000702f180" "invalid class-0 COTP DT header"
+runStateInvalid "0300000803f08000" "invalid class-0 COTP DT header"
+runInvalid "0300000b06e00000000110" "self.classOptions == 0"
+runInvalid "0300000b06e00000000101" "self.classOptions == 0"
+runInvalid "0300000b06e00001000200" \
+    "CR destination reference must be zero"
+runInvalid "0300000b06e00000000000" \
+    "CR source reference must be nonzero"
+runInvalid "0300000b06d00000000200" \
+    "CC destination reference must be nonzero"
+runInvalid "0300000b06d00001000000" \
+    "CC source reference must be nonzero"
+runInvalid "0300000b06e000000001000300000b06d00002000300" \
+    "synchronization never confirmed"
+# Once CR has established this analyzer's strict class-0 profile, the RFC 1006
+# testing extension for negotiated expedited data is deliberately unsupported;
+# ISO class 0 likewise does not use DC. The synchronized wrapper rejects each
+# second TPKT and exhausts its recovery scan, hence the outer error asserted
+# here.
+runInvalid "0300000b06e000000001000300000b0410000180aabb" \
+    "failed to synchronize"
+runInvalid "0300000b06e000000001000300000a05c000010002" \
+    "failed to synchronize"
+runInvalid "0300001811e00000000100c0010ac1020100c2020102aabb" \
+    "CR user data is unsupported"
+runInvalid "0300000d06d00001000200aabb" \
+    "CC user data is unsupported"
+runInvalid "0300000702f081" "invalid class-0 COTP DT sequence number"
+runInvalid "0300000e09e00000000100c10201" "expected 2 bytes"
+runInvalid "03000009021080aabb" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000b0411000180aabb" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000a0410000080aa" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000a0410000100aa" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "030000090410000180" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300001a0410000180000102030405060708090a0b0c0d0e0f10" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+runInvalid "0300000e0810000180c1021234aa" \
+    "COTP expedited data requires unsupported RFC 2126 negotiation"
+
+disconnectRequestParameterOverflow=""
+for ((index = 0; index < 65; index++)); do
+    disconnectRequestParameterOverflow+="c100"
+done
+runInvalid "0300008d88800001000200${disconnectRequestParameterOverflow}" \
+    "disconnect-request header exceeds configured parameter limit"
+
+fragmentLimitInput=""
+for ((index = 0; index < 257; index++)); do
+    fragmentLimitInput+="0300000702f000"
+done
+runInvalid "${fragmentLimitInput}" "COTP TSDU exceeds configured fragment limit"
+
+while IFS=$'\t' read -r regressionName regressionHex regressionError; do
+    if [[ -z "${regressionName}" || "${regressionName}" == \#* ]]; then
+        continue
+    fi
+    if [[ "${regressionError}" == "safe upper-layer skip" ]]; then
+        if ! parseInput "${regressionHex}" >/dev/null; then
+            echo "safe upper-layer fallback failed: ${regressionName}" >&2
+            exit 1
+        fi
+        passCount=$((passCount + 1))
+    else
+        runInvalid "${regressionHex}" "${regressionError}"
+    fi
+done < "${projectDir}/testing/fuzz/stack-regressions.tsv"
+
+echo "${passCount} transport runtime tests passed"

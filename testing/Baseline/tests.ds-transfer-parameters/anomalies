@@ -1,0 +1,10 @@
+anomaly legacy invoke=12 object=icc/CONTROL_CENTER_B/TS_TYPED classification=start conformance=standards_deviation reasons=duplicate_start_confirmed
+anomaly legacy invoke=20 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_ds_conditions_unused_bits
+anomaly legacy invoke=21 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_transfer_interval
+anomaly legacy invoke=22 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_data_set_name
+anomaly legacy invoke=24 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_ds_conditions_width
+anomaly v2 invoke=12 object=icc/CONTROL_CENTER_B/TS_TYPED classification=start conformance=standards_deviation reasons=duplicate_start_confirmed provenance=unknown
+anomaly v2 invoke=20 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_ds_conditions_unused_bits provenance=unknown
+anomaly v2 invoke=21 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_transfer_interval provenance=unknown
+anomaly v2 invoke=22 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_data_set_name provenance=unknown
+anomaly v2 invoke=24 object=icc/CONTROL_CENTER_B/TS_TYPED classification=transfer_candidate conformance=standards_deviation reasons=invalid_ds_conditions_width provenance=unknown

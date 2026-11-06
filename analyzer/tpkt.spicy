@@ -1,0 +1,328 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses TPKT framing and bounded stream recovery for ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_TPKT;
+
+import spicy;
+import ICCP_COTP;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+
+const MIN_PACKET_LENGTH: uint64 = 7;
+const MAX_PACKET_LENGTH: uint64 = 65535;
+const MAX_RECOVERY_SCAN_BYTES: uint64 = 1048576;
+const RECOVERY_SCAN_BLOCK_SIZE: uint64 = 65536;
+
+# Recovery uses either the complete class-0 COTP-DT prefix that carries ICCP
+# application traffic or a strict class-0 CR prefix that can establish a fresh
+# transport epoch after a malformed boundary. Full detached COTP validation
+# still decides whether a candidate is real. Keep the TPKT version as a dynamic
+# requirement below: Spicy 1.14's literal-token look-ahead conflicts with this
+# longer recovery token after repeated synchronization.
+public type RecoveryState = struct {
+    active: bool;
+    crossedGap: bool;
+    # Set while a TPKT candidate has begun but has not completed. The owning
+    # stream uses this at end-of-input to distinguish a clean boundary from a
+    # capture truncated inside an otherwise plausible next record.
+    packetInProgress: bool;
+};
+
+public type Packet = unit(
+    state: ICCP_COTP::ReassemblyState&,
+    sessionState: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&,
+    recoveryState: RecoveryState&
+) {
+    %synchronize-at = /\x03[\x00-\xff]{3}(\x02\xf0[\x00\x80]|[\x06-\xff]\xe0\x00\x00(\x00[\x01-\xff]|[\x01-\xff][\x00-\xff])\x00)/;
+
+    var completedRecovery: bool = False;
+    var recoveryCrossedGap: bool = False;
+    var streamOffset: uint64 = 0;
+    var gapBytesAtStart: uint64 = 0;
+    var complete: bool = False;
+    var headerComplete: bool = False;
+    var bodyComplete: bool = False;
+    var reserved: uint8 = 0;
+    var packetLength: uint16 = 0;
+    var cotpBoundaryProcessed: bool = False;
+    var cotpBoundaryDisposition: uint8 = ICCP_COTP::BOUNDARY_ACCEPTED;
+    var cotpBoundaryCode: uint8 = 0;
+    var cotpBoundaryEpoch: uint64 = 0;
+    var cotpBoundaryHadPendingConnectionRequest: bool = False;
+    var cotpBoundaryExpectedSourceReference: uint16 = 0;
+    var publishCotpLifecycleMarker: bool = False;
+
+    on %init {
+        recoveryState.packetInProgress = True;
+        self.streamOffset = self.input().offset();
+        self.gapBytesAtStart =
+            self.stream().statistics().num_gap_bytes;
+    }
+
+    version: uint8 &requires=(self.version == 3);
+
+    # Permit true end-of-input to terminate a plausible partial TPKT without
+    # turning it into malformed captured data. The version remains a required
+    # field, so a clean record boundary does not instantiate an empty Packet
+    # and a non-TPKT byte still enters synchronized recovery. RFC 2126 requires
+    # receivers to ignore the reserved octet; retain it only for diagnostics.
+    headerTail: bytes &size=3 &eod {
+        if (|$$| == 3) {
+            self.headerComplete = True;
+            self.reserved = cast<uint8>(
+                $$.sub(0, 1).to_uint(spicy::ByteOrder::Network)
+            );
+            self.packetLength = cast<uint16>(
+                $$.sub(1, 3).to_uint(spicy::ByteOrder::Network)
+            );
+
+            if (uint64(self.packetLength) < MIN_PACKET_LENGTH ||
+                uint64(self.packetLength) > MAX_PACKET_LENGTH)
+                throw "invalid TPKT packet length";
+        }
+    }
+
+    var body: bytes;
+
+    # Match TPDU::%init as soon as the complete TPKT header is available. A
+    # boundary observed in the peer direction may already have advanced the
+    # shared epoch, so stale direction-local fragments must not survive while
+    # this record is waiting for its advertised body.
+    cotpStateSync: bytes &size=0 if (self.headerComplete) {
+        ICCP_COTP::synchronizeTransportEpoch(
+            state, sessionState, presentationState);
+    }
+
+    # Parse and validate LI independently so one impossible captured octet
+    # enters recovery immediately even if the type code never arrives.
+    cotpLengthIndicator: bytes &size=1 &eod if (self.headerComplete) {
+        self.body += $$;
+    }
+
+    cotpLengthValidation: bytes &size=0
+        if (
+            self?.cotpLengthIndicator &&
+            |self.cotpLengthIndicator| == 1
+        ) {
+        local lengthIndicator = *self.cotpLengthIndicator.at(0);
+        if (
+            lengthIndicator == 0 ||
+            lengthIndicator == 255 ||
+            uint64(lengthIndicator) >= uint64(self.packetLength) - 4
+        )
+            throw "invalid COTP length indicator";
+    }
+
+    # Split the type code from the chunked remainder. This lets transport
+    # lifecycle invalidation and its policy marker occur after two captured
+    # COTP octets rather than after the complete attacker-controlled TPKT
+    # length. The offset/type/disposition cache makes both a later complete
+    # TPDU parse and a synchronized retry idempotent.
+    cotpCode: bytes &size=1 &eod
+        if (
+            self?.cotpLengthIndicator &&
+            |self.cotpLengthIndicator| == 1
+        ) {
+        self.body += $$;
+
+        if (|$$| == 1) {
+            # The peer can advance the shared epoch after this Packet's TPKT
+            # header was parsed but before its COTP code octet arrives. Clear
+            # stale direction-local fragments again at the transition point;
+            # the helper is a no-op when the epoch is already synchronized.
+            ICCP_COTP::synchronizeTransportEpoch(
+                state, sessionState, presentationState);
+
+            local typeCode = *$$.at(0) & 0xf0;
+            if (ICCP_COTP::isTransportBoundary(typeCode)) {
+                self.cotpBoundaryProcessed = True;
+                self.cotpBoundaryCode = typeCode;
+
+                local markerIsNew =
+                    ! state.haveCotpLifecycleMarker ||
+                    state.lastCotpLifecycleOffset != self.streamOffset ||
+                    state.lastCotpLifecycleCode != typeCode;
+
+                if (markerIsNew) {
+                    if (typeCode == 0xd0 &&
+                        ICCP_COTP::hasOppositeDirectionConnectionRequest(
+                            state, presentationState)) {
+                        self.cotpBoundaryHadPendingConnectionRequest = True;
+                        self.cotpBoundaryExpectedSourceReference =
+                            presentationState.cotpConnectionRequestSourceReference;
+                    }
+
+                    self.cotpBoundaryDisposition =
+                        ICCP_COTP::applyTransportBoundary(
+                            typeCode,
+                            state,
+                            sessionState,
+                            presentationState
+                        );
+                    self.cotpBoundaryEpoch =
+                        presentationState.cotpTransportEpoch;
+                    state.haveCotpLifecycleMarker = True;
+                    state.lastCotpLifecycleOffset = self.streamOffset;
+                    state.lastCotpLifecycleCode = typeCode;
+                    state.lastCotpBoundaryDisposition =
+                        self.cotpBoundaryDisposition;
+                    state.lastCotpBoundaryEpoch = self.cotpBoundaryEpoch;
+                    state.lastCotpBoundaryHadPendingConnectionRequest =
+                        self.cotpBoundaryHadPendingConnectionRequest;
+                    state.lastCotpBoundaryExpectedSourceReference =
+                        self.cotpBoundaryExpectedSourceReference;
+                    self.publishCotpLifecycleMarker = True;
+                }
+                else {
+                    self.cotpBoundaryDisposition =
+                        state.lastCotpBoundaryDisposition;
+                    self.cotpBoundaryEpoch = state.lastCotpBoundaryEpoch;
+                    self.cotpBoundaryHadPendingConnectionRequest =
+                        state.lastCotpBoundaryHadPendingConnectionRequest;
+                    self.cotpBoundaryExpectedSourceReference =
+                        state.lastCotpBoundaryExpectedSourceReference;
+                }
+            }
+        }
+    }
+
+    # This hook follows the prefix transition but precedes every structural or
+    # state-dependent rejection below. EVT publishes the corresponding policy
+    # cleanup here, including for incomplete and reserved-low-nibble boundary
+    # candidates. Retries omit the field because their marker is already
+    # cached by absolute stream offset and normalized type.
+    cotpLifecycleMarker: bytes &size=0
+        if (self.publishCotpLifecycleMarker);
+
+    cotpCodeValidation: bytes &size=0
+        if (self?.cotpCode && |self.cotpCode| == 1) {
+        local lengthIndicator = *self.cotpLengthIndicator.at(0);
+        local code = *self.cotpCode.at(0);
+        local typeCode = code & 0xf0;
+
+        if (self.cotpBoundaryDisposition ==
+            ICCP_COTP::BOUNDARY_REJECT_DC)
+            throw "COTP DC TPDU is unavailable in class 0";
+        if (self.cotpBoundaryDisposition ==
+            ICCP_COTP::BOUNDARY_REJECT_CC)
+            throw "COTP CC has no opposite-direction pending connection request";
+
+        if (typeCode == 0)
+            throw "invalid reserved COTP TPDU type";
+
+        if (
+            typeCode == 0xf0 &&
+            (
+                code != 0xf0 || lengthIndicator != 2 ||
+                presentationState.cotpReconnectRequired
+            )
+        )
+            throw "invalid class-0 COTP DT header";
+
+        # RFC 2126 expedited data is a separately negotiated extension. This
+        # strict class-0 analyzer does not retain that negotiation state, so it
+        # must not reinterpret a different ISO 8073 ED layout as supported.
+        if (typeCode == 0x10)
+            throw "COTP expedited data requires unsupported RFC 2126 negotiation";
+
+        # Boundary families deliberately use the high nibble for the
+        # transition above, then enforce their exact normal-format code and
+        # minimum fixed header. CR/CC also retain the parser's bounded
+        # contained-length policy. These facts are all conclusive from the
+        # TPKT header plus the two captured COTP prefix octets.
+        local invalidConnectionPrefix = (
+            (typeCode == 0xe0 || typeCode == 0xd0) &&
+            (
+                (code != 0xe0 && code != 0xd0) ||
+                lengthIndicator < 6 ||
+                uint64(self.packetLength) - 4 > 128
+            )
+        );
+        if (invalidConnectionPrefix) {
+            # A conclusively malformed CC must not leave the correlated CR
+            # reusable. Convert its prefix disposition into one retry-stable
+            # terminal epoch before entering recovery.
+            if (
+                typeCode == 0xd0 &&
+                self.cotpBoundaryHadPendingConnectionRequest &&
+                self.cotpBoundaryDisposition ==
+                    ICCP_COTP::BOUNDARY_ACCEPTED
+            ) {
+                ICCP_COTP::invalidateCorrelatedConnectionConfirm(
+                    state, sessionState, presentationState);
+                self.cotpBoundaryDisposition =
+                    ICCP_COTP::BOUNDARY_REJECT_CC;
+                self.cotpBoundaryEpoch =
+                    presentationState.cotpTransportEpoch;
+                state.lastCotpBoundaryDisposition =
+                    self.cotpBoundaryDisposition;
+                state.lastCotpBoundaryEpoch = self.cotpBoundaryEpoch;
+            }
+            throw "invalid COTP connection prefix";
+        }
+        if (typeCode == 0x80 &&
+            (code != 0x80 || lengthIndicator < 6))
+            throw "invalid COTP disconnect-request prefix";
+        if (typeCode == 0x70 &&
+            (code != 0x70 || lengthIndicator < 4))
+            throw "invalid COTP error prefix";
+    }
+
+    # Native chunked bytes consume each available delivery and encounter a
+    # later missing stream region immediately, so a plausible but incomplete
+    # maximum length cannot pin complete TPKTs after the next gap. &eod also
+    # lets the enclosing Packet finish cleanly at a truncated capture boundary.
+    # The anonymous field avoids retaining a per-delivery chunk vector; body is
+    # still bounded by the advertised 16-bit TPKT length.
+    : bytes &size=(uint64(self.packetLength) - 6) &chunked &eod
+        if (self?.cotpCode && |self.cotpCode| == 1) {
+        self.body += $$;
+
+        if (
+            |self.body| > 2 &&
+            ((*self.body.at(1)) & 0xf0) == 0xf0 &&
+            ((*self.body.at(2)) & 0x7f) != 0
+        )
+            throw "invalid class-0 COTP DT sequence number";
+
+        self.bodyComplete =
+            |self.body| == uint64(self.packetLength) - 4;
+    }
+
+    tpdu: ICCP_COTP::TPDU(
+        uint64(self.packetLength) - 4,
+        state,
+        sessionState,
+        presentationState,
+        self.streamOffset,
+        self.cotpBoundaryProcessed,
+        self.cotpBoundaryDisposition,
+        self.cotpBoundaryEpoch,
+        self.cotpBoundaryHadPendingConnectionRequest,
+        self.cotpBoundaryExpectedSourceReference
+    ) &parse-from=self.body if (self.bodyComplete);
+
+    on %done {
+        # bodyComplete implies that the conditional TPDU child above also
+        # completed successfully; otherwise Packet never reaches this hook.
+        # Leave packetInProgress set for a partial header/body so the owning
+        # stream can downgrade terminal completeness at true end-of-input.
+        if (self.bodyComplete) {
+            self.complete = True;
+            self.completedRecovery = recoveryState.active;
+            self.recoveryCrossedGap = recoveryState.crossedGap;
+            recoveryState.packetInProgress = False;
+        }
+    }
+};

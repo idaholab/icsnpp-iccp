@@ -1,0 +1,6 @@
+state before L1=T L2=T L3=T
+state partial L1=F L2=F L3=T
+state generic L1=F L2=F L3=T
+state invalid-vector L1=F L2=F L3=T
+state zero-deleted L1=F L2=F L3=T
+state inconsistent-positive L1=F L2=F L3=F

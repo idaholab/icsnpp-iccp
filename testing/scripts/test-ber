@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+driver="${projectDir}/testing/spicy/ber_driver.spicy"
+berModule="${projectDir}/analyzer/ber.spicy"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-ber-tests.XXXXXX")"
+testPlugin="${testBuildDir}/ber-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" "${driver}" "${berModule}"
+
+passCount=0
+
+runValid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expected="$3"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected output for ${parser} input ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expectedError="$3"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid input unexpectedly parsed: ${parser} ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected error for ${parser} input ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+makeNestedSequence() {
+    local layers="$1"
+    local value="0500"
+    local index
+    local length
+    local encodedLength
+
+    for ((index = 0; index < layers; index++)); do
+        length=$((${#value} / 2))
+        printf -v encodedLength '%02x' "${length}"
+        value="30${encodedLength}${value}"
+    done
+
+    printf '%s' "${value}"
+}
+
+makeNullCollection() {
+    local children="$1"
+    local value=""
+    local index
+
+    for ((index = 0; index < children; index++)); do
+        value+="0500"
+    done
+
+    printf '3082%04x%s' "$((children * 2))" "${value}"
+}
+
+makeOidWithArcCount() {
+    local arcs="$1"
+    local value="2b"
+    local index
+    local length
+
+    for ((index = 2; index < arcs; index++)); do
+        value+="01"
+    done
+
+    length=$((arcs - 1))
+    if ((length < 128)); then
+        printf '06%02x%s' "${length}" "${value}"
+    else
+        printf '0681%02x%s' "${length}" "${value}"
+    fi
+}
+
+makeOidWithLongArcCount() {
+    local arcs="$1"
+    local value="2b"
+    local index
+    local length
+
+    for ((index = 2; index < arcs; index++)); do
+        # Minimally encoded nine-octet base-128 value, 2^63 - 1.
+        value+="ffffffffffffffff7f"
+    done
+
+    length=$((1 + (arcs - 2) * 9))
+    if ((length < 128)); then
+        printf '06%02x%s' "${length}" "${value}"
+    elif ((length < 256)); then
+        printf '0681%02x%s' "${length}" "${value}"
+    else
+        printf '0682%04x%s' "${length}" "${value}"
+    fi
+}
+
+runValid "ICCP_BER_TEST::IdentifierCase" "a0" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=true tag=0 octets=1"
+runValid "ICCP_BER_TEST::IdentifierCase" "02" \
+    "class=TagClass::UNIVERSAL constructed=false tag=2 octets=1"
+runValid "ICCP_BER_TEST::IdentifierCase" "43" \
+    "class=TagClass::APPLICATION constructed=false tag=3 octets=1"
+runValid "ICCP_BER_TEST::IdentifierCase" "c1" \
+    "class=TagClass::PRIVATE constructed=false tag=1 octets=1"
+runValid "ICCP_BER_TEST::IdentifierCase" "9f8100" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=false tag=128 octets=3"
+runValid "ICCP_BER_TEST::IdentifierCase" "9f8181818100" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=false tag=270549120 octets=6"
+runInvalid "ICCP_BER_TEST::IdentifierCase" "9f81" "expecting 1 bytes"
+runInvalid "ICCP_BER_TEST::IdentifierCase" "9f1e" "&requires failed"
+runInvalid "ICCP_BER_TEST::IdentifierCase" "9f801f" "not minimally encoded"
+runInvalid "ICCP_BER_TEST::IdentifierCase" "9f818181818100" "configured octet limit"
+
+runValid "ICCP_BER_TEST::LengthCase" "00" "length=0 long=false octets=1"
+runValid "ICCP_BER_TEST::LengthCase" "7f" "length=127 long=false octets=1"
+runValid "ICCP_BER_TEST::LengthCase" "8180" "length=128 long=true octets=2"
+runValid "ICCP_BER_TEST::LengthCase" "81ff" "length=255 long=true octets=2"
+runValid "ICCP_BER_TEST::LengthCase" "820100" "length=256 long=true octets=3"
+runValid "ICCP_BER_TEST::LengthCase" "8401000000" \
+    "length=16777216 long=true octets=5"
+runInvalid "ICCP_BER_TEST::LengthCase" "80" "indefinite length is unsupported"
+runInvalid "ICCP_BER_TEST::LengthCase" "8201" "expecting 1 bytes"
+runInvalid "ICCP_BER_TEST::LengthCase" "820080" "not minimally encoded"
+runInvalid "ICCP_BER_TEST::LengthCase" "817f" "&requires failed"
+runInvalid "ICCP_BER_TEST::LengthCase" "850100000000" "configured octet limit"
+runInvalid "ICCP_BER_TEST::LengthCase" "8401000001" "&requires failed"
+
+runValid "ICCP_BER_TEST::TLVCase" "a003020101" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=true tag=0 length=3 value=\\x02\\x01\\x01"
+runInvalid "ICCP_BER_TEST::TLVCase" "04036162" "expected 3 bytes"
+runValid "ICCP_BER_TEST::EnvelopeCase" "6105bf4d02aabb" "safe=true"
+runValid "ICCP_BER_TEST::EnvelopeCase" "6105bf4d02aa" "safe=false"
+runValid "ICCP_BER_TEST::EnvelopeCase" "61817f" "safe=false"
+
+runValid "ICCP_BER_TEST::BooleanCase" "0101ff" \
+    "boolean=true encoded=255"
+runValid "ICCP_BER_TEST::BooleanCase" "010100" \
+    "boolean=false encoded=0"
+runInvalid "ICCP_BER_TEST::BooleanCase" "01020000" "&requires failed"
+
+runValid "ICCP_BER_TEST::IntegerCase" "02017f" \
+    "integer=127 encoded=\\x7f"
+runValid "ICCP_BER_TEST::IntegerCase" "0201ff" \
+    "integer=-1 encoded=\\xff"
+runValid "ICCP_BER_TEST::IntegerCase" "02020080" \
+    "integer=128 encoded=\\x00\\x80"
+runValid "ICCP_BER_TEST::IntegerCase" "02087fffffffffffffff" \
+    "integer=9223372036854775807 encoded=\\x7f\\xff\\xff\\xff\\xff\\xff\\xff\\xff"
+runInvalid "ICCP_BER_TEST::IntegerCase" "0200" "&requires failed"
+runInvalid "ICCP_BER_TEST::IntegerCase" "0202007f" "&requires failed"
+runInvalid "ICCP_BER_TEST::IntegerCase" "0202ff80" "&requires failed"
+runInvalid "ICCP_BER_TEST::IntegerCase" "0209010000000000000000" "&requires failed"
+runValid "ICCP_BER_TEST::EnumeratedCase" "0a0103" "enumerated=3"
+
+runValid "ICCP_BER_TEST::NullCase" "0500" "null=true"
+runInvalid "ICCP_BER_TEST::NullCase" "050100" "&requires failed"
+
+runValid "ICCP_BER_TEST::BitStringCase" "030205a0" \
+    "unused=5 value=\\xa0"
+runValid "ICCP_BER_TEST::BitStringCase" "030100" \
+    "unused=0 value="
+runInvalid "ICCP_BER_TEST::BitStringCase" "0300" "&requires failed"
+runInvalid "ICCP_BER_TEST::BitStringCase" "03020800" "&requires failed"
+runInvalid "ICCP_BER_TEST::BitStringCase" "030203a1" "&requires failed"
+
+runValid "ICCP_BER_TEST::OctetStringCase" "0403616263" "octets=abc"
+runValid "ICCP_BER_TEST::UTF8StringCase" "0c034d4d53" "utf8=MMS"
+runValid "ICCP_BER_TEST::VisibleStringCase" "1a06504f494e5431" \
+    "visible=POINT1"
+runValid "ICCP_BER_TEST::UTCTimeCase" "170d3236303732373132303030305a" \
+    "utc=260727120000Z"
+runValid "ICCP_BER_TEST::GeneralizedTimeCase" \
+    "180f32303236303732373132303030305a" \
+    "generalized=20260727120000Z"
+runValid "ICCP_BER_TEST::DocumentCase" "1401ff" \
+    "class=TagClass::UNIVERSAL constructed=false tag=20 elements=1 depth=0"
+
+runValid "ICCP_BER_TEST::ObjectIdentifierCase" "06052b06010401" \
+    "oid=1.3.6.1.4.1"
+runValid "ICCP_BER_TEST::ObjectIdentifierCase" "0603883703" \
+    "oid=2.999.3"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "0600" \
+    "empty value"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "06022a80" \
+    "component is not minimally encoded"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "06022a81" \
+    "component is truncated"
+maxOidArcsInput="$(makeOidWithArcCount 128)"
+maxOidArcsExpected="1.3"
+for ((oidArc = 2; oidArc < 128; oidArc++)); do
+    maxOidArcsExpected+=".1"
+done
+runValid "ICCP_BER_TEST::ObjectIdentifierCase" "${maxOidArcsInput}" \
+    "oid=${maxOidArcsExpected}"
+excessiveOidArcsInput="$(makeOidWithArcCount 129)"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "${excessiveOidArcsInput}" \
+    "configured arc limit"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "06820401" \
+    "&requires failed"
+excessiveOidTextInput="$(makeOidWithLongArcCount 110)"
+runInvalid "ICCP_BER_TEST::ObjectIdentifierCase" "${excessiveOidTextInput}" \
+    "configured rendered length"
+
+runValid "ICCP_BER_TEST::DocumentCase" "30060201010101ff" \
+    "class=TagClass::UNIVERSAL constructed=true tag=16 elements=3 depth=0"
+runValid "ICCP_BER_TEST::DocumentCase" "3103020101" \
+    "class=TagClass::UNIVERSAL constructed=true tag=17 elements=2 depth=0"
+runValid "ICCP_BER_TEST::DocumentCase" "3000" \
+    "class=TagClass::UNIVERSAL constructed=true tag=16 elements=1 depth=0"
+runValid "ICCP_BER_TEST::DocumentCase" "24050403616263" \
+    "class=TagClass::UNIVERSAL constructed=true tag=4 elements=2 depth=0"
+runInvalid "ICCP_BER_TEST::DocumentCase" "2403020101" \
+    "mismatched child tag"
+runInvalid "ICCP_BER_TEST::DocumentCase" "2100" "&requires failed"
+runInvalid "ICCP_BER_TEST::DocumentCase" "1000" "&requires failed"
+runInvalid "ICCP_BER_TEST::DocumentCase" "3003020200" "expected 2 bytes"
+
+runValid "ICCP_BER_TEST::DocumentCase" "a00302012a" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=true tag=0 elements=2 depth=0"
+runValid "ICCP_BER_TEST::DocumentCase" "800105" \
+    "class=TagClass::CONTEXT_SPECIFIC constructed=false tag=0 elements=1 depth=0"
+
+runValid "ICCP_BER_TEST::DocumentCase" "280a06032a0304a003020105" \
+    "class=TagClass::UNIVERSAL constructed=true tag=8 elements=4 depth=0"
+runValid "ICCP_BER_TEST::DocumentCase" "2803810100" \
+    "class=TagClass::UNIVERSAL constructed=true tag=8 elements=2 depth=0"
+runInvalid "ICCP_BER_TEST::DocumentCase" "2800" \
+    "missing its encoding choice"
+runInvalid "ICCP_BER_TEST::DocumentCase" "2803800100" \
+    "encoding choice has invalid form"
+runInvalid "ICCP_BER_TEST::DocumentCase" "2806810100810100" \
+    "multiple encoding choices"
+
+maxDepthInput="$(makeNestedSequence 31)"
+runValid "ICCP_BER_TEST::DocumentCase" "${maxDepthInput}" \
+    "class=TagClass::UNIVERSAL constructed=true tag=16 elements=32 depth=0"
+excessiveDepthInput="$(makeNestedSequence 32)"
+runInvalid "ICCP_BER_TEST::DocumentCase" "${excessiveDepthInput}" \
+    "configured depth limit"
+
+maxElementsInput="$(makeNullCollection 4095)"
+runValid "ICCP_BER_TEST::DocumentCase" "${maxElementsInput}" \
+    "class=TagClass::UNIVERSAL constructed=true tag=16 elements=4096 depth=0"
+excessiveElementsInput="$(makeNullCollection 4096)"
+runInvalid "ICCP_BER_TEST::DocumentCase" "${excessiveElementsInput}" \
+    "configured element limit"
+
+while IFS=$'\t' read -r regressionName parser hexInput expectedError; do
+    if [[ -z "${regressionName}" || "${regressionName}" == \#* ]]; then
+        continue
+    fi
+
+    runInvalid "${parser}" "${hexInput}" "${expectedError}"
+done <"${projectDir}/testing/fuzz/ber-regressions.tsv"
+
+echo "${passCount} BER runtime tests passed"

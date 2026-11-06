@@ -1,0 +1,723 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+set -C
+
+umask 077
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+corpus_dir="${1:-${project_dir}/pcaps}"
+output_dir="${2:-}"
+
+readonly HARD_MAX_SOURCE_FILES=4096
+readonly HARD_MAX_SOURCE_BYTES=$((4 * 1024 * 1024 * 1024))
+readonly HARD_MAX_FILTERED_BYTES=$((1024 * 1024 * 1024))
+max_source_files="${ICCP_VALIDATE_TEST_MAX_SOURCE_FILES:-${HARD_MAX_SOURCE_FILES}}"
+max_source_bytes="${ICCP_VALIDATE_TEST_MAX_SOURCE_BYTES:-${HARD_MAX_SOURCE_BYTES}}"
+max_filtered_bytes="${ICCP_VALIDATE_TEST_MAX_FILTERED_BYTES:-${HARD_MAX_FILTERED_BYTES}}"
+
+for limit_name in max_source_files max_source_bytes max_filtered_bytes; do
+    limit_value="${!limit_name}"
+    if [[ ! "${limit_value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "invalid local corpus validation limit ${limit_name}" >&2
+        exit 1
+    fi
+done
+
+decimal_exceeds() {
+    local value="$1"
+    local ceiling="$2"
+
+    if ((${#value} != ${#ceiling})); then
+        ((${#value} > ${#ceiling}))
+        return
+    fi
+    [[ "${value}" > "${ceiling}" ]]
+}
+
+# Compare validated decimal strings before using them in Bash arithmetic.
+# Bash arithmetic is signed and can wrap an oversized environment value.
+if decimal_exceeds "${max_source_files}" "${HARD_MAX_SOURCE_FILES}" ||
+   decimal_exceeds "${max_source_bytes}" "${HARD_MAX_SOURCE_BYTES}" ||
+   decimal_exceeds "${max_filtered_bytes}" "${HARD_MAX_FILTERED_BYTES}"; then
+    echo "test-only local corpus limits may lower but not raise hard ceilings" >&2
+    exit 1
+fi
+
+for command_name in capinfos cmp mergecap python3 rawshark realpath sha256sum spicy-config spicy-driver spicyc tcpdump zeek zeek-cut; do
+    if ! command -v "${command_name}" >/dev/null; then
+        echo "local corpus validation requires ${command_name}" >&2
+        exit 1
+    fi
+done
+
+project_dir="$(realpath -e -- "${project_dir}")"
+
+if [[ ! -d "${corpus_dir}" ]]; then
+    echo "corpus directory does not exist: ${corpus_dir}" >&2
+    exit 1
+fi
+
+corpus_dir="$(realpath -e -- "${corpus_dir}")"
+
+path_is_within() {
+    local child="$1"
+    local parent="$2"
+
+    [[ "${child}" == "${parent}" ||
+       "${child}" == "${parent%/}/"* ]]
+}
+
+paths_overlap() {
+    local left="$1"
+    local right="$2"
+
+    path_is_within "${left}" "${right}" ||
+        path_is_within "${right}" "${left}"
+}
+
+validate_output_location() {
+    local candidate="$1"
+
+    if paths_overlap "${corpus_dir}" "${candidate}"; then
+        echo "validation output and raw corpus must be disjoint: ${candidate}" >&2
+        exit 1
+    fi
+    if path_is_within "${candidate}" "${project_dir}"; then
+        echo "validation output must remain outside the repository" >&2
+        exit 1
+    fi
+}
+
+if [[ -z "${output_dir}" ]]; then
+    temporary_parent="$(realpath -e -- "${TMPDIR:-/tmp}")"
+    if path_is_within "${temporary_parent}" "${corpus_dir}"; then
+        echo "temporary output root must not be inside the raw corpus; provide a disjoint output directory" >&2
+        exit 1
+    fi
+    if path_is_within "${temporary_parent}" "${project_dir}"; then
+        echo "temporary output root must remain outside the repository" >&2
+        exit 1
+    fi
+    output_dir="$(mktemp -d "${temporary_parent}/iccp-local-corpus-validation.XXXXXX")"
+else
+    # Resolve missing suffixes without creating them, then reject either
+    # ancestry direction before the first validation artifact can be written.
+    output_argument="${output_dir}"
+    while [[ "${output_argument}" != "/" && "${output_argument}" == */ ]]; do
+        output_argument="${output_argument%/}"
+    done
+    if [[ -L "${output_argument}" ]]; then
+        echo "validation output directory must not be a symbolic link: ${output_argument}" >&2
+        exit 1
+    fi
+    output_dir="$(realpath -m -- "${output_argument}")"
+    validate_output_location "${output_dir}"
+    if [[ -e "${output_dir}" ]]; then
+        if [[ ! -d "${output_dir}" || ! -O "${output_dir}" ]]; then
+            echo "validation output directory must be user-owned: ${output_dir}" >&2
+            exit 1
+        fi
+    else
+        # Requiring the parent to exist avoids following a newly created chain
+        # of unchecked intermediate directories or symbolic links.
+        if ! mkdir -m 700 -- "${output_dir}"; then
+            echo "unable to create private validation output directory: ${output_dir}" >&2
+            exit 1
+        fi
+    fi
+    output_dir="$(realpath -e -- "${output_dir}")"
+fi
+
+validate_output_location "${output_dir}"
+if [[ ! -O "${output_dir}" || "$(stat -c '%a' -- "${output_dir}")" != "700" ]]; then
+    echo "validation output directory must be user-owned with mode 0700: ${output_dir}" >&2
+    exit 1
+fi
+if [[ -n "$(find "${output_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "validation output directory must be empty: ${output_dir}" >&2
+    exit 1
+fi
+
+if [[ "${corpus_dir}/" == "${project_dir}/"* ]] &&
+   ! git -C "${project_dir}" check-ignore -q "${corpus_dir}"; then
+    echo "in-repository raw corpus is not protected by a Git ignore rule" >&2
+    exit 1
+fi
+
+captures=()
+total_bytes=0
+coproc CORPUS_FIND {
+    find "${corpus_dir}" -type f -name '*.pcap' -print0
+}
+corpus_find_pid="${CORPUS_FIND_PID}"
+corpus_find_fd="${CORPUS_FIND[0]}"
+while IFS= read -r -d '' capture; do
+    if ((${#captures[@]} >= max_source_files)); then
+        echo "raw corpus exceeds source-file-count ceiling (${max_source_files})" >&2
+        exit 1
+    fi
+    capture_bytes="$(stat -c '%s' -- "${capture}")"
+    if ((capture_bytes > max_source_bytes - total_bytes)); then
+        echo "raw corpus exceeds aggregate source-byte ceiling (${max_source_bytes})" >&2
+        exit 1
+    fi
+    total_bytes=$((total_bytes + capture_bytes))
+    captures+=("${capture}")
+done <&"${corpus_find_fd}"
+if ! wait "${corpus_find_pid}"; then
+    echo "unable to enumerate the complete raw corpus" >&2
+    exit 1
+fi
+
+if [[ "${#captures[@]}" -eq 0 ]]; then
+    echo "no PCAP files found under ${corpus_dir}" >&2
+    exit 1
+fi
+
+# Sort only after admission has bounded the in-memory path inventory.
+mapfile -d '' captures < <(printf '%s\0' "${captures[@]}" | sort -z)
+
+manifest="${output_dir}/capture-manifest.sha256"
+: > "${manifest}"
+for capture in "${captures[@]}"; do
+    sha256sum "${capture}" >> "${manifest}"
+done
+
+filtered_parts_dir="${output_dir}/filtered-parts"
+mkdir -p "${filtered_parts_dir}"
+filter_status="${output_dir}/filter-status.local"
+: > "${filter_status}"
+filtered_parts=()
+filter_warnings=0
+total_filtered_bytes=0
+
+for capture_index in "${!captures[@]}"; do
+    filtered_part="$(printf '%s/%03d.pcap' \
+        "${filtered_parts_dir}" "${capture_index}")"
+    diagnostic="$(printf '%s/tcpdump-%03d.stderr' \
+        "${filtered_parts_dir}" "${capture_index}")"
+
+    set +e
+    tcpdump -nn -r "${captures[${capture_index}]}" -w "${filtered_part}" \
+        'tcp port 102' 2>"${diagnostic}"
+    filter_exit=$?
+    set -e
+
+    filtered_part_bytes=0
+    if [[ -f "${filtered_part}" ]]; then
+        filtered_part_bytes="$(stat -c '%s' -- "${filtered_part}")"
+    fi
+    if ((filtered_part_bytes > max_filtered_bytes - total_filtered_bytes)); then
+        echo "filtered corpus exceeds aggregate byte ceiling (${max_filtered_bytes})" >&2
+        exit 1
+    fi
+    total_filtered_bytes=$((total_filtered_bytes + filtered_part_bytes))
+
+    if ! capinfos -c "${filtered_part}" >/dev/null 2>&1; then
+        printf '%03d\tunusable\t%d\n' \
+            "${capture_index}" "${filter_exit}" >> "${filter_status}"
+        ((++filter_warnings))
+        continue
+    fi
+
+    filtered_parts+=("${filtered_part}")
+    if [[ "${filter_exit}" -eq 0 ]]; then
+        printf '%03d\tok\t0\n' "${capture_index}" >> "${filter_status}"
+    else
+        printf '%03d\tpartial\t%d\n' \
+            "${capture_index}" "${filter_exit}" >> "${filter_status}"
+        ((++filter_warnings))
+    fi
+done
+
+if [[ "${#filtered_parts[@]}" -eq 0 ]]; then
+    echo "no readable TCP/102 capture subsets were produced" >&2
+    exit 1
+fi
+
+filtered_pcap="${output_dir}/corpus-tcp102.pcap"
+mergecap -F pcap -w "${filtered_pcap}" "${filtered_parts[@]}" \
+    2>"${output_dir}/mergecap.stderr"
+
+filtered_packets="$(
+    capinfos -T -r -c "${filtered_pcap}" | tail -n 1 | awk -F '\t' '{print $2}'
+)"
+filtered_bytes="$(stat -c '%s' "${filtered_pcap}")"
+
+extracted_mms_pcap="${output_dir}/extracted-mms.pcap"
+causal_mms_pcap="${output_dir}/causal-mms.pcap"
+confirmed_mms_pcap="${output_dir}/extracted-confirmed-mms.pcap"
+extractor_summary="${output_dir}/independent-stream.summary"
+extracted_mms_metadata="${output_dir}/extracted-mms-metadata.local.tsv"
+python3 "${script_dir}/extract-local-mms.py" \
+    "${filtered_pcap}" "${extracted_mms_pcap}" "${extractor_summary}" \
+    --confirmed-output "${confirmed_mms_pcap}" \
+    --causal-output "${causal_mms_pcap}" \
+    --metadata-output "${extracted_mms_metadata}" \
+    > "${output_dir}/independent-stream.stdout"
+
+# Decode every extracted InformationReport with a bounded implementation that
+# shares no parser code with the production Spicy grammar, then compare their
+# normalized MMS fields and three independent ordered raw-value
+# fingerprints exactly. Detailed names, values, and fingerprints remain
+# sensitive local artifacts.
+information_report_oracle_records="${output_dir}/information-report-oracle.local.tsv"
+information_report_oracle_summary="${output_dir}/information-report-oracle.summary"
+information_report_pdus="${output_dir}/information-report-pdus.local.bin"
+information_report_production_records="${output_dir}/information-report-production.local.tsv"
+information_report_driver="${output_dir}/information-report-driver.local.hlto"
+tase2_classification_records="${output_dir}/tase2-classifications.local.tsv"
+
+python3 "${script_dir}/information-report-oracle.py" \
+    "${extracted_mms_pcap}" "${information_report_oracle_records}" \
+    "${information_report_oracle_summary}" \
+    --reports "${information_report_pdus}" \
+    --metadata "${extracted_mms_metadata}" \
+    --classifications "${tase2_classification_records}" \
+    > "${output_dir}/information-report-oracle.stdout"
+
+information_report_count="$(
+    awk -F '\t' '$1 == "information_report.reports" { print $2 }' \
+        "${information_report_oracle_summary}"
+)"
+information_report_semantic_match=0
+if ((information_report_count > 0)) && \
+   spicyc -j -o "${information_report_driver}" \
+        "${project_dir}/testing/spicy/mms_driver.spicy" \
+        "${project_dir}/analyzer/mms.spicy" \
+        "${project_dir}/analyzer/mms_types.spicy" \
+        "${project_dir}/analyzer/ber.spicy" && \
+   spicy-driver -p "ICCP_MMS_TEST::InformationReportOracleStream" \
+        -f "${information_report_pdus}" "${information_report_driver}" \
+        > "${information_report_production_records}" && \
+   cmp -s "${information_report_oracle_records}" \
+        "${information_report_production_records}"; then
+    information_report_semantic_match=1
+fi
+
+information_report_record_lines="$(wc -l < "${information_report_oracle_records}")"
+tase2_type_discovery_records="$(
+    awk -F '\t' '$1 == "tase2_profile.type_discovery_records" { print $2 }' \
+        "${information_report_oracle_summary}"
+)"
+tase2_correlation_not_implemented="$(
+    awk -F '\t' '$1 == "tase2_profile.correlation_not_implemented" { print $2 }' \
+        "${information_report_oracle_summary}"
+)"
+tase2_verified_classifications="$(
+    awk -F '\t' '$1 == "tase2_profile.verified_classifications" { print $2 }' \
+        "${information_report_oracle_summary}"
+)"
+tase2_shape_candidate_results="$(
+    awk -F '\t' '$1 == "tase2_profile.shape_candidate_results" { print $2 }' \
+        "${information_report_oracle_summary}"
+)"
+
+# Independently decode every captured MMS Identify exchange. Device
+# identity strings remain private and are compared by length plus three
+# fingerprints rather than copied into the aggregate report.
+identify_oracle_records="${output_dir}/identify-oracle.local.tsv"
+identify_oracle_summary="${output_dir}/identify-oracle.summary"
+identify_pdus="${output_dir}/identify-pdus.local.bin"
+identify_production_records="${output_dir}/identify-production.local.tsv"
+python3 "${script_dir}/identify-oracle.py" \
+    "${extracted_mms_pcap}" "${identify_oracle_records}" \
+    "${identify_oracle_summary}" --pdus "${identify_pdus}" \
+    > "${output_dir}/identify-oracle.stdout"
+identify_requests="$(
+    awk -F '\t' '$1 == "identify.requests" { print $2 }' \
+        "${identify_oracle_summary}"
+)"
+identify_responses="$(
+    awk -F '\t' '$1 == "identify.responses" { print $2 }' \
+        "${identify_oracle_summary}"
+)"
+identify_count=$((identify_requests + identify_responses))
+identify_semantic_match=0
+if ((identify_count > 0)) && \
+   [[ -f "${information_report_driver}" ]] && \
+   spicy-driver -p "ICCP_MMS_TEST::IdentifyOracleStream" \
+        -f "${identify_pdus}" "${information_report_driver}" \
+        > "${identify_production_records}" && \
+   cmp -s "${identify_oracle_records}" "${identify_production_records}"; then
+    identify_semantic_match=1
+fi
+identify_record_lines="$(wc -l < "${identify_oracle_records}")"
+
+confirmed_fields="${output_dir}/independent-confirmed-mms.fields"
+rawshark -s -r - -d encap:147 -d proto:mms -n \
+    -F mms.invokeID \
+    < "${confirmed_mms_pcap}" > "${confirmed_fields}" \
+    2> "${output_dir}/independent-confirmed-mms.stderr"
+confirmed_invoke_ids="$(
+    awk 'NR > 1 && $0 ~ /(^| )0=/ { ++count } END { print count + 0 }' \
+        "${confirmed_fields}"
+)"
+confirmed_extracted="$(
+    awk -F '\t' '$1 == "mms.confirmed_extracted_pdus" { print $2 }' \
+        "${extractor_summary}"
+)"
+
+raw_fields="${output_dir}/rawshark.fields"
+rawshark -s -r - -d encap:1 -n \
+    -F tpkt.version \
+    -F cotp.type \
+    -F ses.length \
+    -F pres.presentation_context_identifier \
+    -F acse.aarq_element \
+    -F acse.aare_element \
+    -F mms.confirmed_requestPDU \
+    -F mms.confirmed_responsePDU \
+    -F mms.confirmed_errorPDU \
+    -F mms.unconfirmedPDU \
+    -F mms.invokeID \
+    < "${filtered_pcap}" > "${raw_fields}" \
+    2>"${output_dir}/rawshark.stderr"
+
+awk '
+    NR > 1 {
+        for (field_index = 0; field_index <= 10; ++field_index)
+            if ($0 ~ ("(^| )" field_index "=")) ++count[field_index]
+    }
+    END {
+        print "independent.tpkt\t" count[0] + 0
+        print "independent.cotp\t" count[1] + 0
+        print "independent.session\t" count[2] + 0
+        print "independent.presentation\t" count[3] + 0
+        print "independent.acse_aarq\t" count[4] + 0
+        print "independent.acse_aare\t" count[5] + 0
+        print "independent.mms_request\t" count[6] + 0
+        print "independent.mms_response\t" count[7] + 0
+        print "independent.mms_error\t" count[8] + 0
+        print "independent.mms_unconfirmed\t" count[9] + 0
+        print "independent.mms_invoke_id\t" count[10] + 0
+    }
+' "${raw_fields}" > "${output_dir}/independent.summary"
+
+zeek_dir="${output_dir}/zeek"
+mkdir -p "${zeek_dir}"
+(
+    cd "${zeek_dir}"
+    ZEEK_PLUGIN_PATH="${project_dir}/build" \
+        zeek -Cr "${filtered_pcap}" \
+        "${project_dir}/scripts/__load__.zeek" \
+        "${script_dir}/local-corpus-validation.zeek" \
+        > "${output_dir}/events.summary"
+)
+
+# A wire shape is not a trusted TASE.2 point type. Compare production indication
+# claims only with independently verified named-type classifications. The
+# independent side now carries privacy-local flow/direction/order metadata
+# and admits a point only after exact invoke/object correlation and shape
+# agreement. The current mid-association corpus still makes zero claims.
+production_tase2_point_claims=0
+tase2_classification_record_match=0
+if [[ -f "${zeek_dir}/iccp_objects.log" ]]; then
+    production_tase2_point_claims="$(
+        zeek-cut point_type < "${zeek_dir}/iccp_objects.log" |
+            awk '{
+                if ($1 == "real" || $1 == "discrete" || $1 == "state" ||
+                    $1 == "real_q" || $1 == "discrete_q" ||
+                    $1 == "real_q_time" || $1 == "discrete_q_time")
+                    ++count
+            } END { print count + 0 }'
+    )"
+
+    independent_tase2_normalized="${output_dir}/tase2-independent-normalized.local.tsv"
+    production_tase2_normalized="${output_dir}/tase2-production-normalized.local.tsv"
+    awk -F '\t' 'BEGIN {OFS="\t"}
+        NR > 1 {
+            scope = $5 == 0 ? "vcc" : ($5 == 1 ? "icc" : "aa")
+            invoke = $4 < 0 ? "-" : $4
+            print $3, invoke, scope, $6, $7, $9
+        }
+    ' "${tase2_classification_records}" | LC_ALL=C sort \
+        > "${independent_tase2_normalized}"
+    zeek-cut observation_kind invoke_id object_scope object_domain \
+        object_name point_type < "${zeek_dir}/iccp_objects.log" |
+        awk -F '\t' 'BEGIN {OFS="\t"}
+            $6 == "real" || $6 == "discrete" || $6 == "state" ||
+            $6 == "real_q" || $6 == "discrete_q" ||
+            $6 == "real_q_time" || $6 == "discrete_q_time" {
+                domain = ($4 == "-" || $4 == "(empty)") ? "" : $4
+                print $1, $2, $3, domain, $5, $6
+            }
+        ' | LC_ALL=C sort > "${production_tase2_normalized}"
+    if cmp -s "${independent_tase2_normalized}" \
+        "${production_tase2_normalized}"; then
+        tase2_classification_record_match=1
+    fi
+fi
+tase2_classification_boundary_match=0
+if ((
+    tase2_correlation_not_implemented == 0 &&
+    tase2_verified_classifications == production_tase2_point_claims &&
+    tase2_classification_record_match == 1
+)); then
+    tase2_classification_boundary_match=1
+fi
+
+# Compare each filtered source independently. Exact record cardinality is a
+# meaningful gate only when the independent TCP walker saw no sequence gap.
+# Gapped streams remain diagnostic because Zeek and the walker intentionally
+# have different recovery behavior after missing bytes.
+per_file_dir="${output_dir}/per-file"
+mkdir -p "${per_file_dir}"
+per_file_counts="${per_file_dir}/counts.local.tsv"
+: > "${per_file_counts}"
+
+gap_free_files=0
+gap_free_exact_files=0
+gap_free_mismatch_files=0
+gap_free_extractor_mms=0
+gap_free_causal_mms=0
+gap_free_plugin_mms=0
+gap_free_type_mismatch_files=0
+gap_free_causal_mismatch_files=0
+gapped_files=0
+gapped_extractor_mms=0
+gapped_causal_mms=0
+gapped_plugin_mms=0
+gapped_retroactive_upper_bound_mms=0
+gapped_causal_parser_deficit_mms=0
+gapped_plugin_beyond_causal_mms=0
+
+for filtered_index in "${!filtered_parts[@]}"; do
+    filtered_part="${filtered_parts[${filtered_index}]}"
+    part_id="$(printf '%03d' "${filtered_index}")"
+    part_dir="${per_file_dir}/${part_id}"
+    part_zeek_dir="${part_dir}/zeek"
+    mkdir -p "${part_zeek_dir}"
+
+    python3 "${script_dir}/extract-local-mms.py" \
+        "${filtered_part}" "${part_dir}/extracted-mms.pcap" \
+        "${part_dir}/independent-stream.summary" \
+        > "${part_dir}/independent-stream.stdout"
+
+    (
+        cd "${part_zeek_dir}"
+        ZEEK_PLUGIN_PATH="${project_dir}/build" \
+            zeek -Cr "${filtered_part}" \
+            "${project_dir}/scripts/__load__.zeek" \
+            > "${part_dir}/zeek.stdout"
+    )
+
+    extractor_mms="$(
+        awk -F '\t' '$1 == "mms.extracted_pdus" { print $2 }' \
+            "${part_dir}/independent-stream.summary"
+    )"
+    causal_mms="$(
+        awk -F '\t' '$1 == "causal.mms.extracted_pdus" { print $2 }' \
+            "${part_dir}/independent-stream.summary"
+    )"
+    causal_mms="${causal_mms:-0}"
+    extractor_tag_0="$(awk -F '\t' '$1 == "mms.tag_0" { print $2 }' "${part_dir}/independent-stream.summary")"
+    extractor_tag_1="$(awk -F '\t' '$1 == "mms.tag_1" { print $2 }' "${part_dir}/independent-stream.summary")"
+    extractor_tag_3="$(awk -F '\t' '$1 == "mms.tag_3" { print $2 }' "${part_dir}/independent-stream.summary")"
+    extractor_tag_0="${extractor_tag_0:-0}"
+    extractor_tag_1="${extractor_tag_1:-0}"
+    extractor_tag_3="${extractor_tag_3:-0}"
+    tcp_gaps="$(
+        awk -F '\t' '$1 == "tcp.gaps" { print $2 }' \
+            "${part_dir}/independent-stream.summary"
+    )"
+    tcp_gaps="${tcp_gaps:-0}"
+
+    plugin_mms=0
+    plugin_tag_0=0
+    plugin_tag_1=0
+    plugin_tag_3=0
+    if [[ -f "${part_zeek_dir}/iccp.log" ]]; then
+        plugin_mms="$(
+            zeek-cut layer < "${part_zeek_dir}/iccp.log" |
+                awk '$1 == "mms" { ++count } END { print count + 0 }'
+        )"
+        read -r plugin_tag_0 plugin_tag_1 plugin_tag_3 < <(
+            zeek-cut layer message_type < "${part_zeek_dir}/iccp.log" |
+                awk '$1 == "mms" && ($2 == 0 || $2 == 1 || $2 == 3) { ++count[$2] }
+                     END { print count[0] + 0, count[1] + 0, count[3] + 0 }'
+        )
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${part_id}" "${tcp_gaps}" "${extractor_mms}" "${causal_mms}" \
+        "${plugin_mms}" \
+        "${extractor_tag_0}" "${plugin_tag_0}" \
+        "${extractor_tag_1}" "${plugin_tag_1}" \
+        "${extractor_tag_3}" "${plugin_tag_3}" \
+        >> "${per_file_counts}"
+
+    if ((tcp_gaps == 0)); then
+        ((++gap_free_files))
+        gap_free_extractor_mms=$((gap_free_extractor_mms + extractor_mms))
+        gap_free_causal_mms=$((gap_free_causal_mms + causal_mms))
+        gap_free_plugin_mms=$((gap_free_plugin_mms + plugin_mms))
+        if ((extractor_mms == plugin_mms)); then
+            ((++gap_free_exact_files))
+        else
+            ((++gap_free_mismatch_files))
+        fi
+        if ((extractor_mms != causal_mms)); then
+            ((++gap_free_causal_mismatch_files))
+        fi
+        if ((
+            extractor_tag_0 != plugin_tag_0 ||
+            extractor_tag_1 != plugin_tag_1 ||
+            extractor_tag_3 != plugin_tag_3
+        )); then
+            ((++gap_free_type_mismatch_files))
+        fi
+    else
+        ((++gapped_files))
+        gapped_extractor_mms=$((gapped_extractor_mms + extractor_mms))
+        gapped_causal_mms=$((gapped_causal_mms + causal_mms))
+        gapped_plugin_mms=$((gapped_plugin_mms + plugin_mms))
+        if ((extractor_mms > causal_mms)); then
+            gapped_retroactive_upper_bound_mms=$((
+                gapped_retroactive_upper_bound_mms + extractor_mms - causal_mms
+            ))
+        fi
+        if ((causal_mms > plugin_mms)); then
+            gapped_causal_parser_deficit_mms=$((
+                gapped_causal_parser_deficit_mms + causal_mms - plugin_mms
+            ))
+        elif ((plugin_mms > causal_mms)); then
+            gapped_plugin_beyond_causal_mms=$((
+                gapped_plugin_beyond_causal_mms + plugin_mms - causal_mms
+            ))
+        fi
+    fi
+done
+
+per_file_summary="${output_dir}/per-file-comparison.summary"
+{
+    printf 'comparison.gap_free_files\t%d\n' "${gap_free_files}"
+    printf 'comparison.gap_free_exact_files\t%d\n' "${gap_free_exact_files}"
+    printf 'comparison.gap_free_mismatch_files\t%d\n' "${gap_free_mismatch_files}"
+    printf 'comparison.gap_free_type_mismatch_files\t%d\n' "${gap_free_type_mismatch_files}"
+    printf 'comparison.gap_free_causal_mismatch_files\t%d\n' "${gap_free_causal_mismatch_files}"
+    printf 'comparison.gap_free_extractor_mms\t%d\n' "${gap_free_extractor_mms}"
+    printf 'comparison.gap_free_causal_mms\t%d\n' "${gap_free_causal_mms}"
+    printf 'comparison.gap_free_plugin_mms\t%d\n' "${gap_free_plugin_mms}"
+    printf 'comparison.gapped_files\t%d\n' "${gapped_files}"
+    printf 'comparison.gapped_extractor_mms\t%d\n' "${gapped_extractor_mms}"
+    printf 'comparison.gapped_causal_mms\t%d\n' "${gapped_causal_mms}"
+    printf 'comparison.gapped_plugin_mms\t%d\n' "${gapped_plugin_mms}"
+    printf 'comparison.gapped_ideal_minus_causal_mms\t%d\n' \
+        "$((gapped_extractor_mms - gapped_causal_mms))"
+    printf 'comparison.gapped_causal_minus_plugin_mms\t%d\n' \
+        "$((gapped_causal_mms - gapped_plugin_mms))"
+    printf 'comparison.gapped_retroactive_upper_bound_mms\t%d\n' \
+        "${gapped_retroactive_upper_bound_mms}"
+    printf 'comparison.gapped_causal_parser_deficit_mms\t%d\n' \
+        "${gapped_causal_parser_deficit_mms}"
+    printf 'comparison.gapped_plugin_beyond_causal_mms\t%d\n' \
+        "${gapped_plugin_beyond_causal_mms}"
+} > "${per_file_summary}"
+
+summary="${output_dir}/aggregate.summary"
+{
+    printf 'tool.zeek\t%s\n' "$(zeek --version)"
+    printf 'tool.spicy\t%s\n' "$(spicy-config --version)"
+    printf 'tool.rawshark\t%s\n' "$(rawshark --version | awk 'NR == 1 { print }')"
+    printf 'tool.python\t%s\n' "$(python3 --version)"
+    printf 'source.files\t%d\n' "${#captures[@]}"
+    printf 'source.bytes\t%d\n' "${total_bytes}"
+    printf 'source.filter_warnings\t%d\n' "${filter_warnings}"
+    printf 'filtered.packets\t%s\n' "${filtered_packets}"
+    printf 'filtered.bytes\t%d\n' "${filtered_bytes}"
+    cat "${output_dir}/independent.summary"
+    printf 'independent_mms.confirmed_extracted\t%d\n' "${confirmed_extracted}"
+    printf 'independent_mms.confirmed_invoke_ids\t%d\n' "${confirmed_invoke_ids}"
+    cat "${information_report_oracle_summary}"
+    printf 'comparison.information_report_semantic_match\t%d\n' \
+        "${information_report_semantic_match}"
+    printf 'comparison.information_report_record_lines\t%d\n' \
+        "${information_report_record_lines}"
+    printf 'comparison.tase2_type_discovery_records\t%d\n' \
+        "${tase2_type_discovery_records}"
+    printf 'comparison.tase2_shape_candidate_results\t%d\n' \
+        "${tase2_shape_candidate_results}"
+    printf 'comparison.tase2_verified_classifications\t%d\n' \
+        "${tase2_verified_classifications}"
+    printf 'comparison.production_tase2_point_claims\t%d\n' \
+        "${production_tase2_point_claims}"
+    printf 'comparison.tase2_classification_boundary_match\t%d\n' \
+        "${tase2_classification_boundary_match}"
+    printf 'comparison.tase2_classification_record_match\t%d\n' \
+        "${tase2_classification_record_match}"
+    cat "${identify_oracle_summary}"
+    printf 'comparison.identify_semantic_match\t%d\n' \
+        "${identify_semantic_match}"
+    printf 'comparison.identify_record_lines\t%d\n' \
+        "${identify_record_lines}"
+    awk -F '\t' '{ print "independent_stream." $1 "\t" $2 }' \
+        "${extractor_summary}"
+    cat "${per_file_summary}"
+    cat "${output_dir}/events.summary"
+
+    for log_name in iccp iccp_objects iccp_transfers iccp_controls iccp_errors; do
+        log_path="${zeek_dir}/${log_name}.log"
+        if [[ -f "${log_path}" ]]; then
+            printf 'log.%s.records\t%d\n' "${log_name}" \
+                "$(awk '!/^#/ {++count} END {print count + 0}' "${log_path}")"
+        else
+            printf 'log.%s.records\t0\n' "${log_name}"
+        fi
+    done
+} > "${summary}"
+
+if [[ -f "${zeek_dir}/iccp.log" ]]; then
+    zeek-cut layer status provenance < "${zeek_dir}/iccp.log" |
+        LC_ALL=C sort | uniq -c |
+        awk '{$1=$1; print}' > "${output_dir}/iccp-breakdown.summary"
+fi
+
+if [[ -f "${zeek_dir}/iccp_objects.log" ]]; then
+    zeek-cut observation_kind provenance < "${zeek_dir}/iccp_objects.log" |
+        LC_ALL=C sort | uniq -c |
+        awk '{$1=$1; print}' > "${output_dir}/object-breakdown.summary"
+fi
+
+if [[ -f "${zeek_dir}/iccp_transfers.log" ]]; then
+    zeek-cut action outcome provenance < "${zeek_dir}/iccp_transfers.log" |
+        LC_ALL=C sort | uniq -c |
+        awk '{$1=$1; print}' > "${output_dir}/transfer-breakdown.summary"
+fi
+
+if [[ -f "${zeek_dir}/iccp_controls.log" ]]; then
+    zeek-cut classification outcome provenance < "${zeek_dir}/iccp_controls.log" |
+        LC_ALL=C sort | uniq -c |
+        awk '{$1=$1; print}' > "${output_dir}/control-breakdown.summary"
+fi
+
+if [[ -f "${zeek_dir}/iccp_errors.log" ]]; then
+    zeek-cut outcome error_class provenance < "${zeek_dir}/iccp_errors.log" |
+        LC_ALL=C sort | uniq -c |
+        awk '{$1=$1; print}' > "${output_dir}/error-breakdown.summary"
+fi
+
+echo "Local corpus validation completed."
+echo "Aggregate report: ${summary}"
+echo "Sensitive local artifacts: ${output_dir}"
+echo "Do not copy or commit that directory without provenance and sanitization approval."
+
+if ((
+    gap_free_mismatch_files != 0 ||
+    gap_free_type_mismatch_files != 0 ||
+    gap_free_causal_mismatch_files != 0 ||
+    confirmed_extracted != confirmed_invoke_ids ||
+    information_report_semantic_match != 1 ||
+    identify_semantic_match != 1 ||
+    tase2_classification_boundary_match != 1
+)); then
+    echo "independent local-corpus trust gate failed" >&2
+    exit 1
+fi
+
+if ((gapped_causal_parser_deficit_mms != 0)); then
+    echo "causal local-corpus trust gate found ${gapped_causal_parser_deficit_mms} production record deficits" >&2
+    exit 1
+fi

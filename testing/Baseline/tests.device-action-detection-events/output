@@ -1,0 +1,1 @@
+device_action kind=tase2 role=responder classification=device_failure outcome=notified enrollment=vcc//ENROLL1 condition=BREAKER_fail provenance=verified

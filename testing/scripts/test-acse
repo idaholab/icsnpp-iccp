@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-acse-tests.XXXXXX")"
+testPlugin="${testBuildDir}/acse-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" \
+    "${projectDir}/testing/spicy/acse_driver.spicy" \
+    "${projectDir}/analyzer/acse.spicy" \
+    "${projectDir}/analyzer/mms.spicy" \
+    "${projectDir}/analyzer/mms_types.spicy" \
+    "${projectDir}/analyzer/ber.spicy"
+
+passCount=0
+
+runValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_ACSE_TEST::APDUCase" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected ACSE output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_ACSE_TEST::APDUCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid ACSE input unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected ACSE error for ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runMetadataValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_ACSE_TEST::MetadataCase" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected ACSE metadata output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runUntrustedValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_ACSE_TEST::UntrustedAPDUCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected untrusted ACSE output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runTrustedSummary() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_ACSE_TEST::TrustedSummaryCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected trusted ACSE summary for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+base="recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=false authenticationLength=0"
+tail="reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+runValid "6009a10706052b06010401" \
+    "type=APDUType::AARQ ${base} outcome=-1 ${tail}"
+runValid "6115a10706052b06010401a203020100a305a103020100" \
+    "type=APDUType::AARE ${base} outcome=0 reason=-1 diagnostic=0 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "6115a10706052b06010401a203020101a305a203020102" \
+    "type=APDUType::AARE ${base} outcome=1 reason=-1 diagnostic=2 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "620380011e" \
+    "type=APDUType::RLRQ recognized=true context= title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=30 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "6303800100" \
+    "type=APDUType::RLRE recognized=true context= title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=0 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "6406800101810102" \
+    "type=APDUType::ABRT recognized=true context= title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=1 diagnostic=2 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# Authentication values are structurally validated, but only their presence
+# and payload length are exposed. The expected output contains no secret value.
+runValid "6014a10706052b060104018b025101ac058003706173" \
+    "type=APDUType::AARQ recognized=true context=1.3.6.1.4.1 title= mechanism=2.1.1 authentication=true authenticationLength=3 outcome=-1 reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "6015a10706052b06010401ac0aa3080602510104027061" \
+    "type=APDUType::AARQ recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=true authenticationLength=8 outcome=-1 reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# AARE tags 8, 9, and 10 have different meanings than their AARQ counterparts:
+# responder requirements, mechanism name, and responding authentication value.
+runValid "6124a10706052b06010401a203020100a305a1030201008802078089025101aa058003706173" \
+    "type=APDUType::AARE recognized=true context=1.3.6.1.4.1 title= mechanism=2.1.1 authentication=true authenticationLength=3 outcome=0 reason=-1 diagnostic=0 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# AARE tag 11 is an IMPLICIT sequence of application-context OIDs, not a
+# mechanism-name OID.
+runValid "611ea10706052b06010401a203020100a305a103020100ab0706052b06010401" \
+    "type=APDUType::AARE recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=false authenticationLength=0 outcome=0 reason=-1 diagnostic=0 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# Both AARQ [13] and AARE [11] carry IMPLICIT SEQUENCE OF values. Empty lists
+# are valid and their context-specific tags remain constructed.
+runValid "600ba10706052b06010401ad00" \
+    "type=APDUType::AARQ ${base} outcome=-1 ${tail}"
+runValid "6012a10706052b06010401ad0706052b06010402" \
+    "type=APDUType::AARQ ${base} outcome=-1 ${tail}"
+runValid "600ba10706052b060104019d00" \
+    "type=APDUType::AARQ ${base} outcome=-1 ${tail}"
+runValid "6117a10706052b06010401a203020100a305a103020100ab00" \
+    "type=APDUType::AARE ${base} outcome=0 reason=-1 diagnostic=0 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# Associate-result and both diagnostic INTEGER alternatives are extensible.
+runValid "6115a10706052b06010401a203020103a305a10302010f" \
+    "type=APDUType::AARE ${base} outcome=3 reason=-1 diagnostic=15 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+runValid "6115a10706052b06010401a2030201ffa305a2030201ff" \
+    "type=APDUType::AARE ${base} outcome=-1 reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# An MMS-shaped byte sequence outside Association-information is data, not a
+# dispatch signature. Authentication content remains secret and cannot cause
+# the nested MMS parser to run.
+runValid "6014a10706052b06010401ac098007a005020101a300" \
+    "type=APDUType::AARQ recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=true authenticationLength=7 outcome=-1 reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+# Association-information dispatch requires the standard MMS application
+# context, BER as EXTERNAL direct-reference, the enclosing MMS Presentation
+# context as indirect-reference, and the correct MMS Initiate PDU for AARQ or
+# AARE respectively.
+initiateRequest="a820810105820105a418800101810406f00000820d03aa5500000000000000000000"
+initiateResponse="a92780020400810105820105830110a418800101810406f00000820d03aa5500000000000000000000"
+runTrustedSummary \
+    "6038a107060528ca220203be2d282b06025101020103a022${initiateRequest}" \
+    "type=0 context=1.0.9506.2.3 direct=2.1.1 indirect=3 encoding=0 opaque=false mms=true nested=8"
+runTrustedSummary \
+    "614ba107060528ca220203a203020100a305a103020100be34283206025101020103a029${initiateResponse}" \
+    "type=1 context=1.0.9506.2.3 direct=2.1.1 indirect=3 encoding=0 opaque=false mms=true nested=9"
+
+# Complete the enclosing ACSE value before nested MMS dispatch.  Neither a
+# second top-level TLV nor a valid MMS PDU of the wrong association type may
+# reach the child parser.
+runInvalid \
+    "6038a107060528ca220203be2d282b06025101020103a022${initiateRequest}0500" \
+    "ACSE presentation payload has trailing data"
+runInvalid \
+    "6129a107060528ca220203a203020100a305a103020100be12281006025101020103a007a1050201018300" \
+    "not an MMS InitiateResponse"
+
+# A different application context leaves otherwise canonical EXTERNAL data
+# opaque, rather than granting it MMS authority.
+runValid "601da10706052b06010401be12281006025101020103a007a005020101a300" \
+    'type=APDUType::AARQ recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=-1 diagnostic=-1 userInfo=1 direct=2.1.1 indirect=3 encoding=0 opaque=true mms=false payload=\xa0\x05\x02\x01\x01\xa3\x00'
+
+# Standalone ACSE has no authority to infer which Presentation context the
+# EXTERNAL identifies, even when its wire metadata otherwise looks canonical.
+runUntrustedValid \
+    "6038a107060528ca220203be2d282b06025101020103a022${initiateRequest}" \
+    "opaque=true mms=false"
+
+# The direct reference must name BER and the indirect reference must identify
+# the context supplied by Presentation. Neither near miss may reach MMS.
+runTrustedSummary \
+    "6038a107060528ca220203be2d282b06025102020103a022${initiateRequest}" \
+    "type=0 context=1.0.9506.2.3 direct=2.1.2 indirect=3 encoding=0 opaque=true mms=false nested=-1"
+runTrustedSummary \
+    "6038a107060528ca220203be2d282b06025101020105a022${initiateRequest}" \
+    "type=0 context=1.0.9506.2.3 direct=2.1.1 indirect=5 encoding=0 opaque=true mms=false nested=-1"
+
+# A context-bound EXTERNAL cannot carry a non-Initiate MMS PDU during
+# association establishment.
+runInvalid "601da107060528ca220203be12281006025101020103a007a005020101a300" \
+    "not an MMS InitiateRequest"
+
+# X.227 extends Association-information beyond its single-EXTERNAL root.
+# Every value is structurally checked; multi-value content is kept opaque so
+# the analyzer never dispatches an incomplete subset as MMS.
+runValid "6028a10706052b06010401be1d281006025101020103a007a005020101a3002809a007a005020101a300" \
+    'type=APDUType::AARQ recognized=true context=1.3.6.1.4.1 title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=-1 diagnostic=-1 userInfo=2 direct=2.1.1 indirect=3 encoding=0 opaque=true mms=false payload=\xa0\x05\x02\x01\x01\xa3\x00'
+runValid "600ba10706052b06010401be00" \
+    "type=APDUType::AARQ ${base} outcome=-1 ${tail}"
+
+runValid "4503616263" \
+    "type=APDUType::UNKNOWN recognized=false context= title= mechanism= authentication=false authenticationLength=0 outcome=-1 reason=-1 diagnostic=-1 userInfo=0 direct= indirect=0 encoding=255 opaque=false mms=false payload="
+
+runMetadataValid \
+    "6039a10706052b06010401a20706052b06010401a303020107a403020101a503020102a60706052b06010402a703020108a803020103a903020104" \
+    "calledTitle=1.3.6.1.4.1 calledQualifier=7 calledApInvocation=1 calledAeInvocation=2 callingTitle=1.3.6.1.4.2 callingQualifier=8 callingApInvocation=3 callingAeInvocation=4 respondingTitle= respondingQualifier=-1 respondingApInvocation=-1 respondingAeInvocation=-1"
+runMetadataValid \
+    "612da10706052b06010401a203020100a305a103020100a40706052b06010403a503020109a603020105a703020106" \
+    "calledTitle= calledQualifier=-1 calledApInvocation=-1 calledAeInvocation=-1 callingTitle= callingQualifier=-1 callingApInvocation=-1 callingAeInvocation=-1 respondingTitle=1.3.6.1.4.3 respondingQualifier=9 respondingApInvocation=5 respondingAeInvocation=6"
+
+runInvalid "6005a10706052b" "expect"
+runInvalid "60068b0151800100" "out of order"
+runInvalid "6006be0428020500" "unsupported component"
+runInvalid "6009be072805a00100a000" "multiple encodings"
+runInvalid "6017a10706052b06010401be0c280a02010306025101a00100" \
+    "duplicated or out of order"
+runInvalid "6018a10706052b06010401be0d280b0602510106025101a00100" \
+    "duplicated or out of order"
+runInvalid "6010a10706052b06010401be052803800100" \
+    "requires failed"
+runInvalid "6000" "missing application-context-name"
+runInvalid "6109a10706052b06010401" "mandatory field"
+runInvalid "6110a10706052b06010401a203020100a300" "expect"
+runInvalid "6012a10706052b060104018b025101ac03706173" \
+    "requires failed"
+runInvalid "6011a10706052b06010401ac06a30406025101" \
+    "expect"
+
+# EXPLICIT AARQ/AARE fields must use constructed wrappers, while IMPLICIT
+# scalar fields must remain primitive. Association-information is constructed.
+runInvalid "6009810706052b06010401" "requires failed"
+runInvalid "6012a10706052b06010401820706052b06010402" \
+    "requires failed"
+runInvalid "600ea003070180a10706052b06010401" "requires failed"
+runInvalid "600da10706052b06010401aa020700" "requires failed"
+runInvalid "600ba10706052b060104018d00" "requires failed"
+runInvalid "600ba10706052b06010401bd00" "requires failed"
+runInvalid "600ba10706052b060104019e00" "requires failed"
+runInvalid "6115810706052b06010401a203020100a305a103020100" \
+    "requires failed"
+runInvalid "6117a10706052b06010401a203020100a305a1030201008b00" \
+    "requires failed"
+# Release and abort scalar fields are IMPLICIT primitive INTEGER values.
+runInvalid "6205a003020100" "requires failed"
+runInvalid "6305a003020100" "requires failed"
+runInvalid "6405a003020101" "requires failed"
+runInvalid "6408800101a103020102" "requires failed"
+runInvalid "6400" "missing abort-source"
+
+echo "${passCount} ACSE runtime tests passed"

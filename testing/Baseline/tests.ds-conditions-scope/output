@@ -1,0 +1,4 @@
+icc	CONTROL_CENTER_B	DSConditions_Detected	transfer_support	ds_conditions	03a8
+icc	CONTROL_CENTER_B	OTHER_CONDITIONS	-	-	03a8
+vcc	-	DSConditions_Detected	-	-	03a8
+aa	-	DSConditions_Detected	-	-	03a8

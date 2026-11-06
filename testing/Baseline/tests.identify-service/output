@@ -1,0 +1,5 @@
+T	identify	1	requested	-	-	-	0	-	verified
+F	identify	1	matched_response	Acme	M1	1.0	1	1.0.9506.2.1	verified
+F	identify	1	unmatched_response	Acme	M1	1.0	1	1.0.9506.2.1	verified
+T	identify	1	requested	-	-	-	0	-	verified
+T	identify	1	direction_mismatch	Acme	M1	1.0	1	1.0.9506.2.1	verified

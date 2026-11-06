@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-session-tests.XXXXXX")"
+testPlugin="${testBuildDir}/session-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" \
+    "${projectDir}/testing/spicy/session_driver.spicy" \
+    "${projectDir}/analyzer/session.spicy" \
+    "${projectDir}/analyzer/presentation.spicy" \
+    "${projectDir}/analyzer/acse.spicy" \
+    "${projectDir}/analyzer/mms.spicy" \
+    "${projectDir}/analyzer/mms_types.spicy" \
+    "${projectDir}/analyzer/ber.spicy"
+
+passCount=0
+
+runValid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expected="$3"
+    local increment="${4:-0}"
+    local actual
+
+    if ((increment > 0)); then
+        actual="$(
+            printf '%s' "${hexInput}" |
+                xxd -r -p |
+                spicy-driver -i "${increment}" -p "${parser}" "${testPlugin}"
+        )"
+    else
+        actual="$(
+            printf '%s' "${hexInput}" |
+                xxd -r -p |
+                spicy-driver -p "${parser}" "${testPlugin}"
+        )"
+    fi
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected Session output for ${parser} input ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expectedError="$3"
+    local expectedState="${4:-}"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid Session input unexpectedly parsed: ${parser} ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected Session error for ${parser} input ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    if [[ -n "${expectedState}" ]] &&
+       ! grep -q "${expectedState}" <<<"${output}"; then
+        echo "Session failure retained unexpected association state" >&2
+        echo "expected state containing: ${expectedState}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+lengthParser="ICCP_SESSION_TEST::LengthCase"
+dataParser="ICCP_SESSION_TEST::DataCase"
+streamParser="ICCP_SESSION_TEST::StreamCase"
+stateStreamParser="ICCP_SESSION_TEST::StateStreamCase"
+
+runValid "${lengthParser}" "00" "length=0 octets=1"
+runValid "${lengthParser}" "fe" "length=254 octets=1"
+runValid "${lengthParser}" "ff00ff" "length=255 octets=3"
+runValid "${lengthParser}" "ffffff" "length=65535 octets=3"
+runInvalid "${lengthParser}" "ff00fe" "not minimally encoded"
+runInvalid "${lengthParser}" "ff01" "expecting"
+
+runValid "${dataParser}" "01004000" \
+    "si=1 recognized=true parameters=0 totalParameters=0 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "010001004000" \
+    "si=1 recognized=true parameters=0 totalParameters=0 concatenated=true presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "010001031901034000" \
+    "si=1 recognized=true parameters=0 totalParameters=1 concatenated=true presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "01031901034000" \
+    "si=1 recognized=true parameters=1 totalParameters=1 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "01004000" \
+    "si=1 recognized=true parameters=0 totalParameters=0 concatenated=false presentationLength=2 presentation=@\\x00" 1
+
+connect="0d180506130100160102140200023302010034020102c1024000"
+runValid "${dataParser}" "${connect}" \
+    "si=13 recognized=true parameters=5 totalParameters=7 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "0e04c1024000" \
+    "si=14 recognized=true parameters=1 totalParameters=1 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "0904c1024000" \
+    "si=9 recognized=true parameters=1 totalParameters=1 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "0a04c1024000" \
+    "si=10 recognized=true parameters=1 totalParameters=1 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "1907110102c1024000" \
+    "si=25 recognized=true parameters=2 totalParameters=2 concatenated=false presentationLength=2 presentation=@\\x00"
+runValid "${dataParser}" "1a00" \
+    "si=26 recognized=true parameters=0 totalParameters=0 concatenated=false presentationLength=0 presentation="
+runValid "${dataParser}" "0c03320100" \
+    "si=12 recognized=true parameters=1 totalParameters=1 concatenated=false presentationLength=0 presentation="
+runValid "${dataParser}" "6300aa" \
+    "si=99 recognized=false parameters=0 totalParameters=0 concatenated=false presentationLength=0 presentation="
+
+runInvalid "${dataParser}" "0d05c1" "expect"
+runInvalid "${dataParser}" "0d04c1036101" "expect"
+runInvalid "${dataParser}" "0d06160102130100" "not in increasing code order"
+runInvalid "${dataParser}" "0d0ac103610100c203610101" \
+    "multiple user-data parameters"
+runInvalid "${dataParser}" "0106190103190103" \
+    "multiple enclosure items"
+runInvalid "${dataParser}" "0d00aa" \
+    "bytes outside its parameter field"
+runInvalid "${dataParser}" "010001ff" "expect"
+
+# Enclosure Item values use bit 0 for begin and bit 1 for end. The framed
+# driver preserves one Session reassembly state across separate COTP TSDUs.
+runValid "${streamParser}" \
+    "00060103190101400006010319010002000701031901026162" \
+    $'si=1 segmented=true complete=false fragments=1 presentationLength=0 presentation=\nsi=1 segmented=true complete=false fragments=2 presentationLength=0 presentation=\nsi=1 segmented=true complete=true fragments=3 presentationLength=4 presentation=@\\x02ab'
+runValid "${streamParser}" \
+    "00080103190103400161" \
+    "si=1 segmented=false complete=true fragments=1 presentationLength=3 presentation=@\\x01a"
+runInvalid "${streamParser}" \
+    "0006010319010061" \
+    "continuation has no begin fragment"
+runInvalid "${streamParser}" \
+    "00060103190101610006010319010162" \
+    "multiple begin fragments"
+runInvalid "${streamParser}" \
+    "00060103190101610003010062" \
+    "missing an enclosure item"
+
+# A concatenated GIVE TOKENS + DATA TRANSFER takes segmentation state from the
+# DATA TRANSFER tail, not from the outer GIVE TOKENS parameter list.
+runValid "${streamParser}" \
+    "00080100010319010140000801000103190100020009010001031901026162" \
+    $'si=1 segmented=true complete=false fragments=1 presentationLength=0 presentation=\nsi=1 segmented=true complete=false fragments=2 presentationLength=0 presentation=\nsi=1 segmented=true complete=true fragments=3 presentationLength=4 presentation=@\\x02ab'
+runInvalid "${streamParser}" \
+    "00080100010319010061" \
+    "continuation has no begin fragment"
+runInvalid "${dataParser}" \
+    "01041902000361" \
+    "must contain one octet"
+runInvalid "${dataParser}" \
+    "010319010461" \
+    "contains reserved bits"
+
+fragmentOverflow="00050103190101"
+for ((index = 0; index < 256; index++)); do
+    fragmentOverflow+="00050103190100"
+done
+runInvalid "${streamParser}" "${fragmentOverflow}" \
+    "fragment limit"
+
+parameterOverflow=""
+for ((index = 0; index < 257; index++)); do
+    parameterOverflow+="6400"
+done
+runInvalid "${dataParser}" "0dff0202${parameterOverflow}" \
+    "parameter count exceeds configured limit"
+
+# Top-level parameter list plus four nested group lists exceeds the configured
+# depth of four.
+runInvalid "${dataParser}" "0d080106010401020100" \
+    "parameter groups exceed configured depth limit"
+
+# The outer and concatenated-tail parameter lists share one resource budget.
+outerParameters=""
+for ((index = 0; index < 128; index++)); do
+    outerParameters+="6400"
+done
+tailParameters=""
+for ((index = 0; index < 129; index++)); do
+    tailParameters+="6400"
+done
+runInvalid "${dataParser}" \
+    "01ff0100${outerParameters}01ff0102${tailParameters}" \
+    "parameter count exceeds configured limit"
+
+# A normal Session association retains its negotiated Presentation contexts.
+# Both a provider ARP and a user ARU then clear that shared state; ARP remains
+# a distinct provider-abort PPDU and cannot dispatch ACSE.
+associationCp="316fa003800101a268a423300f0201010604520100013004060251013010020103060528ca2202013004060251016141303f020101a03a6038a107060528ca220203be2d282b06025101020103a022a820810105820105a418800101810406f00000820d03aa5500000000000000000000"
+associationCpa="3171a003800101a26aa51230078001008102510130078001008102510161543052020101a04d614ba107060528ca220203a203020100a305a103020100be34283206025101020103a029a92780020400810105820105830110a418800101810406f00000820d03aa5500000000000000000000"
+associationFrames="00810d7f050613010016010214020002c171${associationCp}00770e75c173${associationCpa}"
+runValid "${stateStreamParser}" \
+    "${associationFrames}000f190d110103c1083006800106810104" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=25 contexts=0 ppdu=3 acse=false'
+runValid "${stateStreamParser}" \
+    "${associationFrames}00251923110103c11ea01ca009300702010106025101610f300d020101a0086406800101810102" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=25 contexts=0 ppdu=2 acse=true'
+
+# Even a malformed nested abort clears the live context table at the Session
+# envelope before the private pre-abort snapshot is rejected.
+runInvalid "${stateStreamParser}" \
+    "${associationFrames}002e192c110103c127a025a012300702010106025101300702010306025101610f300d020101a0086406800101810102" \
+    "contexts-after-session-error=0"
+
+# Every Session replacement/terminal envelope clears the committed context
+# table, even without Presentation user data. FINISH and NOT-FINISHED are not
+# terminal and deliberately retain the accepted association.
+runValid "${stateStreamParser}" \
+    "${associationFrames}0002090000020800" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=9 contexts=2 ppdu=-1 acse=false\nsi=8 contexts=2 ppdu=-1 acse=false'
+runValid "${stateStreamParser}" \
+    "${associationFrames}00020a00" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=10 contexts=0 ppdu=-1 acse=false'
+runValid "${stateStreamParser}" \
+    "${associationFrames}00050c03320100" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=12 contexts=0 ppdu=-1 acse=false'
+runValid "${stateStreamParser}" \
+    "${associationFrames}00021a00" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=26 contexts=0 ppdu=-1 acse=false'
+runValid "${stateStreamParser}" \
+    "${associationFrames}00020d00" \
+    $'si=13 contexts=2 ppdu=1 acse=true\nsi=14 contexts=2 ppdu=1 acse=true\nsi=13 contexts=0 ppdu=-1 acse=false'
+
+# These boundary frames pass the byte-level Session preflight but fail later
+# segmentation semantics. Their identifier hooks still invalidate the old
+# association, and %finally prevents a boundary fragment from becoming a
+# continuation anchor for later DATA.
+runInvalid "${stateStreamParser}" \
+    "${associationFrames}00050d03190100" \
+    "continuation has no begin fragment" \
+    "contexts-after-session-error=0"
+runInvalid "${stateStreamParser}" \
+    "${associationFrames}00050a0319010100060103190100aa" \
+    "continuation has no begin fragment" \
+    "contexts-after-session-error=0"
+
+echo "${passCount} Session runtime tests passed"

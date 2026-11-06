@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-semantics-tests.XXXXXX")"
+testPlugin="${testBuildDir}/iccp-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" \
+    "${projectDir}/testing/spicy/iccp_driver.spicy" \
+    "${projectDir}/analyzer/iccp_types.spicy" \
+    "${projectDir}/analyzer/mms_types.spicy"
+
+passCount=0
+
+runCase() {
+    local parser="$1"
+    local hexInput="$2"
+    local expected="$3"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected ICCP semantic output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local hexInput="$1"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_TEST::ClassificationCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid ICCP evidence unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+classificationParser="ICCP_TEST::ClassificationCase"
+roleParser="ICCP_TEST::RoleCase"
+operationParser="ICCP_TEST::OperationCase"
+objectParser="ICCP_TEST::ObjectCase"
+dataFlagsParser="ICCP_TEST::DataFlagsCase"
+
+runCase "${classificationParser}" "00000000" \
+    "association=AssociationKind::UNKNOWN"
+runCase "${classificationParser}" "01010000" \
+    "association=AssociationKind::UNKNOWN"
+runCase "${classificationParser}" "01010100" \
+    "association=AssociationKind::MMS"
+runCase "${classificationParser}" "01010101" \
+    "association=AssociationKind::TASE2"
+runCase "${classificationParser}" "00000101" \
+    "association=AssociationKind::UNKNOWN"
+runInvalid "02010101"
+
+runCase "${roleParser}" "00" "role=EndpointRole::ORIGINATOR"
+runCase "${roleParser}" "01" "role=EndpointRole::RESPONDER"
+runCase "${roleParser}" "04" "role=EndpointRole::UNKNOWN"
+
+runCase "${operationParser}" "000100" \
+    "operation=Operation::GET_NAME_LIST"
+runCase "${operationParser}" "000200" \
+    "operation=Operation::IDENTIFY"
+runCase "${operationParser}" "010400" "operation=Operation::READ"
+runCase "${operationParser}" "000500" "operation=Operation::WRITE"
+runCase "${operationParser}" "000600" \
+    "operation=Operation::GET_VARIABLE_ACCESS_ATTRIBUTES"
+runCase "${operationParser}" "000b00" \
+    "operation=Operation::DEFINE_NAMED_VARIABLE_LIST"
+runCase "${operationParser}" "010c00" \
+    "operation=Operation::GET_NAMED_VARIABLE_LIST_ATTRIBUTES"
+runCase "${operationParser}" "000d00" \
+    "operation=Operation::DELETE_NAMED_VARIABLE_LIST"
+runCase "${operationParser}" "030000" \
+    "operation=Operation::INFORMATION_REPORT"
+runCase "${operationParser}" "030002" \
+    "operation=Operation::DEVICE_ACTION"
+runCase "${operationParser}" "020000" \
+    "operation=Operation::SERVICE_ERROR"
+runCase "${operationParser}" "004d00" \
+    "operation=Operation::UNKNOWN"
+runCase "${operationParser}" "030001" \
+    "operation=Operation::UNKNOWN"
+
+runCase "${objectParser}" "00537570706f727465645f4665617475726573" \
+    "category=ObjectCategory::SUPPORTED_FEATURES evidence=true"
+runCase "${objectParser}" "0142696c61746572616c5f5461626c655f4944" \
+    "category=ObjectCategory::BILATERAL_TABLE evidence=true"
+runCase "${objectParser}" "014e6578745f44535472616e736665725f536574" \
+    "category=ObjectCategory::TRANSFER_SUPPORT evidence=true"
+runCase "${objectParser}" "014576656e745f436f64655f4465746563746564" \
+    "category=ObjectCategory::TRANSFER_SUPPORT evidence=true"
+runCase "${objectParser}" "00544153452e325f56657273696f6e" \
+    "category=ObjectCategory::TASE2_VERSION evidence=true"
+runCase "${objectParser}" "00496e666f5f4d6573735f486561646572" \
+    "category=ObjectCategory::INFORMATION_MESSAGE evidence=true"
+runCase "${objectParser}" "02494d5f5472616e736665725f536574" \
+    "category=ObjectCategory::INFORMATION_MESSAGE evidence=true"
+runCase "${objectParser}" "01537570706f727465645f4665617475726573" \
+    "category=ObjectCategory::UNKNOWN evidence=false"
+runCase "${objectParser}" "0056656e646f725f50726976617465" \
+    "category=ObjectCategory::UNKNOWN evidence=false"
+
+runCase "${dataFlagsParser}" "00" \
+    "validity=Validity::VALID source=ValueSource::TELEMETERED normal=NormalValue::NORMAL timestamp=TimestampQuality::VALID reserved=false"
+runCase "${dataFlagsParser}" "15" \
+    "validity=Validity::HELD source=ValueSource::CALCULATED normal=NormalValue::NORMAL timestamp=TimestampQuality::INVALID reserved=false"
+runCase "${dataFlagsParser}" "2a" \
+    "validity=Validity::SUSPECT source=ValueSource::ENTERED normal=NormalValue::ABNORMAL timestamp=TimestampQuality::VALID reserved=false"
+runCase "${dataFlagsParser}" "3f" \
+    "validity=Validity::NOT_VALID source=ValueSource::ESTIMATED normal=NormalValue::ABNORMAL timestamp=TimestampQuality::INVALID reserved=false"
+runCase "${dataFlagsParser}" "c0" \
+    "validity=Validity::VALID source=ValueSource::TELEMETERED normal=NormalValue::NORMAL timestamp=TimestampQuality::VALID reserved=true"
+
+echo "${passCount} ICCP semantic runtime tests passed"

@@ -1,0 +1,10 @@
+start	requested	10	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	parameters_conformant	-	unknown
+start	confirmed	10	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	parameters_conformant	-	unknown
+stop	requested	11	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	object_change	4	F	T	T	F	F	-	parameters_conformant	-	unknown
+stop	rejected	11	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	object_change	4	F	T	T	F	F	-	parameters_conformant	-	unknown
+start	requested	12	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	parameters_conformant	-	unknown
+start	confirmed_duplicate_start	12	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	standards_deviation	duplicate_start_confirmed	unknown
+transfer_candidate	invalid_parameters	20	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	-	-	F	T	T	F	T	-	standards_deviation	invalid_ds_conditions_unused_bits	unknown
+transfer_candidate	invalid_parameters	21	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	-	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	standards_deviation	invalid_transfer_interval	unknown
+transfer_candidate	invalid_parameters	22	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	-	1700000000	60	5	2	3600	interval_timeout,object_change,other_external_event	21	F	T	T	F	T	7	standards_deviation	invalid_data_set_name	unknown
+transfer_candidate	invalid_parameters	24	icc	CONTROL_CENTER_B	TS_TYPED	DSTransferSet	vcc	IGNORED	DATA_SET	1700000000	60	5	2	3600	-	-	F	T	T	F	T	-	standards_deviation	invalid_ds_conditions_width	unknown

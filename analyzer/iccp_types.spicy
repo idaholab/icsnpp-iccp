@@ -1,0 +1,253 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file defines shared ICCP/TASE.2 parser types and enumerations.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_TYPES;
+
+import spicy;
+import ICCP_MMS_TYPES;
+
+# Association classification is deliberately evidence-based. TCP/102, an ACSE
+# association, or an ICCP-relevant MMS service alone is not sufficient evidence
+# to label a connection as TASE.2.
+public type AssociationKind = enum {
+    UNKNOWN = 0,
+    MMS = 1,
+    TASE2 = 2
+};
+
+public type EndpointRole = enum {
+    UNKNOWN = 0,
+    ORIGINATOR = 1,
+    RESPONDER = 2
+};
+
+public type Operation = enum {
+    UNKNOWN = 0,
+    GET_NAME_LIST = 1,
+    READ = 2,
+    WRITE = 3,
+    GET_VARIABLE_ACCESS_ATTRIBUTES = 4,
+    DEFINE_NAMED_VARIABLE_LIST = 5,
+    GET_NAMED_VARIABLE_LIST_ATTRIBUTES = 6,
+    DELETE_NAMED_VARIABLE_LIST = 7,
+    INFORMATION_REPORT = 8,
+    SERVICE_ERROR = 9,
+    IDENTIFY = 10,
+    DEVICE_ACTION = 11
+};
+
+public type ObjectCategory = enum {
+    UNKNOWN = 0,
+    SUPPORTED_FEATURES = 1,
+    BILATERAL_TABLE = 2,
+    TRANSFER_SUPPORT = 3,
+    INFORMATION_MESSAGE = 4,
+    TASE2_VERSION = 5
+};
+
+public type Validity = enum {
+    VALID = 0,
+    HELD = 1,
+    SUSPECT = 2,
+    NOT_VALID = 3
+};
+
+public type ValueSource = enum {
+    TELEMETERED = 0,
+    CALCULATED = 1,
+    ENTERED = 2,
+    ESTIMATED = 3
+};
+
+public type NormalValue = enum {
+    NORMAL = 0,
+    ABNORMAL = 1
+};
+
+public type TimestampQuality = enum {
+    VALID = 0,
+    INVALID = 1
+};
+
+public function dataFlagsValidity(flags: uint8): Validity {
+    return cast<Validity>((flags & 0x30) >> 4);
+}
+
+public function dataFlagsSource(flags: uint8): ValueSource {
+    return cast<ValueSource>((flags & 0x0c) >> 2);
+}
+
+public function dataFlagsNormalValue(flags: uint8): NormalValue {
+    return cast<NormalValue>((flags & 0x02) >> 1);
+}
+
+public function dataFlagsTimestampQuality(flags: uint8): TimestampQuality {
+    return cast<TimestampQuality>(flags & 0x01);
+}
+
+public function dataFlagsHaveReservedBits(flags: uint8): bool {
+    return (flags & 0xc0) != 0;
+}
+
+public function classifyAssociation(
+    hasPresentationProfile: bool,
+    hasAcseAssociation: bool,
+    hasMmsNegotiation: bool,
+    hasTase2Evidence: bool
+): AssociationKind {
+    if (
+        ! hasPresentationProfile ||
+        ! hasAcseAssociation ||
+        ! hasMmsNegotiation
+    )
+        return AssociationKind::UNKNOWN;
+
+    if (hasTase2Evidence)
+        return AssociationKind::TASE2;
+
+    return AssociationKind::MMS;
+}
+
+public function associationRole(apduTag: uint64): EndpointRole {
+    switch (apduTag) {
+        case 0:
+            return EndpointRole::ORIGINATOR;
+        case 1:
+            return EndpointRole::RESPONDER;
+        default:
+            return EndpointRole::UNKNOWN;
+    }
+}
+
+public function objectCategory(
+    scope: uint64,
+    name: string
+): ObjectCategory {
+    if (scope == 0 && name == "Supported_Features")
+        return ObjectCategory::SUPPORTED_FEATURES;
+
+    if (scope == 1 && name == "Bilateral_Table_ID")
+        return ObjectCategory::BILATERAL_TABLE;
+
+    if (scope == 0 && name == "TASE.2_Version")
+        return ObjectCategory::TASE2_VERSION;
+
+    if (
+        scope == 1 &&
+        (
+            name == "Next_DSTransfer_Set" ||
+            name == "Transfer_Set_Name" ||
+            name == "DSConditions_Detected" ||
+            name == "Event_Code_Detected" ||
+            name == "Transfer_Set_Time_Stamp" ||
+            name == "Transfer_Report_ACK" ||
+            name == "Transfer_Report_NACK"
+        )
+    )
+        return ObjectCategory::TRANSFER_SUPPORT;
+
+    if (
+        (
+            (scope == 0 || scope == 1) &&
+            name == "Info_Mess_Header"
+        ) ||
+        (scope == 2 && name == "IM_Transfer_Set")
+    )
+        return ObjectCategory::INFORMATION_MESSAGE;
+
+    return ObjectCategory::UNKNOWN;
+}
+
+public function isTase2ObjectEvidence(
+    scope: uint64,
+    name: string
+): bool {
+    return objectCategory(scope, name) != ObjectCategory::UNKNOWN;
+}
+
+public function isTase2ObjectEvidenceForMms(
+    pduType: ICCP_MMS_TYPES::TopLevelPDU,
+    serviceTag: uint64,
+    scope: uint64,
+    name: string,
+    firstVariableScope: uint64,
+    firstVariableName: string
+): bool {
+    return (
+        pduType == ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+        (
+            (
+                serviceTag == 6 &&
+                isTase2ObjectEvidence(scope, name)
+            ) ||
+            (
+                serviceTag == 4 &&
+                isTase2ObjectEvidence(
+                    firstVariableScope,
+                    firstVariableName
+                )
+            )
+        )
+    );
+}
+
+# Callers must gate this candidate mapping on AssociationKind::TASE2 before
+# exposing it as an ICCP operation.
+public function operationForMms(
+    pduType: ICCP_MMS_TYPES::TopLevelPDU,
+    serviceTag: uint64,
+    unconfirmedServiceTag: uint64
+): Operation {
+    if (
+        pduType == ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_ERROR ||
+        pduType == ICCP_MMS_TYPES::TopLevelPDU::CANCEL_ERROR ||
+        pduType == ICCP_MMS_TYPES::TopLevelPDU::INITIATE_ERROR ||
+        pduType == ICCP_MMS_TYPES::TopLevelPDU::CONCLUDE_ERROR
+    )
+        return Operation::SERVICE_ERROR;
+
+    if (pduType == ICCP_MMS_TYPES::TopLevelPDU::UNCONFIRMED) {
+        if (unconfirmedServiceTag == 0)
+            return Operation::INFORMATION_REPORT;
+        if (unconfirmedServiceTag == 2)
+            return Operation::DEVICE_ACTION;
+        return Operation::UNKNOWN;
+    }
+
+    if (
+        pduType != ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
+        pduType != ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE
+    )
+        return Operation::UNKNOWN;
+
+    switch (serviceTag) {
+        case 1:
+            return Operation::GET_NAME_LIST;
+        case 2:
+            return Operation::IDENTIFY;
+        case 4:
+            return Operation::READ;
+        case 5:
+            return Operation::WRITE;
+        case 6:
+            return Operation::GET_VARIABLE_ACCESS_ATTRIBUTES;
+        case 11:
+            return Operation::DEFINE_NAMED_VARIABLE_LIST;
+        case 12:
+            return Operation::GET_NAMED_VARIABLE_LIST_ATTRIBUTES;
+        case 13:
+            return Operation::DELETE_NAMED_VARIABLE_LIST;
+        default:
+            return Operation::UNKNOWN;
+    }
+}

@@ -1,0 +1,13 @@
+device_timeout	notified	vcc	-	BREAKER_time	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_local_reset	notified	vcc	-	BREAKER_reset	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_success	notified	vcc	-	BREAKER_success	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_failure	notified	vcc	-	BREAKER_fail	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_success	notified	vcc	-	PUMP_success	icc	BILAT	ENROLL2	0	active	undefined	-	F	F	verified
+device_success_candidate	candidate_notification	aa	-	BREAKER_success	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_success_candidate	candidate_notification	vcc	-	BREAKER_success	vcc	-	ENROLL1	1	active	time_sequence_identifier	42	F	F	verified
+device_success_candidate	candidate_notification	vcc	-	BREAKER_success	vcc	-	ENROLL1	0	-	time_sequence_identifier	42	F	F	verified
+device_success_candidate	candidate_notification	vcc	-	BREAKER_success	vcc	-	ENROLL1	0	idle	time_sequence_identifier	42	F	F	verified
+device_success_candidate	candidate_notification	vcc	-	BREAKER_success	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	T	F	verified
+device_success_candidate	candidate_notification	vcc	-	BREAKER_success	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	T	verified
+device_action_candidate	candidate_notification	vcc	-	BREAKER_other	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified
+device_failure_candidate	candidate_notification	vcc	-	MOTOR_fail	vcc	-	ENROLL1	0	active	time_sequence_identifier	42	F	F	verified

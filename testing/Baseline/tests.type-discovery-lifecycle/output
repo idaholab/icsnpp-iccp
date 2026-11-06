@@ -1,0 +1,8 @@
+Ctype-lifecycle	type_discovery	configured	PointA	Data_RealQ
+Ctype-lifecycle	type_discovery	configured	PointC	Data_State
+Ctype-lifecycle	type_discovery	configured	PointD	Data_Discrete
+Ctype-lifecycle	type_discovery	configured	PointA	Data_RealQ
+Ctype-lifecycle	type_discovery	configured	PointF	Data_Real
+Ctype-lifecycle	type_discovery	configured	PointG	Data_RealQ
+Ctype-lifecycle	type_discovery	invalid_configuration	PointH	-
+Ctype-lifecycle	type_discovery	unmapped	PointI	-

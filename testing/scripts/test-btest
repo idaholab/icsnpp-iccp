@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ICCP btest verification requires the flock command" >&2
+    exit 2
+fi
+
+checkout_id="$(printf '%s' "${project_dir}" | cksum | awk '{print $1}')"
+user_id="$(id -u)"
+lock_parent="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+lock_dir="${lock_parent}/icsnpp-iccp-${user_id}-locks"
+
+if [[ -L "${lock_dir}" ]]; then
+    echo "ICCP btest lock directory must not be a symbolic link: ${lock_dir}" >&2
+    exit 2
+fi
+if ! mkdir -m 700 "${lock_dir}" 2>/dev/null; then
+    if [[ ! -d "${lock_dir}" || -L "${lock_dir}" || ! -O "${lock_dir}" ]]; then
+        echo "ICCP btest lock directory is not safely user-owned: ${lock_dir}" >&2
+        exit 2
+    fi
+    chmod 700 "${lock_dir}"
+fi
+
+lock_file="${lock_dir}/${checkout_id}-workspace.lock"
+lock_status=1
+
+if [[ "${ICCP_WORKSPACE_LOCK_FILE:-}" == "${lock_file}" &&
+      "${ICCP_WORKSPACE_LOCK_FD:-}" == "9" ]]; then
+    # A complete verifier owns this inherited open-file description. Confirm
+    # that it is usable before relying on the parent lock.
+    set +e
+    flock -n 9
+    lock_status=$?
+    set -e
+else
+    exec 9>"${lock_file}"
+
+    set +e
+    flock -n 9
+    lock_status=$?
+    set -e
+fi
+
+if [[ "${lock_status}" -eq 1 ]]; then
+    echo "another ICCP verification or btest run is active for this checkout" >&2
+    exit 2
+elif [[ "${lock_status}" -ne 0 ]]; then
+    echo "unable to lock ICCP verification workspace: ${lock_file}" >&2
+    exit 2
+fi
+
+# btest's lowercase -u enables an interactive baseline prompt and must not be
+# used in non-interactive verification. Use uppercase -U explicitly when a
+# baseline regeneration is intended.
+set +e
+timeout --kill-after=10s 120s \
+    btest -c "${project_dir}/testing/btest.cfg" -d -F -A
+status=$?
+set -e
+
+if [[ "${status}" -ne 0 ]]; then
+    if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then
+        echo "btest exceeded the 120-second verification limit" >&2
+    fi
+    exit "${status}"
+fi

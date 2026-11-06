@@ -1,0 +1,16 @@
+write_candidate	requested	40	icc	BILATERAL	SETPOINT	1	1	3	-	-	-	-	-	-	unknown
+write_candidate	confirmed	40	icc	BILATERAL	SETPOINT	-	-	-	1	1	0	-	-	-	unknown
+write_candidate	requested	41	-	-	-	2	2	4	-	-	-	-	-	-	unknown
+write_candidate	partial_or_failed	41	-	-	-	-	-	-	2	1	1	-	-	-	unknown
+write_candidate	requested	42	-	-	-	1	1	1	-	-	-	-	-	-	unknown
+write_candidate	direction_mismatch	42	-	-	-	-	-	-	1	1	0	-	-	-	unknown
+write_candidate	confirmed	42	-	-	-	-	-	-	1	1	0	-	-	-	unknown
+write_candidate	unexpected_response	99	-	-	-	-	-	-	1	1	0	-	-	-	unknown
+write_candidate	requested	43	vcc	-	FIRST	1	1	1	-	-	-	-	-	-	unknown
+write_candidate	invoke_reused	43	vcc	-	LATEST	1	1	2	-	-	-	-	-	-	unknown
+write_candidate	confirmed	43	vcc	-	LATEST	-	-	-	1	1	0	-	-	-	unknown
+write_candidate	requested	44	vcc	-	REJECTED	1	1	1	-	-	-	-	-	-	unknown
+write_candidate	direction_mismatch	44	vcc	-	REJECTED	-	-	-	-	-	-	access	7	3	unknown
+write_candidate	rejected	44	vcc	-	REJECTED	-	-	-	-	-	-	access	7	3	unknown
+write_candidate	requested	45	vcc	-	ABORTED	1	1	1	-	-	-	-	-	-	unknown
+write_candidate	unexpected_response	45	-	-	-	-	-	-	1	1	0	-	-	-	unknown

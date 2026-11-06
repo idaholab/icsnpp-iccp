@@ -1,0 +1,78 @@
+module ICCP_TEST;
+
+import spicy;
+import ICCP_TYPES;
+import ICCP_MMS_TYPES;
+
+public type ClassificationCase = unit {
+    presentation: uint8;
+    acse: uint8;
+    negotiation: uint8;
+    tase2Evidence: uint8;
+
+    : void &requires=(
+        self.presentation <= 1 &&
+        self.acse <= 1 &&
+        self.negotiation <= 1 &&
+        self.tase2Evidence <= 1
+    );
+
+    on %done {
+        print "association=%s" % ICCP_TYPES::classifyAssociation(
+            self.presentation == 1,
+            self.acse == 1,
+            self.negotiation == 1,
+            self.tase2Evidence == 1
+        );
+    }
+};
+
+public type RoleCase = unit {
+    apduTag: uint8;
+
+    on %done {
+        print "role=%s" % ICCP_TYPES::associationRole(self.apduTag);
+    }
+};
+
+public type OperationCase = unit {
+    pduType: uint8;
+    serviceTag: uint8;
+    unconfirmedServiceTag: uint8;
+
+    on %done {
+        print "operation=%s" % ICCP_TYPES::operationForMms(
+            cast<ICCP_MMS_TYPES::TopLevelPDU>(self.pduType),
+            self.serviceTag,
+            self.unconfirmedServiceTag
+        );
+    }
+};
+
+public type ObjectCase = unit {
+    scope: uint8;
+    encodedName: bytes &eod;
+
+    on %done {
+        local name = self.encodedName.decode(spicy::Charset::ASCII);
+        local category = ICCP_TYPES::objectCategory(self.scope, name);
+        print "category=%s evidence=%s" % (
+            category,
+            ICCP_TYPES::isTase2ObjectEvidence(self.scope, name)
+        );
+    }
+};
+
+public type DataFlagsCase = unit {
+    flags: uint8;
+
+    on %done {
+        print "validity=%s source=%s normal=%s timestamp=%s reserved=%s" % (
+            ICCP_TYPES::dataFlagsValidity(self.flags),
+            ICCP_TYPES::dataFlagsSource(self.flags),
+            ICCP_TYPES::dataFlagsNormalValue(self.flags),
+            ICCP_TYPES::dataFlagsTimestampQuality(self.flags),
+            ICCP_TYPES::dataFlagsHaveReservedBits(self.flags)
+        );
+    }
+};

@@ -1,0 +1,87 @@
+module ICCP_SESSION_TEST;
+
+import spicy;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+
+public type LengthCase = unit {
+    length: ICCP_SESSION::LengthIndicator;
+
+    on %done {
+        print "length=%d octets=%d" % (
+            self.length.value,
+            self.length.encodedOctets
+        );
+    }
+};
+
+public type DataCase = unit {
+    var state: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    data: ICCP_SESSION::Data(self.state, self.presentationState);
+
+    on %done {
+        print "si=%d recognized=%s parameters=%d totalParameters=%d concatenated=%s presentationLength=%d presentation=%s" % (
+            self.data.identifier,
+            self.data.recognized,
+            self.data.parameterCount,
+            self.data.state.parameterCount,
+            self.data.concatenatedDataTransfer,
+            self.data.presentationLength,
+            self.data.presentationPayload
+        );
+    }
+};
+
+public type FramedData = unit(
+    state: ICCP_SESSION::ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    length: uint16;
+    data: ICCP_SESSION::Data(state, presentationState) &size=self.length;
+};
+
+public type StreamCase = unit {
+    var state: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    frames: FramedData(self.state, self.presentationState)[] &eod foreach {
+        print "si=%d segmented=%s complete=%s fragments=%d presentationLength=%d presentation=%s" % (
+            $$.data.identifier,
+            $$.data.segmented,
+            $$.data.ssduComplete,
+            $$.data.fragmentCount,
+            $$.data.presentationLength,
+            $$.data.presentationPayload
+        );
+    }
+};
+
+public type StateStreamCase = unit {
+    var state: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    frames: FramedData(self.state, self.presentationState)[] &eod foreach {
+        local ppduType: int64 = -1;
+        local dispatchAcse = False;
+        if ($$.data?.presentation) {
+            ppduType = cast<int64>($$.data.presentation.ppduType);
+            dispatchAcse = $$.data.presentation.dispatchAcse;
+        }
+        print "si=%d contexts=%d ppdu=%d acse=%s" % (
+            $$.data.identifier,
+            |self.presentationState.contexts|,
+            ppduType,
+            dispatchAcse
+        );
+    }
+
+    on %error(msg: string) {
+        print "contexts-after-session-error=%d" %
+            |self.presentationState.contexts|;
+    }
+};

@@ -1,0 +1,15 @@
+abort generation=2 orig-sequence=2 resp-sequence=0 controls=0 evidence=0 alert-markers=0
+conclude generation=2 orig-sequence=1 resp-sequence=0 controls=0 evidence=0 alert-markers=0
+connect generation=2 orig-sequence=2 resp-sequence=0 controls=0 evidence=0 alert-markers=0
+connection-remove generation=0 orig-sequence=0 resp-sequence=0 controls=0 evidence=0 alert-markers=0
+disconnect generation=2 orig-sequence=2 resp-sequence=2 controls=0 evidence=0 alert-markers=0
+not-finished generation=1 orig-sequence=1 resp-sequence=0 controls=0 evidence=0 alert-markers=0
+parser-error generation=1 orig-sequence=2 resp-sequence=0 controls=1 evidence=0 alert-markers=0
+Cguard-connect	T	0	7	requested	NEW_ASSOCIATION	inferred
+Cguard-not-finished	T	0	8	requested	RETAINED_RELEASE	verified
+Cguard-abort	T	3	information_report	NEW_REPORT	202	inferred
+Cguard-disconnect	F	1	40	decoded	NEW_TAG	inferred
+Cguard-disconnect	F	get_tag	confirmed	40	NEW_TAG	Tag_Value	2	armed	maintenance	inferred
+Cguard-disconnect	T	get_tag	requested	40	NEW_TAG	Tag_Value	-	-	-	inferred
+Cguard-disconnect	T	get_tag	requested	40	OLD_TAG	Tag_Value	-	-	-	verified
+Cguard-parser-error	T	write_candidate	requested	32	FAILED_WRITE	-	-	-	-	verified

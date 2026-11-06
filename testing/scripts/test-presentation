@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testBuildDir="$(mktemp -d "${TMPDIR:-/tmp}/iccp-presentation-tests.XXXXXX")"
+testPlugin="${testBuildDir}/presentation-tests.hlto"
+
+trap 'rm -rf "${testBuildDir}"' EXIT
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+spicyc -j -o "${testPlugin}" \
+    "${projectDir}/testing/spicy/presentation_driver.spicy" \
+    "${projectDir}/analyzer/presentation.spicy" \
+    "${projectDir}/analyzer/acse.spicy" \
+    "${projectDir}/analyzer/mms.spicy" \
+    "${projectDir}/analyzer/mms_types.spicy" \
+    "${projectDir}/analyzer/ber.spicy"
+
+passCount=0
+
+runValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_PRESENTATION_TEST::DataCase" "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected Presentation output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_PRESENTATION_TEST::DataCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid Presentation input unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected Presentation error for ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runStreamValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_PRESENTATION_TEST::StreamCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected Presentation stream output for ${hexInput}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runStreamInvalid() {
+    local hexInput="$1"
+    local expectedError="$2"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "ICCP_PRESENTATION_TEST::StreamCase" \
+                "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid Presentation stream unexpectedly parsed: ${hexInput}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected Presentation stream error for ${hexInput}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runAssociationStreamValid() {
+    local hexInput="$1"
+    local expected="$2"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p \
+                "ICCP_PRESENTATION_TEST::AssociationStreamCase" \
+                "${testPlugin}"
+    )"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected contextual Presentation output" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runParserValid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expected="$3"
+    local actual
+
+    actual="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}"
+    )"
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected Presentation output for ${parser}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+    passCount=$((passCount + 1))
+}
+
+runParserInvalid() {
+    local parser="$1"
+    local hexInput="$2"
+    local expectedError="$3"
+    local expectedState="${4:-}"
+    local output
+
+    if output="$(
+        printf '%s' "${hexInput}" |
+            xxd -r -p |
+            spicy-driver -p "${parser}" "${testPlugin}" 2>&1
+    )"; then
+        echo "invalid Presentation input unexpectedly parsed by ${parser}" >&2
+        exit 1
+    fi
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected Presentation error for ${parser}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+    if [[ -n "${expectedState}" ]] &&
+       ! grep -q "${expectedState}" <<<"${output}"; then
+        echo "Presentation failure mutated transactional state" >&2
+        echo "expected state containing: ${expectedState}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+    passCount=$((passCount + 1))
+}
+
+# Fully-encoded user data: context 3, single-ASN1-type, AARQ-shaped payload.
+runValid "610b3009020103a00460023000" \
+    'type=PPDUType::USER_DATA recognized=true definitions=0 results=0 pdvs=1 context=3 abstract= transfer= result=-1 acse=false mms=false inferred=false payload=`\x020\x00'
+
+# CP-type normal-mode parameters with one ACSE context using BER.
+runValid "311ba003800101a214a412301002010306052b01000101300406025101" \
+    "type=PPDUType::CONNECTION recognized=true definitions=1 results=0 pdvs=0 context=3 abstract=1.3.1.0.1.1 transfer=2.1.1 result=-1 acse=false mms=false inferred=false payload="
+
+# A proposal alone does not authorize context-ID-based dispatch. ACSE remains
+# pending until a matching CPA accepts one of the offered transfer syntaxes.
+runStreamValid \
+    "001c311aa003800101a213a411300f020103060452010001300406025101001461123010020103a00b6009a10706052b06010401" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=`\\x09\\xa1\\x07\\x06\\x05+\\x06\\x01\\x04\\x01'
+
+# CPA result correlation uses definition order and preserves the selected BER
+# transfer syntax.
+runStreamValid \
+    "001c311aa003800101a213a411300f02010306045201000130040602510100143112a20ba509300780010081025101a003800101" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=0 acse=false mms=false inferred=false contexts=1 payload='
+
+# A rejected context cannot dispatch later PDVs carrying the same identifier.
+runStreamValid \
+    "001c311aa003800101a213a411300f0201030604520100013004060251010010310ea003800101a207a5053003800101001461123010020103a00b6009a10706052b06010401" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=1 acse=false mms=false inferred=false contexts=1 payload=`\\x09\\xa1\\x07\\x06\\x05+\\x06\\x01\\x04\\x01'
+
+runValid "4003616263" \
+    "type=PPDUType::USER_DATA recognized=true definitions=0 results=0 pdvs=0 context=0 abstract= transfer= result=-1 acse=false mms=false inferred=false payload=abc"
+
+runInvalid "61003000" "requires failed"
+runInvalid "3102a200" "missing mode-selector"
+runInvalid "3107a003800100a200" "requires failed"
+runInvalid "310ca003800101a003800101a200" \
+    "mode-selector is duplicated"
+runInvalid "3107a100a003800101" \
+    "X.410 mode parameters conflict"
+runInvalid "3109a003800101a200a200" \
+    "normal-mode field is duplicated"
+runInvalid "3113a003800101a20ca40a300802010306012a3000" \
+    "requires failed"
+runInvalid "61083006020100a00100" "outside supported range"
+runInvalid "61083006020103a10100" "requires failed"
+runInvalid "610730050201038200" "requires failed"
+runInvalid "61103006020103a001003006020103a00100" \
+    "multiple Presentation PDV-list values"
+runInvalid "3110a20ea40c300a02010306012a30020600" \
+    "empty value"
+runInvalid "3112a003800101a20ba509300780010381025101" \
+    "requires failed"
+runInvalid "3112a003800101a20ba509300780010081025101" \
+    "result has no matching proposed context"
+
+# CP/CPA are SET values: mode-selector and normal-mode-parameters are legal in
+# either order, and the optional normal-mode parameter sequence may be absent.
+runValid "3105a003800101" \
+    "type=PPDUType::CONNECTION recognized=true definitions=0 results=0 pdvs=0 context=0 abstract= transfer= result=-1 acse=false mms=false inferred=false payload="
+runValid "3107a200a003800101" \
+    "type=PPDUType::CONNECTION recognized=true definitions=0 results=0 pdvs=0 context=0 abstract= transfer= result=-1 acse=false mms=false inferred=false payload="
+runValid "311ba214a412301002010306052b01000101300406025101a003800101" \
+    "type=PPDUType::CONNECTION recognized=true definitions=1 results=0 pdvs=0 context=3 abstract=1.3.1.0.1.1 transfer=2.1.1 result=-1 acse=false mms=false inferred=false payload="
+
+# Direct transfer MMS on an unknown context is conservatively recovered and
+# labeled inferred. The complete MMS PDU is still validated by MMSpdu.
+runValid "610e300c020103a007a005020101a300" \
+    'type=PPDUType::USER_DATA recognized=true definitions=0 results=0 pdvs=1 context=3 abstract= transfer= result=-1 acse=false mms=true inferred=true payload=\xa0\x05\x02\x01\x01\xa3\x00'
+
+# A plausible transfer-phase tag does not bypass complete MMS validation.
+runInvalid "61093007020103a002a000" "expecting 1 bytes"
+
+# A proposed but not yet accepted MMS/BER context does not authorize direct
+# transfer traffic.
+runStreamValid \
+    "001d311ba003800101a214a4123010020103060528ca2202013004060251010010610e300c020103a007a005020101a300" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\\xa0\\x05\\x02\\x01\\x01\\xa3\\x00'
+
+# A CPA acceptance correlated by definition order authorizes subsequent direct
+# MMS transfer traffic on the shared context.
+runStreamValid \
+    "001d311ba003800101a214a4123010020103060528ca22020130040602510100143112a003800101a20ba5093007800100810251010010610e300c020103a007a005020101a300" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=0 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=0 acse=false mms=true inferred=false contexts=1 payload=\\xa0\\x05\\x02\\x01\\x01\\xa3\\x00'
+
+# The complete proposal list is retained. A CPA may select BER even when it is
+# not the first offer, and only then may an explicit BER PDV dispatch ACSE.
+runStreamValid \
+    "0020311ea003800101a217a4153013020103060452010001300806022a030602510100143112a003800101a20ba50930078001008102510100186116301406025101020103a00b6009a10706052b06010401" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=0 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=0 acse=true mms=false inferred=false contexts=1 payload=`\\x09\\xa1\\x07\\x06\\x05+\\x06\\x01\\x04\\x01'
+
+# X.227 maps AARQ into CP user data and AARE into CPA user data. Their EXTERNAL
+# values bind BER directly and the MMS context indirectly; CPA results become
+# usable in proposal order before its embedded AARE/InitiateResponse is parsed.
+associationCp="316fa003800101a268a423300f0201010604520100013004060251013010020103060528ca2202013004060251016141303f020101a03a6038a107060528ca220203be2d282b06025101020103a022a820810105820105a418800101810406f00000820d03aa5500000000000000000000"
+associationCpa="3171a003800101a26aa51230078001008102510130078001008102510161543052020101a04d614ba107060528ca220203a203020100a305a103020100be34283206025101020103a029a92780020400810105820105830110a418800101810406f00000820d03aa5500000000000000000000"
+runAssociationStreamValid \
+    "0d0071${associationCp}0e0073${associationCpa}" \
+    $'session=13 definitions=2 results=0 contexts=2 context=1 result=-1 acse=true directMms=false apdu=0 embeddedMms=true opaque=false\nsession=14 definitions=0 results=2 contexts=2 context=1 result=0 acse=true directMms=false apdu=1 embeddedMms=true opaque=false'
+
+# Session DATA cannot replay association-establishment APDUs on an otherwise
+# accepted ACSE context.
+standaloneAarq="6141303f020101a03a6038a107060528ca220203be2d282b06025101020103a022a820810105820105a418800101810406f00000820d03aa5500000000000000000000"
+runAssociationStreamValid \
+    "0d0071${associationCp}0e0073${associationCpa}010043${standaloneAarq}" \
+    $'session=13 definitions=2 results=0 contexts=2 context=1 result=-1 acse=true directMms=false apdu=0 embeddedMms=true opaque=false\nsession=14 definitions=0 results=2 contexts=2 context=1 result=0 acse=true directMms=false apdu=1 embeddedMms=true opaque=false\nsession=1 definitions=0 results=0 contexts=2 context=1 result=0 acse=false directMms=false apdu=-1 embeddedMms=false opaque=false'
+
+# X.225/X.227 lifecycle routing is bound to the enclosing Session service:
+# FINISH carries RLRQ, NOT-FINISHED or DISCONNECT carries RLRE, and ABORT's
+# ARU carries ABRT. The same accepted ACSE context remains required throughout.
+runAssociationStreamValid \
+    "0d0071${associationCp}0e0073${associationCpa}09000e610c300a020101a005620380011e08000e610c300a020101a005630380010009000e610c300a020101a005620380011e0a000e610c300a020101a0056303800100" \
+    $'session=13 definitions=2 results=0 contexts=2 context=1 result=-1 acse=true directMms=false apdu=0 embeddedMms=true opaque=false\nsession=14 definitions=0 results=2 contexts=2 context=1 result=0 acse=true directMms=false apdu=1 embeddedMms=true opaque=false\nsession=9 definitions=0 results=0 contexts=2 context=1 result=0 acse=true directMms=false apdu=2 embeddedMms=false opaque=false\nsession=8 definitions=0 results=0 contexts=2 context=1 result=0 acse=true directMms=false apdu=3 embeddedMms=false opaque=false\nsession=9 definitions=0 results=0 contexts=2 context=1 result=0 acse=true directMms=false apdu=2 embeddedMms=false opaque=false\nsession=10 definitions=0 results=0 contexts=2 context=1 result=0 acse=true directMms=false apdu=3 embeddedMms=false opaque=false'
+runAssociationStreamValid \
+    "0d0071${associationCp}0e0073${associationCpa}19001ea01ca009300702010106025101610f300d020101a0086406800101810102" \
+    $'session=13 definitions=2 results=0 contexts=2 context=1 result=-1 acse=true directMms=false apdu=0 embeddedMms=true opaque=false\nsession=14 definitions=0 results=2 contexts=2 context=1 result=0 acse=true directMms=false apdu=1 embeddedMms=true opaque=false\nsession=25 definitions=0 results=0 contexts=2 context=1 result=0 acse=true directMms=false apdu=4 embeddedMms=false opaque=false'
+
+# Provider ARP is a distinct UNIVERSAL SEQUENCE and never dispatches ACSE.
+runAssociationStreamValid \
+    "1900083006800106810104" \
+    "session=25 definitions=0 results=0 contexts=0 context=0 result=-1 acse=false directMms=false apdu=-1 embeddedMms=false opaque=false"
+
+# ARU's one supported PDV must have exactly one corresponding abort-context
+# entry. Extra mappings are rejected instead of being silently ignored.
+runParserInvalid \
+    "ICCP_PRESENTATION_TEST::AssociationStreamCase" \
+    "190027a025a012300702010106025101300702010306025101610f300d020101a0086406800101810102" \
+    "requires failed"
+
+# X.226 permits explicitly present zero-length definition/result lists. Their
+# presence remains observable for ordering and Session-service validation.
+presenceParser="ICCP_PRESENTATION_TEST::PresenceCase"
+runParserValid "${presenceParser}" "0d3109a003800101a202a400" \
+    "definitionsPresent=true definitions=0 resultsPresent=false results=0 contexts=0"
+runParserValid "${presenceParser}" "0e3109a003800101a202a500" \
+    "definitionsPresent=false definitions=0 resultsPresent=true results=0 contexts=0"
+runParserInvalid "${presenceParser}" \
+    "0e3109a003800101a202a400" "does not match its Session service"
+runInvalid "310ba003800101a204a400a400" \
+    "duplicated or out of order"
+
+# Context changes commit only after the complete CP/CPA (including nested
+# ACSE/MMS) validates. Malformed replacement handshakes preserve the previous
+# committed phase, while a valid context-less CONNECT clears it.
+transactionParser="ICCP_PRESENTATION_TEST::TransactionalStreamCase"
+malformedCp="${associationCp::-2}"
+malformedCpa="${associationCpa::-2}"
+runParserInvalid "${transactionParser}" \
+    "0d0071${associationCp}0e0073${associationCpa}0d0071${malformedCp}" \
+    "expected" "contexts-after-error=2 next-result=2 first-outcome=0"
+runParserInvalid "${transactionParser}" \
+    "0d0071${associationCp}0e0073${malformedCpa}" \
+    "expected" "contexts-after-error=2 next-result=0 first-outcome=-1"
+runAssociationStreamValid \
+    "0d0071${associationCp}0e0073${associationCpa}0d00073105a003800101" \
+    $'session=13 definitions=2 results=0 contexts=2 context=1 result=-1 acse=true directMms=false apdu=0 embeddedMms=true opaque=false\nsession=14 definitions=0 results=2 contexts=2 context=1 result=0 acse=true directMms=false apdu=1 embeddedMms=true opaque=false\nsession=13 definitions=0 results=0 contexts=0 context=0 result=-1 acse=false directMms=false apdu=-1 embeddedMms=false opaque=false'
+
+# A syntax that was proposed but not selected by CPA cannot be substituted by
+# an explicit PDV transfer-syntax-name after negotiation.
+runStreamValid \
+    "0020311ea003800101a217a4153013020103060452010001300806022a030602510100143112a003800101a20ba50930078001008102510100186116301406022a03020103a00b6009a10706052b06010401" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=0 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=0 context=3 result=0 acse=false mms=false inferred=false contexts=1 payload=`\\x09\\xa1\\x07\\x06\\x05+\\x06\\x01\\x04\\x01'
+
+# Result lists correspond one-for-one, in proposal order. Missing or surplus
+# results and selections that were never offered are rejected.
+runStreamInvalid \
+    "002e312ca003800101a225a423300f0201030604520100013004060251013010020105060528ca22020130040602510100143112a003800101a20ba509300780010081025101" \
+    "result count does not match proposed context count"
+runStreamInvalid \
+    "001c311aa003800101a213a411300f02010306045201000130040602510100193117a003800101a210a50e3007800100810251013003800101" \
+    "result has no matching proposed context"
+runStreamInvalid \
+    "001c311aa003800101a213a411300f02010306045201000130040602510100143112a003800101a20ba509300780010081022a03" \
+    "accepted transfer syntax was not proposed"
+
+# X.226 requires an accepted result to carry its selected syntax and a
+# provider rejection to carry a provider reason in the defined 0..3 range.
+runInvalid "310ea003800101a207a5053003800100" \
+    "accepted context is missing transfer syntax"
+runInvalid "3112a003800101a20ba509300780010181025101" \
+    "rejected context contains transfer syntax"
+runInvalid "310ea003800101a207a5053003800102" \
+    "provider rejection is missing provider reason"
+runInvalid "3111a003800101a20aa5083006800102820104" \
+    "provider reason is outside range 0..3"
+
+runStreamValid \
+    "001c311aa003800101a213a411300f02010306045201000130040602510100133111a003800101a20aa5083006800102820103" \
+    $'definitions=1 results=0 context=3 result=-1 acse=false mms=false inferred=false contexts=1 payload=\ndefinitions=0 results=1 context=3 result=2 acse=false mms=false inferred=false contexts=1 payload='
+
+echo "${passCount} Presentation runtime tests passed"

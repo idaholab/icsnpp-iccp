@@ -1,0 +1,975 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses and validates Association Control Service Element (ACSE)
+## messages used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_ACSE;
+
+import spicy;
+import ICCP_BER;
+import ICCP_MMS;
+
+const MAX_FIELDS: uint64 = 64;
+const MAX_EXTERNAL_VALUES: uint64 = 16;
+const BER_TRANSFER_SYNTAX: string = "2.1.1";
+const MMS_APPLICATION_CONTEXT: string = "1.0.9506.2.3";
+
+# ACSE-1 uses explicit tagging by default. This means the fields without an
+# IMPLICIT annotation carry constructed context-specific wrappers, while the
+# fields explicitly marked IMPLICIT retain the form of their underlying type.
+# Unknown extension fields are left alone so future ACSE additions can still be
+# preserved as opaque values.
+function fieldFormIsValid(
+    apduTag: uint64,
+    fieldTag: uint64,
+    constructed: bool
+): bool {
+    # Association-information is a SEQUENCE OF EXTERNAL in every APDU that
+    # carries it, so its IMPLICIT [30] field is always constructed.
+    if (fieldTag == 30)
+        return constructed;
+
+    switch (apduTag) {
+        case 0:
+            switch (fieldTag) {
+                case 0, 10, 11, 29:
+                    return ! constructed;
+                case 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13:
+                    return constructed;
+                default:
+                    return True;
+            }
+        case 1:
+            switch (fieldTag) {
+                case 0, 8, 9, 29:
+                    return ! constructed;
+                case 1, 2, 3, 4, 5, 6, 7, 10, 11:
+                    return constructed;
+                default:
+                    return True;
+            }
+        case 2, 3:
+            switch (fieldTag) {
+                case 0:
+                    return ! constructed;
+                default:
+                    return True;
+            }
+        case 4:
+            switch (fieldTag) {
+                case 0, 1:
+                    return ! constructed;
+                default:
+                    return True;
+            }
+        default:
+            return True;
+    }
+}
+
+public type APDUType = enum {
+    AARQ = 0,
+    AARE = 1,
+    RLRQ = 2,
+    RLRE = 3,
+    ABRT = 4,
+    UNKNOWN = 255
+};
+
+# Association establishment is transactional at the ACSE boundary.  The MMS
+# child has externally visible hooks, so reject a wrong or incomplete nested
+# PDU before instantiating that child rather than waiting for APDU::%done.
+function associationMmsEnvelopeMatches(
+    value: bytes,
+    apduType: APDUType
+): bool {
+    if (|value| < 2)
+        return False;
+
+    local expectedTag: uint8 = 0;
+    switch (apduType) {
+        case APDUType::AARQ:
+            expectedTag = 0xa8;
+        case APDUType::AARE:
+            expectedTag = 0xa9;
+        default:
+            return True;
+    }
+
+    if (*value.at(0) != expectedTag)
+        return False;
+
+    local firstLength = *value.at(1);
+    local headerLength: uint64 = 2;
+    local contentLength: uint64 = 0;
+    if ((firstLength & 0x80) == 0)
+        contentLength = uint64(firstLength);
+    else {
+        local lengthOctets = uint64(firstLength & 0x7f);
+        if (
+            lengthOctets == 0 ||
+            lengthOctets > 4 ||
+            lengthOctets > |value| - 2
+        )
+            return False;
+        if (*value.at(2) == 0)
+            return False;
+
+        local offset: uint64 = 2;
+        local index: uint64 = 0;
+        while (index < lengthOctets) {
+            contentLength =
+                (contentLength << 8) | uint64(*value.at(offset));
+            offset += 1;
+            index += 1;
+        }
+        if (contentLength < 128)
+            return False;
+        headerLength += lengthOctets;
+    }
+
+    if (
+        contentLength != |value| - headerLength ||
+        ! ICCP_BER::tlvEnvelopeIsSafe(value)
+    )
+        return False;
+
+    return True;
+}
+
+public type ExplicitOID = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 6
+    );
+    oidLength: ICCP_BER::DefiniteLength;
+    oid: ICCP_BER::ObjectIdentifierValue(self.oidLength.value);
+} &size=length;
+
+public type ExplicitInteger = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    );
+    integerLength: ICCP_BER::DefiniteLength;
+    integer: ICCP_BER::IntegerValue(self.integerLength.value);
+} &size=length;
+
+# X.227 result-source-diagnostic is an explicitly tagged CHOICE whose
+# alternative is itself an explicitly tagged INTEGER. Validate both wrapper
+# layers and keep the selected source while decoding the extensible value.
+public type AssociateSourceDiagnostic = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.first.constructed &&
+        (self.identifier.tagNumber == 1 || self.identifier.tagNumber == 2)
+    );
+    diagnosticLength: ICCP_BER::DefiniteLength;
+    diagnostic: ExplicitInteger(self.diagnosticLength.value);
+
+    # Both diagnostic INTEGER constraints have extension markers. IntegerValue
+    # still enforces a minimal, at-most-eight-octet BER encoding, while values
+    # outside the currently assigned roots remain available to future editions.
+    var value: int64;
+    on %done { self.value = self.diagnostic.integer.value; }
+} &size=length;
+
+public type Title = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    lengthIndicator: ICCP_BER::DefiniteLength;
+
+    var oid: string;
+    switch (
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 6
+    ) {
+        True -> form2: ICCP_BER::ObjectIdentifierValue(
+            self.lengthIndicator.value
+        ) {
+            self.oid = $$.value;
+        }
+        False -> preserved: bytes &size=self.lengthIndicator.value;
+    };
+} &size=length;
+
+public type Qualifier = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    lengthIndicator: ICCP_BER::DefiniteLength;
+
+    var form2: int64 = -1;
+    switch (
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    ) {
+        True -> integer: ICCP_BER::IntegerValue(
+            self.lengthIndicator.value
+        ) {
+            self.form2 = $$.value;
+        }
+        False -> preserved: bytes &size=self.lengthIndicator.value;
+    };
+} &size=length;
+
+public type ExternalComponent = unit {
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    var directReference: string;
+    var indirectReference: int64 = 0;
+    var encoding: uint64 = 255;
+    var payload: bytes;
+    var order: uint64 = 0;
+
+    switch (self.identifier.first.class_) {
+        ICCP_BER::TagClass::UNIVERSAL -> {
+            switch (self.identifier.tagNumber) {
+                6 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    oid: ICCP_BER::ObjectIdentifierValue(
+                        self.length.value
+                    ) {
+                        self.directReference = $$.value;
+                        self.order = 1;
+                    }
+                }
+                2 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    integer: ICCP_BER::IntegerValue(self.length.value) {
+                        self.indirectReference = $$.value;
+                        self.order = 2;
+                    }
+                }
+                7 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    descriptor: bytes &size=self.length.value {
+                        self.order = 3;
+                    }
+                }
+                * -> {
+                    : void {
+                        throw "ACSE EXTERNAL contains an unsupported component";
+                    }
+                }
+            };
+        }
+        ICCP_BER::TagClass::CONTEXT_SPECIFIC -> {
+            switch (self.identifier.tagNumber) {
+                0 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    singleAsn1Type: bytes &size=self.length.value {
+                        self.encoding = 0;
+                        self.payload = $$;
+                        self.order = 4;
+                    }
+                }
+                1 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    octetAligned: bytes &size=self.length.value {
+                        self.encoding = 1;
+                        self.payload = $$;
+                        self.order = 4;
+                    }
+                }
+                2 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    arbitrary: ICCP_BER::BitStringValue(self.length.value) {
+                        self.encoding = 2;
+                        self.payload = $$.value;
+                        self.order = 4;
+                    }
+                }
+                * -> {
+                    : void {
+                        throw "ACSE EXTERNAL contains an unsupported component";
+                    }
+                }
+            };
+        }
+        * -> {
+            : void {
+                throw "ACSE EXTERNAL contains an unsupported component";
+            }
+        }
+    };
+};
+
+public type ExternalContent = unit {
+    var componentCount: uint64 = 0;
+    var encodingCount: uint64 = 0;
+    var directReference: string;
+    var indirectReference: int64 = 0;
+    var encoding: uint64 = 255;
+    var payload: bytes;
+    var lastOrder: uint64 = 0;
+
+    components: ExternalComponent[] &eod foreach {
+        self.componentCount += 1;
+        if (self.componentCount > 8)
+            throw "ACSE EXTERNAL exceeds configured component limit";
+
+        if ($$.encoding != 255) {
+            self.encodingCount += 1;
+            if (self.encodingCount > 1)
+                throw "ACSE EXTERNAL contains multiple encodings";
+        }
+
+        if ($$.order == 0 || $$.order <= self.lastOrder)
+            throw "ACSE EXTERNAL components are duplicated or out of order";
+        self.lastOrder = $$.order;
+
+        if ($$.directReference != "")
+            self.directReference = $$.directReference;
+        if ($$.indirectReference != 0)
+            self.indirectReference = $$.indirectReference;
+
+        if ($$.encoding != 255) {
+            self.encoding = $$.encoding;
+            self.payload = $$.payload;
+        }
+    }
+
+    : void &requires=self.encodingCount == 1;
+};
+
+public type OtherAuthenticationValue = unit(length: uint64) {
+    mechanismIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.mechanismIdentifier.first.class_ ==
+            ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.mechanismIdentifier.first.constructed &&
+        self.mechanismIdentifier.tagNumber == 6
+    );
+    mechanismLength: ICCP_BER::DefiniteLength;
+    mechanism: ICCP_BER::ObjectIdentifierValue(self.mechanismLength.value);
+    protectedValue: ICCP_BER::RawTLV;
+} &size=length;
+
+# The authentication value is deliberately not exposed, but its X.227 CHOICE
+# wrapper and the encoding-specific structure still need validation. The
+# reported length is the protected choice value rather than its BER envelope.
+public type AuthenticationValue = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.tagNumber <= 3 &&
+        (
+            (self.identifier.tagNumber <= 1 &&
+             ! self.identifier.first.constructed) ||
+            (self.identifier.tagNumber >= 2 &&
+             self.identifier.first.constructed)
+        )
+    );
+    valueLength: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.tagNumber) {
+        0 -> charstring: bytes &size=self.valueLength.value;
+        1 -> bitstring: ICCP_BER::BitStringValue(self.valueLength.value);
+        2 -> externalValue: ExternalContent &size=self.valueLength.value;
+        3 -> other: OtherAuthenticationValue(self.valueLength.value);
+    };
+} &size=length;
+
+public type ApplicationContextName = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 6
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::ObjectIdentifierValue(self.length.value);
+};
+
+public type ApplicationContextNameList = unit(length: uint64) {
+    var count: uint64 = 0;
+    names: ApplicationContextName[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_FIELDS)
+            throw "ACSE application-context-name-list exceeds configured limit";
+    }
+} &size=length;
+
+public type External = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 8
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: ExternalContent &size=self.length.value;
+};
+
+public type AssociationInformation = unit(length: uint64) {
+    var count: uint64 = 0;
+    var firstDirectReference: string;
+    var firstIndirectReference: int64 = 0;
+    var firstEncoding: uint64 = 255;
+    var firstPayload: bytes;
+
+    values: External[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_EXTERNAL_VALUES)
+            throw "ACSE user information exceeds configured EXTERNAL limit";
+
+        # The current event interface carries one payload. Validate every
+        # EXTERNAL, retain the first for metadata, and let APDU mark a multi-
+        # value field opaque rather than dispatching only part of it as MMS.
+        if (self.count == 1) {
+            self.firstDirectReference = $$.content.directReference;
+            self.firstIndirectReference = $$.content.indirectReference;
+            self.firstEncoding = $$.content.encoding;
+            self.firstPayload = $$.content.payload;
+        }
+    }
+} &size=length;
+
+public type Field = unit(apduTag: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC
+    );
+    : void &requires=fieldFormIsValid(
+        apduTag,
+        self.identifier.tagNumber,
+        self.identifier.first.constructed
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var applicationContext: string;
+    var calledApTitle: string;
+    var callingApTitle: string;
+    var respondingApTitle: string;
+    var calledAeQualifier: int64 = -1;
+    var callingAeQualifier: int64 = -1;
+    var respondingAeQualifier: int64 = -1;
+    var calledApInvocation: int64 = -1;
+    var calledAeInvocation: int64 = -1;
+    var callingApInvocation: int64 = -1;
+    var callingAeInvocation: int64 = -1;
+    var respondingApInvocation: int64 = -1;
+    var respondingAeInvocation: int64 = -1;
+    var mechanism: string;
+    var authenticationPresent: bool = False;
+    var authenticationLength: uint64 = 0;
+    var outcome: int64 = -1;
+    var reason: int64 = -1;
+    var diagnostic: int64 = -1;
+    var userInformationCount: uint64 = 0;
+    var directReference: string;
+    var indirectReference: int64 = 0;
+    var encoding: uint64 = 255;
+    var userPayload: bytes;
+
+    switch (self.identifier.tagNumber) {
+        0 -> {
+            switch (apduTag) {
+                2,
+                3,
+                4 -> implicitReason: ICCP_BER::IntegerValue(
+                    self.length.value
+                ) {
+                    self.reason = $$.value;
+                }
+                * -> protocolVersion: ICCP_BER::BitStringValue(
+                    self.length.value
+                );
+            };
+        }
+        1 -> {
+            switch (apduTag) {
+                0,
+                1 -> context: ExplicitOID(self.length.value) {
+                    self.applicationContext = $$.oid.value;
+                }
+                4 -> abortDiagnostic: ICCP_BER::IntegerValue(
+                    self.length.value
+                ) {
+                    self.diagnostic = $$.value;
+                }
+                * -> rawTag1: bytes &size=self.length.value;
+            };
+        }
+        2 -> {
+            switch (apduTag) {
+                1 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    resultValue: ExplicitInteger(self.length.value) {
+                        self.outcome = $$.integer.value;
+                    }
+                }
+                0 -> calledTitle: Title(self.length.value) {
+                    self.calledApTitle = $$.oid;
+                }
+                * -> rawTag2: bytes &size=self.length.value;
+            };
+        }
+        3 -> {
+            switch (apduTag) {
+                1 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    resultDiagnostic: AssociateSourceDiagnostic(
+                        self.length.value
+                    ) {
+                        self.diagnostic = $$.value;
+                    }
+                }
+                0 -> calledQualifier: Qualifier(self.length.value) {
+                    self.calledAeQualifier = $$.form2;
+                }
+                * -> rawTag3: bytes &size=self.length.value;
+            };
+        }
+        4 -> {
+            switch (apduTag) {
+                1 -> respondingTitle: Title(self.length.value) {
+                    self.respondingApTitle = $$.oid;
+                }
+                0 -> calledApInvocationValue: ExplicitInteger(
+                    self.length.value
+                ) {
+                    self.calledApInvocation = $$.integer.value;
+                }
+                * -> rawTag4: bytes &size=self.length.value;
+            };
+        }
+        5 -> {
+            switch (apduTag) {
+                1 -> respondingQualifier: Qualifier(self.length.value) {
+                    self.respondingAeQualifier = $$.form2;
+                }
+                0 -> calledAeInvocationValue: ExplicitInteger(
+                    self.length.value
+                ) {
+                    self.calledAeInvocation = $$.integer.value;
+                }
+                * -> rawTag5: bytes &size=self.length.value;
+            };
+        }
+        6 -> {
+            switch (apduTag) {
+                0 -> callingTitle: Title(self.length.value) {
+                    self.callingApTitle = $$.oid;
+                }
+                1 -> respondingApInvocationValue: ExplicitInteger(
+                    self.length.value
+                ) {
+                    self.respondingApInvocation = $$.integer.value;
+                }
+                * -> rawTag6: bytes &size=self.length.value;
+            };
+        }
+        7 -> {
+            switch (apduTag) {
+                0 -> callingQualifier: Qualifier(self.length.value) {
+                    self.callingAeQualifier = $$.form2;
+                }
+                1 -> respondingAeInvocationValue: ExplicitInteger(
+                    self.length.value
+                ) {
+                    self.respondingAeInvocation = $$.integer.value;
+                }
+                * -> rawTag7: bytes &size=self.length.value;
+            };
+        }
+        8 -> {
+            switch (apduTag) {
+                0 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    callingApInvocationValue: ExplicitInteger(
+                        self.length.value
+                    ) {
+                        self.callingApInvocation = $$.integer.value;
+                    }
+                }
+                1 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    responderRequirements: ICCP_BER::BitStringValue(
+                        self.length.value
+                    );
+                }
+                * -> rawTag8: bytes &size=self.length.value;
+            };
+        }
+        9 -> {
+            switch (apduTag) {
+                0 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    callingAeInvocationValue: ExplicitInteger(
+                        self.length.value
+                    ) {
+                        self.callingAeInvocation = $$.integer.value;
+                    }
+                }
+                1 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    responderMechanismName: ICCP_BER::ObjectIdentifierValue(
+                        self.length.value
+                    ) {
+                        self.mechanism = $$.value;
+                    }
+                }
+                * -> rawTag9: bytes &size=self.length.value;
+            };
+        }
+        10 -> {
+            switch (apduTag) {
+                0 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    senderRequirements: ICCP_BER::BitStringValue(
+                        self.length.value
+                    );
+                }
+                1 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    respondingAuthentication: AuthenticationValue(
+                        self.length.value
+                    ) {
+                        self.authenticationPresent = True;
+                        self.authenticationLength = $$.valueLength.value;
+                    }
+                }
+                * -> rawTag10: bytes &size=self.length.value;
+            };
+        }
+        11 -> {
+            switch (apduTag) {
+                0 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    mechanismName: ICCP_BER::ObjectIdentifierValue(
+                        self.length.value
+                    ) {
+                        self.mechanism = $$.value;
+                    }
+                }
+                1 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    applicationContexts: ApplicationContextNameList(
+                        self.length.value
+                    );
+                }
+                * -> rawTag11: bytes &size=self.length.value;
+            };
+        }
+        12 -> {
+            switch (apduTag) {
+                0 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    callingAuthentication: AuthenticationValue(
+                        self.length.value
+                    ) {
+                        self.authenticationPresent = True;
+                        self.authenticationLength = $$.valueLength.value;
+                    }
+                }
+                * -> rawTag12: bytes &size=self.length.value;
+            };
+        }
+        13 -> {
+            switch (apduTag) {
+                0 -> aarqApplicationContexts: ApplicationContextNameList(
+                    self.length.value
+                );
+                * -> rawTag13: bytes &size=self.length.value;
+            };
+        }
+        29 -> implementationInformation: bytes &size=self.length.value;
+        30 -> userInformation: AssociationInformation(self.length.value) {
+            self.userInformationCount = $$.count;
+            self.directReference = $$.firstDirectReference;
+            self.indirectReference = $$.firstIndirectReference;
+            self.encoding = $$.firstEncoding;
+            self.userPayload = $$.firstPayload;
+        }
+        * -> preserved: bytes &size=self.length.value;
+    };
+};
+
+public type APDUContent = unit(apduTag: uint64) {
+    var fieldCount: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveTag: bool = False;
+    var haveApplicationContext: bool = False;
+    var haveOutcome: bool = False;
+    var haveDiagnostic: bool = False;
+    var haveAbortSource: bool = False;
+    var applicationContext: string;
+    var calledApTitle: string;
+    var callingApTitle: string;
+    var respondingApTitle: string;
+    var calledAeQualifier: int64 = -1;
+    var callingAeQualifier: int64 = -1;
+    var respondingAeQualifier: int64 = -1;
+    var calledApInvocation: int64 = -1;
+    var calledAeInvocation: int64 = -1;
+    var callingApInvocation: int64 = -1;
+    var callingAeInvocation: int64 = -1;
+    var respondingApInvocation: int64 = -1;
+    var respondingAeInvocation: int64 = -1;
+    var mechanism: string;
+    var authenticationPresent: bool = False;
+    var authenticationLength: uint64 = 0;
+    var outcome: int64 = -1;
+    var reason: int64 = -1;
+    var diagnostic: int64 = -1;
+    var userInformationCount: uint64 = 0;
+    var directReference: string;
+    var indirectReference: int64 = 0;
+    var encoding: uint64 = 255;
+    var userPayload: bytes;
+
+    fields: Field(apduTag)[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > MAX_FIELDS)
+            throw "ACSE APDU exceeds configured field limit";
+
+        if (self.haveTag && $$.identifier.tagNumber <= self.lastTag)
+            throw "ACSE fields are duplicated or out of order";
+        self.lastTag = $$.identifier.tagNumber;
+        self.haveTag = True;
+
+        if ($$.identifier.tagNumber == 1 && (apduTag == 0 || apduTag == 1))
+            self.haveApplicationContext = True;
+        if ($$.identifier.tagNumber == 2 && apduTag == 1)
+            self.haveOutcome = True;
+        if ($$.identifier.tagNumber == 3 && apduTag == 1)
+            self.haveDiagnostic = True;
+        if ($$.identifier.tagNumber == 0 && apduTag == 4)
+            self.haveAbortSource = True;
+
+        if ($$.applicationContext != "")
+            self.applicationContext = $$.applicationContext;
+        if ($$.calledApTitle != "")
+            self.calledApTitle = $$.calledApTitle;
+        if ($$.callingApTitle != "")
+            self.callingApTitle = $$.callingApTitle;
+        if ($$.respondingApTitle != "")
+            self.respondingApTitle = $$.respondingApTitle;
+        # Invocation identifiers and form-2 qualifiers are unconstrained
+        # INTEGERs. Copy them by field presence instead of using -1 as a
+        # sentinel, since -1 is itself a valid wire value.
+        if (apduTag == 0 && $$.identifier.tagNumber == 3)
+            self.calledAeQualifier = $$.calledAeQualifier;
+        if (apduTag == 0 && $$.identifier.tagNumber == 4)
+            self.calledApInvocation = $$.calledApInvocation;
+        if (apduTag == 0 && $$.identifier.tagNumber == 5)
+            self.calledAeInvocation = $$.calledAeInvocation;
+        if (apduTag == 0 && $$.identifier.tagNumber == 7)
+            self.callingAeQualifier = $$.callingAeQualifier;
+        if (apduTag == 0 && $$.identifier.tagNumber == 8)
+            self.callingApInvocation = $$.callingApInvocation;
+        if (apduTag == 0 && $$.identifier.tagNumber == 9)
+            self.callingAeInvocation = $$.callingAeInvocation;
+        if (apduTag == 1 && $$.identifier.tagNumber == 5)
+            self.respondingAeQualifier = $$.respondingAeQualifier;
+        if (apduTag == 1 && $$.identifier.tagNumber == 6)
+            self.respondingApInvocation = $$.respondingApInvocation;
+        if (apduTag == 1 && $$.identifier.tagNumber == 7)
+            self.respondingAeInvocation = $$.respondingAeInvocation;
+        if ($$.mechanism != "")
+            self.mechanism = $$.mechanism;
+        if ($$.authenticationPresent) {
+            self.authenticationPresent = True;
+            self.authenticationLength = $$.authenticationLength;
+        }
+        if (apduTag == 1 && $$.identifier.tagNumber == 2)
+            self.outcome = $$.outcome;
+        if (
+            $$.identifier.tagNumber == 0 &&
+            (apduTag == 2 || apduTag == 3 || apduTag == 4)
+        )
+            self.reason = $$.reason;
+        if (
+            ($$.identifier.tagNumber == 3 && apduTag == 1) ||
+            ($$.identifier.tagNumber == 1 && apduTag == 4)
+        )
+            self.diagnostic = $$.diagnostic;
+        if ($$.userInformationCount > 0) {
+            self.userInformationCount = $$.userInformationCount;
+            self.directReference = $$.directReference;
+            self.indirectReference = $$.indirectReference;
+            self.encoding = $$.encoding;
+            self.userPayload = $$.userPayload;
+        }
+    }
+
+    on %done {
+        if (
+            apduTag == 0 &&
+            ! self.haveApplicationContext
+        )
+            throw "ACSE AARQ is missing application-context-name";
+
+        if (
+            apduTag == 1 &&
+            (
+                ! self.haveApplicationContext ||
+                ! self.haveOutcome ||
+                ! self.haveDiagnostic
+            )
+        )
+            throw "ACSE AARE is missing a mandatory field";
+
+        if (apduTag == 4 && ! self.haveAbortSource)
+            throw "ACSE ABRT is missing abort-source";
+    }
+};
+
+# `expectedMmsContext` is supplied by Presentation only after it has correlated
+# the EXTERNAL's presentation-context-identifier with an MMS/BER context.  A
+# zero value is deliberately fail-closed for standalone ACSE parsing.  The
+# default keeps the focused/public structural entry point source-compatible.
+# `requiredApduTag` binds CP user data to AARQ and CPA user data to AARE; -1 is
+# used for ordinary, already-negotiated ACSE transfer traffic.
+public type APDU = unit(
+    expectedMmsContext: int64 = 0,
+    requiredApduTag: int64 = -1,
+    sessionSpdu: uint8 = 0
+) {
+    var sessionSpduCode: uint8 = sessionSpdu;
+    var apduType: APDUType = APDUType::UNKNOWN;
+    var recognized: bool = False;
+    var applicationContext: string;
+    var calledApTitle: string;
+    var callingApTitle: string;
+    var respondingApTitle: string;
+    var apTitle: string;
+    var calledAeQualifier: int64 = -1;
+    var callingAeQualifier: int64 = -1;
+    var respondingAeQualifier: int64 = -1;
+    var calledApInvocation: int64 = -1;
+    var calledAeInvocation: int64 = -1;
+    var callingApInvocation: int64 = -1;
+    var callingAeInvocation: int64 = -1;
+    var respondingApInvocation: int64 = -1;
+    var respondingAeInvocation: int64 = -1;
+    var mechanism: string;
+    var authenticationPresent: bool = False;
+    var authenticationLength: uint64 = 0;
+    var outcome: int64 = -1;
+    var reason: int64 = -1;
+    var diagnostic: int64 = -1;
+    var userInformationCount: uint64 = 0;
+    var directReference: string;
+    var indirectReference: int64 = 0;
+    var encoding: uint64 = 255;
+    var userPayload: bytes;
+    var dispatchMms: bool = False;
+    var opaqueUserInformation: bool = False;
+
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    content: APDUContent(self.identifier.tagNumber)
+        &size=self.length.value
+        if (
+            self.identifier.first.class_ == ICCP_BER::TagClass::APPLICATION &&
+            self.identifier.first.constructed &&
+            self.identifier.tagNumber <= 4
+        );
+    preserved: bytes &size=self.length.value if (! self?.content);
+    trailing: bytes &eod;
+
+    : void {
+        if (|self.trailing| != 0)
+            throw "ACSE presentation payload has trailing data";
+
+        if (self?.content) {
+            if (
+                requiredApduTag >= 0 &&
+                cast<int64>(self.identifier.tagNumber) != requiredApduTag
+            )
+                throw "ACSE APDU does not match the enclosing Presentation connection primitive";
+
+            self.apduType = cast<APDUType>(self.identifier.tagNumber);
+            self.recognized = True;
+            self.applicationContext = self.content.applicationContext;
+            self.calledApTitle = self.content.calledApTitle;
+            self.callingApTitle = self.content.callingApTitle;
+            self.respondingApTitle = self.content.respondingApTitle;
+            if (self.callingApTitle != "")
+                self.apTitle = self.callingApTitle;
+            else if (self.calledApTitle != "")
+                self.apTitle = self.calledApTitle;
+            else
+                self.apTitle = self.respondingApTitle;
+            self.calledAeQualifier = self.content.calledAeQualifier;
+            self.callingAeQualifier = self.content.callingAeQualifier;
+            self.respondingAeQualifier =
+                self.content.respondingAeQualifier;
+            self.calledApInvocation = self.content.calledApInvocation;
+            self.calledAeInvocation = self.content.calledAeInvocation;
+            self.callingApInvocation = self.content.callingApInvocation;
+            self.callingAeInvocation = self.content.callingAeInvocation;
+            self.respondingApInvocation =
+                self.content.respondingApInvocation;
+            self.respondingAeInvocation =
+                self.content.respondingAeInvocation;
+            self.mechanism = self.content.mechanism;
+            self.authenticationPresent =
+                self.content.authenticationPresent;
+            self.authenticationLength =
+                self.content.authenticationLength;
+            self.outcome = self.content.outcome;
+            self.reason = self.content.reason;
+            self.diagnostic = self.content.diagnostic;
+            self.userInformationCount =
+                self.content.userInformationCount;
+            self.directReference = self.content.directReference;
+            self.indirectReference = self.content.indirectReference;
+            self.encoding = self.content.encoding;
+            self.userPayload = self.content.userPayload;
+
+            if (
+                self.userInformationCount == 1 &&
+                self.encoding == 0 &&
+                self.applicationContext == MMS_APPLICATION_CONTEXT &&
+                self.directReference == BER_TRANSFER_SYNTAX &&
+                expectedMmsContext > 0 &&
+                self.indirectReference == expectedMmsContext &&
+                (
+                    self.apduType != APDUType::AARE ||
+                    self.outcome == 0
+                ) &&
+                |self.userPayload| > 0
+            )
+                self.dispatchMms = True;
+            else if (self.userInformationCount > 0)
+                self.opaqueUserInformation = True;
+        }
+    }
+
+    : void {
+        if (
+            self.dispatchMms &&
+            ! associationMmsEnvelopeMatches(
+                self.userPayload,
+                self.apduType
+            )
+        ) {
+            if (self.apduType == APDUType::AARQ)
+                throw "ACSE AARQ user information is not an MMS InitiateRequest";
+            if (self.apduType == APDUType::AARE)
+                throw "ACSE AARE user information is not an MMS InitiateResponse";
+        }
+    }
+
+    mms: ICCP_MMS::ProvenancedMMSpdu(1) &parse-from=self.userPayload
+        if (self.dispatchMms);
+};

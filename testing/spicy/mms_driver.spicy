@@ -1,0 +1,1010 @@
+module ICCP_MMS_TEST;
+
+import spicy;
+import ICCP_MMS;
+import ICCP_MMS_TYPES;
+import ICCP_BER;
+
+function oracleHash(value: bytes, multiplier: uint64, modulus: uint64): uint64 {
+    local hashValue: uint64 = 0;
+    local offset: uint64 = 0;
+    while (offset < |value|) {
+        hashValue = (
+            hashValue * multiplier + uint64(*value.at(offset))
+        ) % modulus;
+        offset += 1;
+    }
+    return hashValue;
+}
+
+public type PDUCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s recognized=%s decoded=%s constructed=%s length=%d body=%s" % (
+            self.pdu.pduType,
+            self.pdu.recognized,
+            self.pdu.semanticDecoded,
+            self.pdu.identifier.first.constructed,
+            self.pdu.bodyLength,
+            self.pdu.body
+        );
+    }
+};
+
+public type InitiateCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s decoded=%s local=%d maxCalling=%d maxCalled=%d nesting=%d version=%d parameterUnused=%d parameter=%s servicesUnused=%d services=%s" % (
+            self.pdu.pduType,
+            self.pdu.semanticDecoded,
+            self.pdu.localDetail,
+            self.pdu.maxCalling,
+            self.pdu.maxCalled,
+            self.pdu.nestingLevel,
+            self.pdu.version,
+            self.pdu.parameterCbbUnusedBits,
+            self.pdu.parameterCbb,
+            self.pdu.servicesUnusedBits,
+            self.pdu.services
+        );
+    }
+};
+
+public type ErrorCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s decoded=%s class=%d code=%d additional=%d description=%s" % (
+            self.pdu.pduType,
+            self.pdu.semanticDecoded,
+            self.pdu.errorClass,
+            self.pdu.errorCode,
+            self.pdu.additionalCode,
+            self.pdu.additionalDescription
+        );
+    }
+};
+
+public type AdditionalCodeCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s decoded=%s present=%s additional=%d" % (
+            self.pdu.pduType,
+            self.pdu.semanticDecoded,
+            self.pdu.additionalCodePresent,
+            self.pdu.additionalCode
+        );
+    }
+};
+
+public type ConfirmedCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s decoded=%s invoke=%d modifiers=%d modifierPosition=%d service=%d constructed=%s serviceLength=%d class=%d code=%d" % (
+            self.pdu.pduType,
+            self.pdu.semanticDecoded,
+            self.pdu.invokeId,
+            self.pdu.modifierCount,
+            self.pdu.modifierPosition,
+            self.pdu.serviceTag,
+            self.pdu.serviceConstructed,
+            |self.pdu.serviceBody|,
+            self.pdu.errorClass,
+            self.pdu.errorCode
+        );
+    }
+};
+
+public type IdentifyCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d invoke=%d constructed=%s vendor=%s model=%s revision=%s syntaxes=%d first=%s" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.invokeId,
+            self.pdu.serviceConstructed,
+            self.pdu.identifyVendorName,
+            self.pdu.identifyModelName,
+            self.pdu.identifyRevision,
+            self.pdu.identifyAbstractSyntaxCount,
+            self.pdu.identifyFirstAbstractSyntax
+        );
+    }
+};
+
+public type AssociationCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s decoded=%s invoke=%d reasonTag=%d reason=%d class=%d code=%d additional=%d description=%s" % (
+            self.pdu.pduType,
+            self.pdu.semanticDecoded,
+            self.pdu.invokeId,
+            self.pdu.rejectReasonTag,
+            self.pdu.rejectReason,
+            self.pdu.errorClass,
+            self.pdu.errorCode,
+            self.pdu.additionalCode,
+            self.pdu.additionalDescription
+        );
+    }
+};
+
+public type IdentifierCase = unit {
+    value: ICCP_MMS::IdentifierTLV;
+
+    on %done {
+        print "identifier=%s" % self.value.value.value;
+    }
+};
+
+public type VisibleStringCase = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 26
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_MMS::VisibleStringValue(self.length.value);
+
+    on %done {
+        print "visibleString=%s" % self.value.value;
+    }
+};
+
+public type MMSStringCase = unit {
+    value: ICCP_MMS::MMSStringTLV;
+
+    on %done {
+        print "mmsString=%s" % self.value.value;
+    }
+};
+
+public type ProvenancedPDUCase = unit {
+    pdu: ICCP_MMS::ProvenancedMMSpdu(2);
+
+    on %done {
+        print "type=%s decoded=%s provenance=%d" % (
+            self.pdu.pdu.pduType,
+            self.pdu.pdu.semanticDecoded,
+            self.pdu.provenanceCode
+        );
+    }
+};
+
+public type ObjectNameCase = unit {
+    value: ICCP_MMS::ObjectName;
+
+    on %done {
+        print "scope=%d domain=%s item=%s" % (
+            self.value.scope,
+            self.value.domainId,
+            self.value.itemId
+        );
+    }
+};
+
+public type ObjectScopeCase = unit {
+    value: ICCP_MMS::ObjectScope;
+
+    on %done {
+        print "scope=%d domain=%s" % (
+            self.value.scope,
+            self.value.domainId
+        );
+    }
+};
+
+public type EventTimeCase = unit {
+    value: ICCP_MMS::EventTime;
+
+    on %done {
+        print "choice=%d sequence=%d rawLength=%d" % (
+            self.value.choice,
+            self.value.sequenceIdentifier,
+            |self.value.raw|
+        );
+    }
+};
+
+public type ObjectClassCase = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_MMS::ObjectClass(self.length.value);
+
+    on %done {
+        print "class=%d" % self.value.value.value;
+    }
+};
+
+public type AddressCase = unit {
+    value: ICCP_MMS::Address;
+
+    on %done {
+        print "choice=%d numeric=%d symbolic=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.numeric,
+            self.value.symbolic,
+            |self.value.unconstrained|
+        );
+    }
+};
+
+public type TypeSpecificationCase = unit {
+    value: ICCP_MMS::TypeSpecification;
+
+    on %done {
+        print "choice=%d value=%d boolean=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.signedValue,
+            self.value.booleanValue,
+            |self.value.raw|
+        );
+    }
+};
+
+public type TypeDescriptionCase = unit {
+    value: ICCP_MMS::TypeDescription;
+
+    on %done {
+        print "choice=%d constructed=%s value=%d boolean=%s format=%d exponent=%d rawLength=%d" % (
+            self.value.choice,
+            self.value.constructed,
+            self.value.signedValue,
+            self.value.booleanValue,
+            self.value.formatWidth,
+            self.value.exponentWidth,
+            |self.value.raw|
+        );
+    }
+};
+
+public type TypeDescriptionTreeCase = unit {
+    value: ICCP_MMS::TypeDescription;
+
+    on %done {
+        print "choice=%d packed=%s elements=%d components=%d nodes=%d depth=%d" % (
+            self.value.choice,
+            self.value.packed,
+            self.value.numberOfElements,
+            self.value.componentCount,
+            self.value.nodeCount,
+            self.value.maximumDepth
+        );
+    }
+};
+
+public type AlternateAccessCase = unit {
+    value: ICCP_MMS::AlternateAccessTLV;
+
+    on %done {
+        print "count=%d total=%d" % (
+            self.value.value.count,
+            self.value.value.totalCount
+        );
+    }
+};
+
+public type VariableSpecificationCase = unit {
+    value: ICCP_MMS::VariableSpecification;
+
+    on %done {
+        print "choice=%d scope=%d domain=%s item=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.nameScope,
+            self.value.domainId,
+            self.value.itemId,
+            |self.value.raw|
+        );
+    }
+};
+
+public type ResponseVariableSpecificationCase = unit {
+    value: ICCP_MMS::VariableSpecification(True);
+
+    on %done {
+        print "choice=%d scope=%d domain=%s item=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.nameScope,
+            self.value.domainId,
+            self.value.itemId,
+            |self.value.raw|
+        );
+    }
+};
+
+public type VariableAccessSpecificationCase = unit {
+    value: ICCP_MMS::VariableAccessSpecification;
+
+    on %done {
+        print "choice=%d count=%d scope=%d domain=%s item=%s" % (
+            self.value.choice,
+            self.value.variableCount,
+            self.value.nameScope,
+            self.value.domainId,
+            self.value.itemId
+        );
+    }
+};
+
+public type AccessResultCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::AccessResult(self.state);
+
+    on %done {
+        print "success=%s choice=%d error=%d rawLength=%d integers=%d first=%d second=%d components=%d choices=%d/%d/%d integer=%d floating=%s flagsLength=%d timestamp=%d" % (
+            self.value.success,
+            self.value.choice,
+            self.value.error,
+            |self.value.raw|,
+            self.value.componentIntegerCount,
+            self.value.firstComponentInteger,
+            self.value.secondComponentInteger,
+            self.value.componentCount,
+            self.value.firstComponentChoice,
+            self.value.secondComponentChoice,
+            self.value.thirdComponentChoice,
+            self.value.firstComponentIntegerValue,
+            self.value.firstComponentFloatingValue,
+            |self.value.secondComponentRaw|,
+            self.value.thirdComponentIntegerValue
+        );
+    }
+};
+
+public type ScalarAccessResultCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::AccessResult(self.state);
+
+    on %done {
+        print "choice=%d integer=%d floating=%s boolean=%s string=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.integerValue,
+            self.value.floatingValue,
+            self.value.booleanValue,
+            self.value.stringValue,
+            |self.value.raw|
+        );
+    }
+};
+
+public type AccessResultForestCase = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_MMS::AccessResultList(self.length.value);
+
+    on %done {
+        print "count=%d nodes=%d" % (
+            self.value.count,
+            self.value.totalNodes
+        );
+    }
+};
+
+public type DataCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::DataValue(0, self.state);
+
+    on %done {
+        print "choice=%d known=%s nodes=%d children=%d depth=%d boolean=%s integer=%d unused=%d string=%s oid=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.known,
+            self.value.nodeCount,
+            self.value.childCount,
+            self.value.maximumDepth,
+            self.value.booleanValue,
+            self.value.integerValue,
+            self.value.unusedBits,
+            self.value.stringValue,
+            self.value.oidValue,
+            |self.value.raw|
+        );
+    }
+};
+
+public type DataForestCase = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_MMS::DataList(self.length.value);
+
+    on %done {
+        print "count=%d nodes=%d" % (
+            self.value.count,
+            self.value.totalNodes
+        );
+    }
+};
+
+public type FloatingDataCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::DataValue(0, self.state);
+
+    on %done {
+        print "choice=%d floating=%s rawLength=%d" % (
+            self.value.choice,
+            self.value.floatingValue,
+            |self.value.raw|
+        );
+    }
+};
+
+public type GetNameListCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s invoke=%d classChoice=%d class=%d scope=%d domain=%s continue=%s count=%d first=%s more=%s" % (
+            self.pdu.pduType,
+            self.pdu.invokeId,
+            self.pdu.objectClassChoice,
+            self.pdu.objectClass,
+            self.pdu.objectScope,
+            self.pdu.objectDomain,
+            self.pdu.continueAfter,
+            self.pdu.identifierCount,
+            self.pdu.firstIdentifier,
+            self.pdu.moreFollows
+        );
+    }
+};
+
+public type GetNameListEvidenceCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "count=%d more=%s" % (
+            self.pdu.identifierCount,
+            self.pdu.moreFollows
+        );
+
+        local index: uint64 = 0;
+        while (index < |self.pdu.getNameListIdentifiers|) {
+            print "identifier[%d]=%s" % (
+                index,
+                self.pdu.getNameListIdentifiers[index]
+            );
+            index += 1;
+        }
+    }
+};
+
+public type CriticalServiceCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d invoke=%d specResult=%s access=%d variables=%d data=%d nodes=%d results=%d success=%d failure=%d deletable=%s typeChoice=%d scope=%d domain=%s item=%s" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.invokeId,
+            self.pdu.specificationWithResult,
+            self.pdu.accessChoice,
+            self.pdu.variableCount,
+            self.pdu.dataCount,
+            self.pdu.dataNodeCount,
+            self.pdu.resultCount,
+            self.pdu.successCount,
+            self.pdu.failureCount,
+            self.pdu.mmsDeletable,
+            self.pdu.typeChoice,
+            self.pdu.objectScope,
+            self.pdu.objectDomain,
+            self.pdu.firstIdentifier
+        );
+    }
+};
+
+public type ReadIdentityCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d access=%d variables=%d scope=%d domain=%s item=%s" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.accessChoice,
+            self.pdu.variableCount,
+            self.pdu.firstVariableScope,
+            self.pdu.firstVariableDomain,
+            self.pdu.firstVariableName
+        );
+    }
+};
+
+public type VariableTypeCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d invoke=%d typeChoice=%d constructed=%s value=%d boolean=%s format=%d exponent=%d rawLength=%d packed=%s elements=%d components=%d nodes=%d depth=%d typeScope=%d typeDomain=%s typeName=%s" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.invokeId,
+            self.pdu.typeChoice,
+            self.pdu.typeDescriptionConstructed,
+            self.pdu.typeDescriptionSignedValue,
+            self.pdu.typeDescriptionBooleanValue,
+            self.pdu.typeDescriptionFormatWidth,
+            self.pdu.typeDescriptionExponentWidth,
+            |self.pdu.typeDescriptionRaw|,
+            self.pdu.typeDescriptionPacked,
+            self.pdu.typeDescriptionNumberOfElements,
+            self.pdu.typeDescriptionComponentCount,
+            self.pdu.typeDescriptionNodeCount,
+            self.pdu.typeDescriptionMaximumDepth,
+            self.pdu.typeNameScope,
+            self.pdu.typeNameDomain,
+            self.pdu.typeNameItem
+        );
+    }
+};
+
+public type TransferSetDataCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::DataValue(0, self.state);
+
+    on %done {
+        print "choice=%d children=%d shape=%s statusChoice=%d status=%s" % (
+            self.value.choice,
+            self.value.childCount,
+            self.value.dstTransferSetShape,
+            self.value.twelfthChildChoice,
+            self.value.twelfthChildBoolean
+        );
+    }
+};
+
+public type TransferSupportCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "choice=%d rawLength=%d components=%d c1=%d c2=%d c3=%d integer=%d second=%s third=%s" % (
+            self.pdu.firstResultChoice,
+            |self.pdu.firstResultRaw|,
+            self.pdu.firstResultComponentCount,
+            self.pdu.firstResultFirstChoice,
+            self.pdu.firstResultSecondChoice,
+            self.pdu.firstResultThirdChoice,
+            self.pdu.firstResultIntegerValue,
+            self.pdu.firstResultFlagsRaw,
+            self.pdu.firstResultThirdRaw
+        );
+    }
+};
+
+public type NamedListCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d unconfirmed=%d invoke=%d scope=%d domain=%s name=%s delete_scope=%d names=%d variables=%d results=%d success=%d failure=%d deletable=%s matched=%d deleted=%d" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.unconfirmedServiceTag,
+            self.pdu.invokeId,
+            self.pdu.namedListScope,
+            self.pdu.namedListDomain,
+            self.pdu.namedListName,
+            self.pdu.deleteScope,
+            self.pdu.nameCount,
+            self.pdu.variableCount,
+            self.pdu.resultCount,
+            self.pdu.successCount,
+            self.pdu.failureCount,
+            self.pdu.mmsDeletable,
+            self.pdu.numberMatched,
+            self.pdu.numberDeleted
+        );
+    }
+};
+
+public type DeleteNamedListEvidenceCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "scope=%d names=%d retained=%d" % (
+            self.pdu.deleteScope,
+            self.pdu.nameCount,
+            |self.pdu.namedListMemberNames|
+        );
+
+        local index: uint64 = 0;
+        while (index < |self.pdu.namedListMemberNames|) {
+            print "name[%d]=%d/%s/%s" % (
+                index,
+                self.pdu.namedListMemberScopes[index],
+                self.pdu.namedListMemberDomains[index],
+                self.pdu.namedListMemberNames[index]
+            );
+            index += 1;
+        }
+    }
+};
+
+public type EventNotificationCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d enrollment=%d/%s/%s condition=%d/%s/%s severity=%d state=%s/%d time=%d/%d/%s lost=%s ack=%s/%d action=%s" % (
+            self.pdu.pduType,
+            self.pdu.unconfirmedServiceTag,
+            self.pdu.eventEnrollmentScope,
+            self.pdu.eventEnrollmentDomain,
+            self.pdu.eventEnrollmentName,
+            self.pdu.eventConditionScope,
+            self.pdu.eventConditionDomain,
+            self.pdu.eventConditionName,
+            self.pdu.eventSeverity,
+            self.pdu.eventCurrentStatePresent,
+            self.pdu.eventCurrentState,
+            self.pdu.eventTransitionTimeChoice,
+            self.pdu.eventTransitionTimeSequenceIdentifier,
+            self.pdu.eventTransitionTimeRaw,
+            self.pdu.eventNotificationLost,
+            self.pdu.eventAlarmAcknowledgmentRulePresent,
+            self.pdu.eventAlarmAcknowledgmentRule,
+            self.pdu.eventActionResultPresent
+        );
+    }
+};
+
+public type InformationReportResultsCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s access=%d variables=%d/%d/%d results=%d/%d/%d/%d/%d first=%s/%s/%s choices=%d/%d/%d errors=%d/%d/%d integers=%d/%d/%d strings=%s/%s/%s" % (
+            self.pdu.pduType,
+            self.pdu.accessChoice,
+            |self.pdu.reportVariableScopes|,
+            |self.pdu.reportVariableDomains|,
+            |self.pdu.reportVariableNames|,
+            self.pdu.resultCount,
+            self.pdu.failureCount,
+            |self.pdu.reportResultChoices|,
+            |self.pdu.reportResultErrors|,
+            |self.pdu.reportResultRaws|,
+            *self.pdu.reportVariableNames.at(0),
+            *self.pdu.reportVariableNames.at(1),
+            *self.pdu.reportVariableNames.at(2),
+            *self.pdu.reportResultChoices.at(0),
+            *self.pdu.reportResultChoices.at(1),
+            *self.pdu.reportResultChoices.at(2),
+            *self.pdu.reportResultErrors.at(0),
+            *self.pdu.reportResultErrors.at(1),
+            *self.pdu.reportResultErrors.at(2),
+            *self.pdu.reportResultIntegerValues.at(0),
+            *self.pdu.reportResultIntegerValues.at(1),
+            *self.pdu.reportResultIntegerValues.at(2),
+            *self.pdu.reportResultStringValues.at(0),
+            *self.pdu.reportResultStringValues.at(1),
+            *self.pdu.reportResultStringValues.at(2)
+        );
+    }
+};
+
+public type CorrelationCase = unit {
+    request: ICCP_MMS::MMSpdu;
+    response: ICCP_MMS::MMSpdu;
+
+    on %done {
+        if (
+            self.request.pduType !=
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST ||
+            self.response.pduType !=
+                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE ||
+            self.request.invokeId != self.response.invokeId
+        )
+            throw "MMS request and response invoke IDs do not correlate";
+
+        print "invoke=%d request_service=%d response_service=%d" % (
+            self.request.invokeId,
+            self.request.serviceTag,
+            self.response.serviceTag
+        );
+    }
+};
+
+public type PointMetadataCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%d components=%d choices=%d/%d/%d integers=%d values=%d/%d flagsLength=%d timestamp=%d" % (
+            self.pdu.firstResultChoice,
+            self.pdu.firstResultComponentCount,
+            self.pdu.firstResultFirstChoice,
+            self.pdu.firstResultSecondChoice,
+            self.pdu.firstResultThirdChoice,
+            self.pdu.firstResultComponentIntegerCount,
+            self.pdu.firstResultFirstInteger,
+            self.pdu.firstResultSecondInteger,
+            |self.pdu.firstResultFlagsRaw|,
+            self.pdu.firstResultTimestampValue
+        );
+    }
+};
+
+public type PointShapeCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        local top0: uint64 = |self.pdu.pointComponentChoices| > 0 ?
+            self.pdu.pointComponentChoices[0] : 0;
+        local top1: uint64 = |self.pdu.pointComponentChoices| > 1 ?
+            self.pdu.pointComponentChoices[1] : 0;
+        local top2: uint64 = |self.pdu.pointComponentChoices| > 2 ?
+            self.pdu.pointComponentChoices[2] : 0;
+        local top3: uint64 = |self.pdu.pointComponentChoices| > 3 ?
+            self.pdu.pointComponentChoices[3] : 0;
+        local nested0: uint64 = |self.pdu.pointNestedChoices| > 0 ?
+            self.pdu.pointNestedChoices[0] : 0;
+        local nested1: uint64 = |self.pdu.pointNestedChoices| > 1 ?
+            self.pdu.pointNestedChoices[1] : 0;
+        local nestedValue0: int64 = |self.pdu.pointNestedIntegerValues| > 0 ?
+            self.pdu.pointNestedIntegerValues[0] : 0;
+        local nestedValue1: int64 = |self.pdu.pointNestedIntegerValues| > 1 ?
+            self.pdu.pointNestedIntegerValues[1] : 0;
+        print "top=%d choices=%d/%d/%d/%d nestedIndex=%d nested=%d/%d values=%d/%d" % (
+            |self.pdu.pointComponentChoices|,
+            top0, top1, top2, top3,
+            self.pdu.pointNestedComponentIndex,
+            nested0, nested1, nestedValue0, nestedValue1
+        );
+    }
+};
+
+public type TransferReportCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "access=%d variables=%d scope=%d domain=%s name=%s results=%d type=%d components=%d choices=%d/%d value=%s flagsLength=%d" % (
+            self.pdu.accessChoice,
+            self.pdu.variableCount,
+            self.pdu.firstVariableScope,
+            self.pdu.firstVariableDomain,
+            self.pdu.firstVariableName,
+            self.pdu.resultCount,
+            self.pdu.firstResultChoice,
+            self.pdu.firstResultComponentCount,
+            self.pdu.firstResultFirstChoice,
+            self.pdu.firstResultSecondChoice,
+            self.pdu.firstResultFloatingValue,
+            |self.pdu.firstResultFlagsRaw|
+        );
+    }
+};
+
+# Offline comparison surface for the independent MMS InformationReport
+# oracle. Records remain in the quarantined validation directory; independent
+# fingerprints avoid copying captured raw values into aggregate summaries.
+public type InformationReportOracleStream = unit {
+    var reportCount: uint64 = 0;
+
+    pdus: ICCP_MMS::MMSpdu[] &eod foreach {
+        if (
+            $$.pduType == ICCP_MMS_TYPES::TopLevelPDU::UNCONFIRMED &&
+            $$.unconfirmedServiceTag == 0
+        ) {
+            self.reportCount += 1;
+            print "R\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" % (
+                self.reportCount,
+                $$.accessChoice,
+                $$.variableCount,
+                $$.firstVariableScope,
+                $$.firstVariableDomain,
+                $$.firstVariableName,
+                $$.namedListScope,
+                $$.namedListDomain,
+                $$.namedListName,
+                $$.resultCount,
+                $$.failureCount,
+                $$.firstResultChoice,
+                |$$.firstResultRaw|,
+                oracleHash($$.firstResultRaw, 257, 4294967291),
+                oracleHash($$.firstResultRaw, 263, 4294967279),
+                oracleHash($$.firstResultRaw, 269, 4294967231),
+                $$.firstResultComponentIntegerCount,
+                $$.firstResultFirstInteger,
+                $$.firstResultSecondInteger,
+                $$.firstResultComponentCount,
+                $$.firstResultFirstChoice,
+                $$.firstResultSecondChoice,
+                $$.firstResultThirdChoice,
+                $$.firstResultIntegerValue,
+                |$$.firstResultFlagsRaw|,
+                oracleHash($$.firstResultFlagsRaw, 257, 4294967291),
+                oracleHash($$.firstResultFlagsRaw, 263, 4294967279),
+                oracleHash($$.firstResultFlagsRaw, 269, 4294967231),
+                $$.firstResultTimestampValue
+            );
+
+            local index: uint64 = 0;
+            while (index < |$$.reportResultChoices|) {
+                print "V\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" % (
+                    self.reportCount,
+                    index,
+                    $$.reportResultChoices[index],
+                    $$.reportResultErrors[index],
+                    |$$.reportResultRaws[index]|,
+                    oracleHash($$.reportResultRaws[index], 257, 4294967291),
+                    oracleHash($$.reportResultRaws[index], 263, 4294967279),
+                    oracleHash($$.reportResultRaws[index], 269, 4294967231)
+                );
+                index += 1;
+            }
+        }
+    }
+};
+
+public type IdentifyOracleStream = unit {
+    var identifyCount: uint64 = 0;
+
+    pdus: ICCP_MMS::MMSpdu[] &eod foreach {
+        if (
+            $$.serviceTag == 2 &&
+            (
+                $$.pduType == ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST ||
+                $$.pduType == ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_RESPONSE
+            )
+        ) {
+            self.identifyCount += 1;
+            print "I\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s" % (
+                self.identifyCount,
+                cast<uint64>($$.pduType),
+                $$.invokeId,
+                |$$.identifyVendorRaw|,
+                oracleHash($$.identifyVendorRaw, 257, 4294967291),
+                oracleHash($$.identifyVendorRaw, 263, 4294967279),
+                oracleHash($$.identifyVendorRaw, 269, 4294967231),
+                |$$.identifyModelRaw|,
+                oracleHash($$.identifyModelRaw, 257, 4294967291),
+                oracleHash($$.identifyModelRaw, 263, 4294967279),
+                oracleHash($$.identifyModelRaw, 269, 4294967231),
+                |$$.identifyRevisionRaw|,
+                oracleHash($$.identifyRevisionRaw, 257, 4294967291),
+                oracleHash($$.identifyRevisionRaw, 263, 4294967279),
+                oracleHash($$.identifyRevisionRaw, 269, 4294967231),
+                $$.identifyAbstractSyntaxCount,
+                $$.identifyFirstAbstractSyntax
+            );
+        }
+    }
+};
+
+public type TransferSetMetadataCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d access=%d list=%d/%s/%s variables=%d first=%d/%s/%s deletable=%s delete=%d names=%d matched=%d deleted=%d results=%d failures=%d" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.accessChoice,
+            self.pdu.namedListScope,
+            self.pdu.namedListDomain,
+            self.pdu.namedListName,
+            self.pdu.variableCount,
+            self.pdu.namedListFirstVariableScope,
+            self.pdu.namedListFirstVariableDomain,
+            self.pdu.namedListFirstVariableName,
+            self.pdu.mmsDeletable,
+            self.pdu.deleteScope,
+            self.pdu.nameCount,
+            self.pdu.numberMatched,
+            self.pdu.numberDeleted,
+            self.pdu.resultCount,
+            self.pdu.failureCount
+        );
+    }
+};
+
+public type FallbackCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "type=%s service=%d required=%s decoded=%s raw_length=%d" % (
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.iccpRequiredService,
+            self.pdu.semanticDecoded,
+            |self.pdu.serviceBody|
+        );
+    }
+};
+
+public type ControlWriteCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "choice=%d rawLength=%d integer=%d floating=%s" % (
+            self.pdu.writeFirstDataChoice,
+            |self.pdu.writeFirstDataRaw|,
+            self.pdu.writeFirstDataIntegerValue,
+            self.pdu.writeFirstDataFloatingValue
+        );
+    }
+};
+
+public type WriteEvidenceCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "targetsKnown=%s targets=%d values=%d results=%d success=%d failure=%d" % (
+            self.pdu.writeTargetCountKnown,
+            self.pdu.writeTargetCount,
+            self.pdu.writeValueCount,
+            self.pdu.resultCount,
+            self.pdu.successCount,
+            self.pdu.failureCount
+        );
+
+        local index: uint64 = 0;
+        while (index < |self.pdu.writeTargetNames|) {
+            print "target[%d]=%d/%s/%s" % (
+                index,
+                self.pdu.writeTargetScopes[index],
+                self.pdu.writeTargetDomains[index],
+                self.pdu.writeTargetNames[index]
+            );
+            index += 1;
+        }
+
+        index = 0;
+        while (index < |self.pdu.writeValueChoices|) {
+            print "value[%d]=%d/%d/%d/%d/%s/%s/%s" % (
+                index,
+                self.pdu.writeValueChoices[index],
+                |self.pdu.writeValueRaws[index]|,
+                oracleHash(
+                    self.pdu.writeValueRaws[index],
+                    257,
+                    65521
+                ),
+                self.pdu.writeValueIntegerValues[index],
+                self.pdu.writeValueFloatingValues[index],
+                self.pdu.writeValueBooleanValues[index],
+                self.pdu.writeValueStringValues[index]
+            );
+            index += 1;
+        }
+
+        index = 0;
+        while (index < |self.pdu.writeResultErrors|) {
+            print "result[%d]=%s/%d" % (
+                index,
+                self.pdu.writeResultSuccesses[index],
+                self.pdu.writeResultErrors[index]
+            );
+            index += 1;
+        }
+    }
+};
+
+public type ProtocolConfirmationCase = unit {
+    pdu: ICCP_MMS::MMSpdu;
+
+    on %done {
+        print "recognized=%s decoded=%s confirmation=%s" % (
+            self.pdu.recognized,
+            self.pdu.semanticDecoded,
+            ICCP_MMS::protocolConfirmationIsValid(
+                self.pdu.recognized,
+                self.pdu.semanticDecoded
+            )
+        );
+    }
+};

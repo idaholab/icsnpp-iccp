@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+build_dir="${project_dir}/build"
+
+for command_name in rawshark text2pcap zeek zeek-cut; do
+    if ! command -v "${command_name}" >/dev/null; then
+        echo "independent comparison requires ${command_name}" >&2
+        exit 1
+    fi
+done
+
+comparison_dir="$(mktemp -d /tmp/iccp-independent-dissector.XXXXXX)"
+trap 'rm -rf "${comparison_dir}"' EXIT
+
+pcap="${comparison_dir}/synthetic.pcap"
+bash "${script_dir}/generate-synthetic-pcap" "${pcap}"
+
+# rawshark links the same independent dissector library as Wireshark while
+# remaining usable in headless verification environments. Field numbers in its
+# output correspond to the -F order below.
+raw_output="$(
+    rawshark -s -r - -d encap:1 \
+        -F tpkt.version \
+        -F tpkt.length \
+        -F cotp.type \
+        -F cotp.li \
+        -F ses.length \
+        -F ses.parameter_type \
+        -F pres.presentation_context_identifier \
+        -F pres.abstract_syntax_name \
+        < "${pcap}"
+)"
+packet_fields="$(tail -n +2 <<<"${raw_output}")"
+
+assert_count() {
+    local expected_count="$1"
+    local field_value="$2"
+    local actual_count
+
+    actual_count="$(
+        grep -oF "${field_value}" <<<"${packet_fields}" | wc -l || true
+    )"
+    if [[ "${actual_count}" -ne "${expected_count}" ]]; then
+        echo "rawshark expected ${expected_count} occurrence(s) of ${field_value}, got ${actual_count}" >&2
+        echo "${raw_output}" >&2
+        exit 1
+    fi
+}
+
+# The generated class-0 CR/CC handshake and both application TSDUs are four
+# TPKT v3 records. Only the two application records decode as COTP DT (LI 2).
+assert_count 4 '0="3"'
+assert_count 1 '1="136"'
+assert_count 1 '1="138"'
+assert_count 2 '2="0x0f"'
+assert_count 2 '3="2"'
+
+# Wireshark also reaches Session CONNECT and its negotiated Presentation
+# context. The synthetic profile intentionally is not treated as independent
+# ACSE/MMS validation; representative captures remain required for that gate.
+assert_count 1 '4="127"'
+assert_count 1 '4="129"'
+assert_count 2 '5="193"'
+assert_count 1 '6="3"'
+assert_count 1 '7="2.2.1.0.1"'
+
+(
+    cd "${comparison_dir}"
+    ZEEK_PLUGIN_PATH="${build_dir}" zeek -Cr "${pcap}" \
+        "${project_dir}/scripts/__load__.zeek"
+)
+
+# CP and CPA carry their AARQ/AARE PDVs on negotiated ACSE context 1. The MMS
+# context 3 asserted above is referenced inside ACSE and is not the enclosing
+# Presentation PDV's context_id.
+zeek_contexts="$(zeek-cut context_id < "${comparison_dir}/iccp.log")"
+if [[ "$(grep -cx '1' <<<"${zeek_contexts}")" -ne 2 ]]; then
+    echo "plugin did not report ACSE Presentation context 1 for both association PDVs" >&2
+    echo "${zeek_contexts}" >&2
+    exit 1
+fi
+
+echo "independent rawshark comparison passed (TPKT, COTP, Session, Presentation)"
+
+mms_pcap="${comparison_dir}/mms-values.pcap"
+mms_pcap_copy="${comparison_dir}/mms-values-copy.pcap"
+bash "${script_dir}/generate-mms-comparison-pcap" "${mms_pcap}"
+bash "${script_dir}/generate-mms-comparison-pcap" "${mms_pcap_copy}"
+cmp "${mms_pcap}" "${mms_pcap_copy}"
+
+# Decode the project-generated MMS PDUs directly as link-type USER0. This
+# avoids relying on the synthetic association profile for Wireshark's separate
+# Presentation/ACSE context heuristics while still exercising its MMS ASN.1
+# dissector over the exact focused regression bytes.
+mms_raw_output="$(
+    rawshark -s -r - -d encap:147 -d proto:mms \
+        -F mms.invokeID \
+        -F mms.domainId \
+        -F mms.itemId \
+        -F mms.integer \
+        -F mms.data_bit-string \
+        < "${mms_pcap}"
+)"
+mms_packet_fields="$(tail -n +2 <<<"${mms_raw_output}")"
+
+assert_mms_count() {
+    local expected_count="$1"
+    local field_value="$2"
+    local actual_count
+
+    actual_count="$(
+        grep -oF "${field_value}" <<<"${mms_packet_fields}" | wc -l || true
+    )"
+    if [[ "${actual_count}" -ne "${expected_count}" ]]; then
+        echo "rawshark MMS expected ${expected_count} occurrence(s) of ${field_value}, got ${actual_count}" >&2
+        echo "${mms_raw_output}" >&2
+        exit 1
+    fi
+}
+
+assert_mms_count 5 '1="CONTROL_CENTER_B"'
+assert_mms_count 1 '2="Next_DSTransfer_Set"'
+assert_mms_count 1 '2="Transfer_Set_Name"'
+assert_mms_count 1 '2="Transfer_Set_Time_Stamp"'
+assert_mms_count 1 '2="Transfer_Report_ACK"'
+assert_mms_count 1 '2="Transfer_Report_NACK"'
+assert_mms_count 1 '3="1700000000"'
+assert_mms_count 1 '4="a8:"'
+assert_mms_count 1 '0="20"'
+assert_mms_count 1 '0="21"'
+
+echo "independent rawshark comparison passed (MMS object names and values)"

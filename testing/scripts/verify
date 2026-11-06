@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+build_dir="${project_dir}/build"
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ICCP verification requires the flock command" >&2
+    exit 2
+fi
+
+checkout_id="$(printf '%s' "${project_dir}" | cksum | awk '{print $1}')"
+user_id="$(id -u)"
+lock_parent="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+lock_dir="${lock_parent}/icsnpp-iccp-${user_id}-locks"
+
+# A predictable file directly under a shared /tmp can be replaced with a
+# symlink before shell redirection opens it. Put locks inside a private,
+# user-owned directory so opening the deterministic checkout lock cannot
+# truncate an attacker-selected path.
+if [[ -L "${lock_dir}" ]]; then
+    echo "ICCP verification lock directory must not be a symbolic link: ${lock_dir}" >&2
+    exit 2
+fi
+if ! mkdir -m 700 "${lock_dir}" 2>/dev/null; then
+    if [[ ! -d "${lock_dir}" || -L "${lock_dir}" || ! -O "${lock_dir}" ]]; then
+        echo "ICCP verification lock directory is not safely user-owned: ${lock_dir}" >&2
+        exit 2
+    fi
+    chmod 700 "${lock_dir}"
+fi
+
+lock_file="${lock_dir}/${checkout_id}-workspace.lock"
+exec 9>"${lock_file}"
+
+set +e
+flock -n 9
+lock_status=$?
+set -e
+if [[ "${lock_status}" -eq 1 ]]; then
+    echo "another ICCP verification run is active for this checkout" >&2
+    exit 2
+elif [[ "${lock_status}" -ne 0 ]]; then
+    echo "unable to lock ICCP verification checkout: ${lock_file}" >&2
+    exit 2
+fi
+
+# Child gates that also support standalone execution verify this inherited
+# lock descriptor instead of opening a second description and deadlocking on
+# the lock already held by this complete run.
+export ICCP_WORKSPACE_LOCK_FILE="${lock_file}"
+export ICCP_WORKSPACE_LOCK_FD=9
+# Spicy's JIT compiler otherwise defaults to host CPU count. Generated parser
+# translation units can each consume several GiB, so keep the complete gate
+# safe on developer workstations and shared CI workers.
+export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+# The full release gate must compile both standalone drivers from this
+# checkout.  The optional prebuilt-plugin overrides are iteration aids for
+# invoking their focused tests directly, not release-gate inputs.
+unset ICCP_TRANSPORT_TEST_PLUGIN
+unset ICCP_FUZZ_TEST_PLUGIN
+
+cmake -S "${project_dir}" -B "${build_dir}"
+cmake --build "${build_dir}" --parallel 2
+
+bash "${project_dir}/testing/scripts/test-ber"
+bash "${project_dir}/testing/scripts/test-transport"
+bash "${project_dir}/testing/scripts/test-fuzz-smoke"
+bash "${project_dir}/testing/scripts/test-session"
+bash "${project_dir}/testing/scripts/test-presentation"
+bash "${project_dir}/testing/scripts/test-acse"
+bash "${project_dir}/testing/scripts/test-mms"
+bash "${project_dir}/testing/scripts/test-iccp"
+bash "${project_dir}/testing/scripts/test-log-schema"
+bash "${project_dir}/testing/scripts/test-independent-dissector"
+bash "${project_dir}/testing/scripts/test-local-corpus-tools"
+
+plugin_listing="$(
+    ZEEK_PLUGIN_PATH="${build_dir}" zeek -NN
+)"
+if ! grep -q "ANALYZER_ICCP_TCP" <<<"${plugin_listing}"; then
+    echo "ANALYZER_ICCP_TCP is missing from the Zeek plugin listing" >&2
+    exit 1
+fi
+
+bash "${project_dir}/testing/scripts/test-btest"
+bash "${project_dir}/testing/scripts/test-zkg-install"

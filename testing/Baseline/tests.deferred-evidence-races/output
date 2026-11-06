@@ -1,0 +1,20 @@
+control alert invoke=41 object=BREAKER_TAG provenance=verified
+control alert invoke=42 object=BREAKER_TAG provenance=inferred
+deferred cleanup evidence=0 marker_orig=F marker_resp=F tag_pending=F
+direct identify synchronous=T
+lifecycle abort-marker confirmed=F evidence=F deferred=F provenance=unknown marker=F
+lifecycle disconnect confirmed=F evidence=F deferred=F provenance=unknown marker=F
+lifecycle not-finished confirmed=T evidence=T deferred=T provenance=verified marker=T
+shape reuse pending_b=T classification=operate_command evidence=0
+write alert invoke=31 object=WRITE_A provenance=verified
+write alert invoke=32 object=WRITE_B provenance=inferred
+Cdeferred-races	T	0	decoded	7	requested	FIRST	verified
+Cdeferred-races	T	0	invoke_reused	7	invoke_reused	SECOND	inferred
+Cdeferred-races	T	3	information_report	REPORT_A	5	discrete	101	-	explicit_complete	verified
+Cdeferred-races	T	3	information_report	REPORT_B	5	-	202	00cafebabe	explicit_complete	inferred
+Cdirect-evidence	T	0	decoded	99	requested	DIRECT	verified
+Cdeferred-races	T	operate_command	requested	31	WRITE_A	Control_Command	17	-	-	-	verified
+Cdeferred-races	T	operate_command	requested	32	WRITE_B	Control_Command	34	-	-	-	inferred
+Cdeferred-races	F	get_tag	confirmed	40	BREAKER_TAG	Tag_Value	-	2	armed	maintenance	verified
+Cdeferred-races	T	get_tag	requested	40	BREAKER_TAG	Tag_Value	-	-	-	-	verified
+Cshape-reuse	T	operate_command	requested	52	PRESERVED_B	Control_Command	34	inferred

@@ -1,0 +1,7 @@
+named-control-legacy-first control=F support=F
+named-control-aggregate-first control=F support=F
+named-control-v3-first control=F support=F
+named-transfer-support control=F support=F
+explicit-packet-control control=T support=F
+direct-control control=T support=F
+direct-transfer-support control=F support=T

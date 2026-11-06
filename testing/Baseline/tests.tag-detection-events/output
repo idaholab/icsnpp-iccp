@@ -1,0 +1,3 @@
+tag_failure invoke=200 classification=set_tag outcome=partial_or_failed object=BREAKER_TAG type=Tag_Value failures=1 error=/-1 provenance=verified
+tag_failure invoke=201 classification=get_tag outcome=rejected object=BREAKER_TAG type=Tag_Value failures=0 error=access/3 provenance=verified
+counts control=2 generic=2

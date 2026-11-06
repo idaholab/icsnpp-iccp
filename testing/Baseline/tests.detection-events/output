@@ -1,0 +1,7 @@
+unknown kind=unknown role=unknown operation=get_variable_access_attributes invoke=50 object=vcc//Vendor_Private model=private_unknown provenance=unknown
+write kind=unknown role=unknown invoke=52 object=icc/BILATERAL/SETPOINT variables=1 data=1 nodes=3 provenance=unknown
+write_failure kind=unknown role=unknown invoke=52 outcome=partial_or_failed object=icc/BILATERAL/SETPOINT failures=1 error=/-1 provenance=unknown
+write kind=unknown role=unknown invoke=55 object=vcc//REJECTED_WRITE variables=1 data=1 nodes=1 provenance=unknown
+write_failure kind=unknown role=unknown invoke=55 outcome=rejected object=vcc//REJECTED_WRITE failures=0 error=access/3 provenance=unknown
+unexpected_service kind=mms role=originator phase=established invoke=53 tag=4 operation=read provenance=unknown
+authenticated_rejection response_orig=F request_orig=T length=12 result=1 diagnostic=14 provenance=verified

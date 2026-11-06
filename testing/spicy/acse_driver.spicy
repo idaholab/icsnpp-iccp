@@ -1,0 +1,87 @@
+module ICCP_ACSE_TEST;
+
+import spicy;
+import ICCP_ACSE;
+
+public type APDUCase = unit {
+    # Focused nested-MMS tests supply the presentation context that an
+    # enclosing Presentation parser has already validated.
+    apdu: ICCP_ACSE::APDU(3);
+
+    on %done {
+        print "type=%s recognized=%s context=%s title=%s mechanism=%s authentication=%s authenticationLength=%d outcome=%d reason=%d diagnostic=%d userInfo=%d direct=%s indirect=%d encoding=%d opaque=%s mms=%s payload=%s" % (
+            self.apdu.apduType,
+            self.apdu.recognized,
+            self.apdu.applicationContext,
+            self.apdu.apTitle,
+            self.apdu.mechanism,
+            self.apdu.authenticationPresent,
+            self.apdu.authenticationLength,
+            self.apdu.outcome,
+            self.apdu.reason,
+            self.apdu.diagnostic,
+            self.apdu.userInformationCount,
+            self.apdu.directReference,
+            self.apdu.indirectReference,
+            self.apdu.encoding,
+            self.apdu.opaqueUserInformation,
+            self.apdu.dispatchMms,
+            self.apdu.userPayload
+        );
+    }
+};
+
+public type UntrustedAPDUCase = unit {
+    # The default standalone entry point has no Presentation negotiation and
+    # must therefore never promote EXTERNAL content to MMS.
+    apdu: ICCP_ACSE::APDU;
+
+    on %done {
+        print "opaque=%s mms=%s" % (
+            self.apdu.opaqueUserInformation,
+            self.apdu.dispatchMms
+        );
+    }
+};
+
+public type TrustedSummaryCase = unit {
+    apdu: ICCP_ACSE::APDU(3);
+
+    on %done {
+        local nestedType: int64 = -1;
+        if (self.apdu.dispatchMms)
+            nestedType = cast<int64>(self.apdu.mms.pdu.pduType);
+
+        print "type=%d context=%s direct=%s indirect=%d encoding=%d opaque=%s mms=%s nested=%d" % (
+            cast<int64>(self.apdu.apduType),
+            self.apdu.applicationContext,
+            self.apdu.directReference,
+            self.apdu.indirectReference,
+            self.apdu.encoding,
+            self.apdu.opaqueUserInformation,
+            self.apdu.dispatchMms,
+            nestedType
+        );
+    }
+};
+
+public type MetadataCase = unit {
+    apdu: ICCP_ACSE::APDU;
+
+    on %done {
+        print "calledTitle=%s calledQualifier=%d calledApInvocation=%d calledAeInvocation=%d callingTitle=%s callingQualifier=%d callingApInvocation=%d callingAeInvocation=%d respondingTitle=%s respondingQualifier=%d respondingApInvocation=%d respondingAeInvocation=%d" % (
+            self.apdu.calledApTitle,
+            self.apdu.calledAeQualifier,
+            self.apdu.calledApInvocation,
+            self.apdu.calledAeInvocation,
+            self.apdu.callingApTitle,
+            self.apdu.callingAeQualifier,
+            self.apdu.callingApInvocation,
+            self.apdu.callingAeInvocation,
+            self.apdu.respondingApTitle,
+            self.apdu.respondingAeQualifier,
+            self.apdu.respondingApInvocation,
+            self.apdu.respondingAeInvocation
+        );
+    }
+};

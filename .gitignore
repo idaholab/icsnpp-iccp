@@ -1,0 +1,14 @@
+build/
+testing/.tmp/
+testing/.btest.failed.dat
+*.hlto
+*.log
+__pycache__/
+*.pyc
+.vscode/
+*~
+reference/
+pcaps/
+.release-private/
+
+!testing/Baseline/*/*.log

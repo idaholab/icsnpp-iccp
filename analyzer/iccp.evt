@@ -1,0 +1,1091 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file maps ICCP parser activity to Zeek events.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+import ICCP;
+import Zeek_ICCP;
+import ICCP_TPKT;
+import ICCP_COTP;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+import ICCP_ACSE;
+import ICCP_MMS;
+import ICCP_TYPES;
+
+protocol analyzer ICCP_TCP over TCP:
+    parse with ICCP::ICCP_Connection;
+
+on ICCP::ICCP_Connection::%init -> event ICCP::stream_started(
+    $conn,
+    $is_orig
+);
+
+on ICCP::ICCP_Connection::%synced -> event ICCP::stream_recovery_candidate(
+    $conn,
+    $is_orig,
+    self.recoveryCrossedGap
+);
+
+on ICCP::ICCP_Connection::%synced if (
+    self.recoveryNewEpisode && self.packetCount > 0
+) -> event ICCP::stream_recovery_started(
+    $conn,
+    $is_orig,
+    self.recoveryCrossedGap
+);
+
+# Native content_gap handlers clear policy state before parser events queued by
+# that delivery. A complete pre-gap Packet may itself have been waiting for the
+# delivery, so clear once more at the exact parser boundary after its delayed
+# hooks and before any recovered Packet hooks. The native cleanup remains
+# necessary when a terminal gap never reaches synchronization. Spicy executes
+# same-hook EVT mappings in reverse declaration order, so keep this mapping
+# after stream_recovery_candidate to queue stream_gap first.
+on ICCP::ICCP_Connection::%synced if (
+    self.recoveryNewGap
+) -> event ICCP::stream_gap(
+    $conn,
+    $is_orig,
+    self.recoveryNewGapBytes
+);
+
+on ICCP::ICCP_Connection::%sync_advance(offset: uint64) if (
+    self.recoveryNewEpisode && self.packetCount > 0
+) -> event ICCP::stream_recovery_started(
+    $conn,
+    $is_orig,
+    self.recoveryCrossedGap
+);
+
+on ICCP::ICCP_Connection::%sync_advance(offset: uint64) if (
+    self.recoveryNewGap
+) -> event ICCP::stream_gap(
+    $conn,
+    $is_orig,
+    self.recoveryNewGapBytes
+);
+
+# Zeek may destroy a TCP analyzer at the end of an offline OTH/no-FIN capture
+# without finalizing a suspended Spicy unit. Publish the record lifecycle while
+# input is being parsed so policy can still recognize a plausible terminal
+# partial record at connection_state_remove. A clean record boundary does not
+# instantiate another Packet, and partial &eod completion is not successful.
+on ICCP_TPKT::Packet::%init -> event ICCP::stream_record_started(
+    $conn,
+    $is_orig
+);
+
+on ICCP_TPKT::Packet::%done if (
+    self.complete
+) -> event ICCP::stream_record_completed(
+    $conn,
+    $is_orig
+);
+
+on ICCP_TPKT::Packet::%done if (
+    self.completedRecovery
+) -> event ICCP::stream_recovered(
+    $conn,
+    $is_orig,
+    self.recoveryCrossedGap
+);
+
+# TPKT exposes the first two captured COTP octets before buffering the
+# advertised record remainder. Publish the conservative transport lifecycle
+# boundary here so stalled/incomplete and reserved-low-nibble candidates clear
+# policy trust at the same point as parser state. The offset/type cache inside
+# Packet ensures a synchronized retry and its later full TPDU emit only once.
+on ICCP_TPKT::Packet::cotpLifecycleMarker if (
+    self.publishCotpLifecycleMarker
+) -> event ICCP::cotp_lifecycle_v1(
+    $conn,
+    $is_orig,
+    self.cotpBoundaryCode
+);
+
+# Publish a transport lifecycle/trust-boundary marker as soon as the TPDU type
+# code is available. Waiting for %done would let a malformed CR/DR/DC, or an ER
+# that this analyzer conservatively treats as a trust boundary,
+# clear parser-side negotiation state while leaving Zeek policy state from the
+# previous transport epoch live. Match the parser's conservative high-nibble
+# boundary rule: a reserved low nibble still invalidates trust, while the
+# normalized event value cannot be mistaken for a successfully decoded TPDU.
+# CC is included because an unobserved/malformed or repeated confirmation also
+# replaces exact trust; a correlated CC only repeats the preceding CR cleanup.
+on ICCP_COTP::TPDU::lifecycleMarker if (
+    self.publishCotpLifecycleMarker &&
+    (
+        (self.code & 0xf0) == 0xe0 ||
+        (self.code & 0xf0) == 0xd0 ||
+        (self.code & 0xf0) == 0x80 ||
+        (self.code & 0xf0) == 0xc0 ||
+        (self.code & 0xf0) == 0x70
+    )
+) -> event ICCP::cotp_lifecycle_v1(
+    $conn,
+    $is_orig,
+    self.code & 0xf0
+);
+
+on ICCP::ICCP_Connection -> event ICCP::connection_message(
+    $conn,
+    $is_orig
+);
+
+# A plausible next TPKT can consume a partial header/body and then wait at the
+# capture boundary without entering synchronization. This mapping is declared
+# after connection_message because same-hook EVT mappings execute in reverse
+# declaration order: completeness must be downgraded before the stream row is
+# built. Streams with no completed packet remain ordinary unconfirmed rejects.
+on ICCP::ICCP_Connection::%done if (
+    self.packetCount > 0 &&
+    self.recoveryState.packetInProgress &&
+    ! self.recoveryState.active
+) -> event ICCP::stream_incomplete(
+    $conn,
+    $is_orig
+);
+
+on ICCP::ICCP_Connection::%error(msg: string) -> event ICCP::parser_error(
+    $conn,
+    msg
+);
+
+on ICCP_COTP::DataTransfer::lifecycleMarker if (
+    self.publishSessionLifecycleMarker
+) -> event ICCP::session_spdu_marker_v1(
+    $conn,
+    $is_orig,
+    self.sessionSpduCode
+);
+
+on ICCP_COTP::DataTransfer::%done if (
+    self.tsduComplete && ! self.sessionFrameSafe
+) -> event ICCP::parser_error(
+    $conn,
+    "COTP TSDU contains an unsafe Session frame; upper-layer dispatch skipped"
+);
+
+on ICCP_SESSION::Data::%done if (
+    self.ssduComplete &&
+    self.presentationLength > 0 &&
+    ! self.presentationFrameSafe
+) -> event ICCP::parser_error(
+    $conn,
+    "Session SSDU contains an unsafe BER Presentation frame; upper-layer dispatch skipped"
+);
+
+# A valid bounded Presentation value emits the pre-child marker below. Control
+# SPDUs with no user data (notably ABORT-ACCEPT) or an unsafe BER envelope have
+# no Presentation child, so emit their marker at Session completion instead.
+on ICCP_SESSION::Data::%done if (
+    self.recognized &&
+    self.ssduComplete &&
+    ! ICCP_SESSION::isAssociationBoundary(self.identifier) &&
+    (self.presentationLength == 0 || ! self.presentationFrameSafe)
+) -> event ICCP::session_spdu_marker_v1(
+    $conn,
+    $is_orig,
+    self.identifier
+);
+
+# Publish the enclosing Session service before any nested ACSE event. This is
+# parser-only context used to distinguish release refusal (NOT-FINISHED) from
+# completed release (DISCONNECT), and to clear state at CONNECT/ABORT even if
+# the nested Presentation value later fails.
+on ICCP_PRESENTATION::Data::%init if (
+    ! ICCP_SESSION::isAssociationBoundary(self.sessionSpduCode)
+) -> event ICCP::session_spdu_marker_v1(
+    $conn,
+    $is_orig,
+    self.sessionSpduCode
+);
+
+on ICCP_PRESENTATION::Data::%done -> event ICCP::presentation_message_v2(
+    $conn,
+    $is_orig,
+    self.recognized,
+    cast<uint64>(self.ppduType),
+    cast<uint64>(self.contextIdentifier),
+    self.abstractSyntax,
+    self.transferSyntax,
+    self.dispatchAcse,
+    self.dispatchMms,
+    self.inferredMms,
+    |self.payload|
+);
+
+# A Presentation value can finish its bounded outer parse while a conditional
+# ACSE/MMS child parser rejects the selected payload. Surface that failed
+# dispatch explicitly; otherwise a malformed midstream MMS lookalike would
+# disappear without either semantic output or a malformed-structure event.
+on ICCP_PRESENTATION::Data::%error(msg: string) -> event ICCP::parser_error(
+    $conn,
+    msg
+);
+
+# Publish the enclosing Session service when ACSE parsing begins.  APDU has
+# not decoded its application tag at this point, so the legacy apdu_type field
+# is UNKNOWN; policy consumers deliberately use only the Session SPDU value.
+# A %init marker has a strict parse-before-completion relationship with the
+# aggregate event below and therefore does not depend on the ordering Spicy
+# chooses for multiple external %done hooks.  parser_error clears the marker
+# when APDU never reaches completion.
+on ICCP_ACSE::APDU::%init -> event ICCP::acse_lifecycle_v1(
+    $conn,
+    $is_orig,
+    255,
+    self.sessionSpduCode
+);
+
+on ICCP_ACSE::APDU::%done -> event ICCP::acse_message(
+    $conn,
+    $is_orig,
+    self.recognized,
+    cast<uint64>(self.apduType),
+    self.applicationContext,
+    self.outcome,
+    self.reason,
+    self.diagnostic,
+    self.authenticationPresent,
+    self.authenticationLength,
+    self.opaqueUserInformation,
+    self.dispatchMms,
+    |self.userPayload|
+);
+
+# Prime direction-scoped provenance before MMSpdu child completion hooks. This
+# removes any dependency on the relative delivery order of the aggregate and
+# additive %done events below.
+on ICCP_MMS::ProvenancedMMSpdu::%init -> event ICCP::mms_provenance_marker_v1(
+    $conn,
+    $is_orig,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 2 &&
+    (
+        cast<uint64>(self.pdu.pduType) == 0 ||
+        cast<uint64>(self.pdu.pduType) == 1
+    )
+) -> event ICCP::mms_identify_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.identifyVendorName,
+    self.pdu.identifyModelName,
+    self.pdu.identifyRevision,
+    self.pdu.identifyAbstractSyntaxCount,
+    self.pdu.identifyFirstAbstractSyntax,
+    self.provenanceCode
+);
+
+# Complete GetNameList evidence. Request-only and response-only fields retain
+# their neutral defaults on the opposite PDU direction.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 1 &&
+    (
+        cast<uint64>(self.pdu.pduType) == 0 ||
+        cast<uint64>(self.pdu.pduType) == 1
+    )
+) -> event ICCP::mms_get_name_list_evidence_v1(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.objectClassChoice,
+    self.pdu.objectClass,
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.continueAfter,
+    self.pdu.identifierCount,
+    self.pdu.getNameListIdentifiers,
+    self.pdu.moreFollows,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done -> event ICCP::mms_message_v2(
+    $conn,
+    $is_orig,
+    self.pdu.recognized,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.semanticDecoded,
+    self.pdu.bodyLength,
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.unconfirmedServiceTag,
+    self.pdu.iccpRequiredService,
+    cast<uint64>(ICCP_TYPES::operationForMms(
+        self.pdu.pduType,
+        self.pdu.serviceTag,
+        self.pdu.unconfirmedServiceTag
+    )),
+    self.pdu.parameterCbb,
+    self.pdu.services,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.objectScope : self.pdu.firstVariableScope,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.objectDomain : self.pdu.firstVariableDomain,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.firstIdentifier : self.pdu.firstVariableName,
+    cast<uint64>(ICCP_TYPES::objectCategory(
+        self.pdu.objectScope,
+        self.pdu.firstIdentifier
+    )),
+    ICCP_TYPES::isTase2ObjectEvidenceForMms(
+        self.pdu.pduType,
+        self.pdu.serviceTag,
+        self.pdu.objectScope,
+        self.pdu.firstIdentifier,
+        self.pdu.firstVariableScope,
+        self.pdu.firstVariableName
+    ),
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    cast<uint64>(ICCP_TYPES::objectCategory(
+        self.pdu.firstVariableScope,
+        self.pdu.firstVariableName
+    )),
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultComponentIntegerCount,
+    self.pdu.firstResultFirstInteger,
+    self.pdu.firstResultSecondInteger,
+    self.pdu.firstResultComponentCount,
+    self.pdu.firstResultFirstChoice,
+    self.pdu.firstResultSecondChoice,
+    self.pdu.firstResultThirdChoice,
+    self.pdu.firstResultIntegerValue,
+    self.pdu.firstResultFloatingValue,
+    self.pdu.firstResultFlagsRaw,
+    self.pdu.firstResultTimestampValue,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (
+        (
+            (cast<uint64>(self.pdu.pduType) == 0 ||
+             cast<uint64>(self.pdu.pduType) == 1) &&
+            (self.pdu.serviceTag == 11 ||
+             self.pdu.serviceTag == 12 ||
+             self.pdu.serviceTag == 13)
+        ) ||
+        (
+            cast<uint64>(self.pdu.pduType) == 3 &&
+            self.pdu.unconfirmedServiceTag == 0
+        )
+    )
+) -> event ICCP::mms_transfer_set_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.unconfirmedServiceTag,
+    self.pdu.accessChoice,
+    self.pdu.namedListScope,
+    self.pdu.namedListDomain,
+    self.pdu.namedListName,
+    self.pdu.variableCount,
+    self.pdu.namedListFirstVariableScope,
+    self.pdu.namedListFirstVariableDomain,
+    self.pdu.namedListFirstVariableName,
+    self.pdu.mmsDeletable,
+    self.pdu.deleteScope,
+    self.pdu.nameCount,
+    self.pdu.numberMatched,
+    self.pdu.numberDeleted,
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.namedListMemberScopes,
+    self.pdu.namedListMemberDomains,
+    self.pdu.namedListMemberNames,
+    self.pdu.reportResultChoices,
+    self.pdu.reportResultErrors,
+    self.pdu.reportResultRaws,
+    self.provenanceCode
+);
+
+# Version 3 is the authoritative policy event for packet-derived
+# NamedVariableList lifecycle state. It carries each member's AlternateAccess
+# node count alongside the member identity and provenance, so policy never
+# joins sibling-hook state.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1) &&
+    (self.pdu.serviceTag == 11 ||
+     self.pdu.serviceTag == 12 ||
+     self.pdu.serviceTag == 13)
+) -> event ICCP::mms_transfer_set_message_v3(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.unconfirmedServiceTag,
+    self.pdu.accessChoice,
+    self.pdu.namedListScope,
+    self.pdu.namedListDomain,
+    self.pdu.namedListName,
+    self.pdu.variableCount,
+    self.pdu.namedListFirstVariableScope,
+    self.pdu.namedListFirstVariableDomain,
+    self.pdu.namedListFirstVariableName,
+    self.pdu.mmsDeletable,
+    self.pdu.deleteScope,
+    self.pdu.nameCount,
+    self.pdu.numberMatched,
+    self.pdu.numberDeleted,
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.namedListMemberScopes,
+    self.pdu.namedListMemberDomains,
+    self.pdu.namedListMemberNames,
+    self.pdu.namedListMemberAlternateAccessCounts,
+    self.pdu.reportResultChoices,
+    self.pdu.reportResultErrors,
+    self.pdu.reportResultRaws,
+    self.provenanceCode
+);
+
+# Retain the original packet event for external consumers. For confirmed
+# NamedVariableList services, internal policy recognizes it as the sibling of
+# the authoritative v3 event by immutable parser sequence and processes the
+# PDU only once. InformationReport remains owned by this legacy event.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (
+        (
+            (cast<uint64>(self.pdu.pduType) == 0 ||
+             cast<uint64>(self.pdu.pduType) == 1) &&
+            (self.pdu.serviceTag == 11 ||
+             self.pdu.serviceTag == 12 ||
+             self.pdu.serviceTag == 13)
+        ) ||
+        (
+            cast<uint64>(self.pdu.pduType) == 3 &&
+            self.pdu.unconfirmedServiceTag == 0
+        )
+    )
+) -> event ICCP::mms_transfer_set_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.unconfirmedServiceTag,
+    self.pdu.accessChoice,
+    self.pdu.namedListScope,
+    self.pdu.namedListDomain,
+    self.pdu.namedListName,
+    self.pdu.variableCount,
+    self.pdu.namedListFirstVariableScope,
+    self.pdu.namedListFirstVariableDomain,
+    self.pdu.namedListFirstVariableName,
+    self.pdu.mmsDeletable,
+    self.pdu.deleteScope,
+    self.pdu.nameCount,
+    self.pdu.numberMatched,
+    self.pdu.numberDeleted,
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.namedListMemberScopes,
+    self.pdu.namedListMemberDomains,
+    self.pdu.namedListMemberNames,
+    self.pdu.reportResultChoices,
+    self.pdu.reportResultErrors,
+    self.pdu.reportResultRaws
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1) &&
+    (self.pdu.serviceTag == 4 || self.pdu.serviceTag == 5)
+) -> event ICCP::mms_control_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.objectScope : self.pdu.firstVariableScope,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.objectDomain : self.pdu.firstVariableDomain,
+    self.pdu.serviceTag == 5 ?
+        self.pdu.firstIdentifier : self.pdu.firstVariableName,
+    self.pdu.variableCount,
+    self.pdu.dataCount,
+    self.pdu.dataNodeCount,
+    self.pdu.resultCount,
+    self.pdu.successCount,
+    self.pdu.failureCount,
+    self.provenanceCode
+);
+
+# Complete ordered Write evidence. For explicit variable lists, selector_* is
+# the first entry and target_* contains every entry in wire order. For a named
+# list, selector_* names that list, target_count_known is false, and the target
+# vectors are empty because list membership is association/server state.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 5 &&
+    (
+        cast<uint64>(self.pdu.pduType) == 0 ||
+        cast<uint64>(self.pdu.pduType) == 1
+    )
+) -> event ICCP::mms_write_evidence_v1(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.accessChoice,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.writeTargetCountKnown,
+    self.pdu.writeTargetCount,
+    self.pdu.writeValueCount,
+    self.pdu.writeTargetScopes,
+    self.pdu.writeTargetDomains,
+    self.pdu.writeTargetNames,
+    self.pdu.writeValueChoices,
+    self.pdu.writeValueRaws,
+    self.pdu.writeValueIntegerValues,
+    self.pdu.writeValueFloatingValues,
+    self.pdu.writeValueBooleanValues,
+    self.pdu.writeValueStringValues,
+    self.pdu.resultCount,
+    self.pdu.writeResultSuccesses,
+    self.pdu.writeResultErrors,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 5 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_transfer_control_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.accessChoice,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.variableCount,
+    self.pdu.dataCount,
+    self.pdu.writeFirstDataChoice,
+    self.pdu.writeFirstDataBoolean,
+    self.pdu.writeFirstDataChildCount,
+    self.pdu.writeFirstDataTwelfthChoice,
+    self.pdu.writeFirstDataTwelfthBoolean,
+    self.pdu.writeFirstDataDSTransferSetShape,
+    self.pdu.resultCount,
+    self.pdu.successCount,
+    self.pdu.failureCount,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 6 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_gva_message_v3(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.firstIdentifier,
+    cast<uint64>(self.pdu.pduType) == 1,
+    self.pdu.mmsDeletable,
+    self.pdu.typeDescriptionUnresolvedNameCount == 0,
+    self.pdu.typeDescriptionUnresolvedNameCount,
+    self.pdu.typeDescriptionSignatureChoices,
+    self.pdu.typeDescriptionSignaturePrimary,
+    self.pdu.typeDescriptionSignatureSecondary,
+    self.pdu.typeDescriptionSignatureChildCounts,
+    self.pdu.typeDescriptionSignaturePacked,
+    self.pdu.typeDescriptionRaw,
+    self.pdu.typeDescriptionNodeCount,
+    self.pdu.typeDescriptionMaximumDepth,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 6 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_variable_type_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.firstIdentifier,
+    self.pdu.typeChoice,
+    self.pdu.typeNameScope,
+    self.pdu.typeNameDomain,
+    self.pdu.typeNameItem,
+    self.provenanceCode
+);
+
+# The GetVariableAccessAttributes response's complete top-level
+# TypeDescription evidence, including bounded recursive shape metrics.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 6 &&
+    cast<uint64>(self.pdu.pduType) == 1
+) -> event ICCP::mms_type_description_evidence_v1(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.typeChoice,
+    self.pdu.typeDescriptionConstructed,
+    self.pdu.typeDescriptionSignedValue,
+    self.pdu.typeDescriptionBooleanValue,
+    self.pdu.typeDescriptionFormatWidth,
+    self.pdu.typeDescriptionExponentWidth,
+    self.pdu.typeDescriptionRaw,
+    self.pdu.typeDescriptionPacked,
+    self.pdu.typeDescriptionNumberOfElements,
+    self.pdu.typeDescriptionComponentCount,
+    self.pdu.typeDescriptionNodeCount,
+    self.pdu.typeDescriptionMaximumDepth,
+    self.provenanceCode
+);
+
+# Self-contained Read evidence prevents a named-variable-list ObjectName from
+# being mistaken for the first explicit variable by aggregate policy hooks.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 4 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_read_message_v3(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.accessChoice,
+    self.pdu.variableCount,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    cast<uint64>(ICCP_TYPES::objectCategory(
+        self.pdu.firstVariableScope,
+        self.pdu.firstVariableName
+    )),
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultComponentIntegerCount,
+    self.pdu.firstResultFirstInteger,
+    self.pdu.firstResultSecondInteger,
+    self.pdu.firstResultComponentCount,
+    self.pdu.firstResultFirstChoice,
+    self.pdu.firstResultSecondChoice,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 4 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_transfer_support_value_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultComponentCount,
+    self.pdu.firstResultFirstChoice,
+    self.pdu.firstResultSecondChoice,
+    self.pdu.firstResultThirdChoice,
+    self.pdu.firstResultIntegerValue,
+    self.pdu.firstResultFlagsRaw,
+    self.pdu.firstResultThirdRaw,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 2
+) -> event ICCP::mms_error_message_v2(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.modifierPosition,
+    self.pdu.errorClass,
+    self.pdu.errorCode,
+    self.pdu.additionalCode,
+    self.pdu.additionalDescription,
+    self.provenanceCode
+);
+
+# Reject invoke-ID direction depends on its reason alternative. Preserve the
+# reason tag at the parser boundary so policy cannot accidentally retire an
+# unrelated opposite-direction request with the same numeric invoke ID.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 4
+) -> event ICCP::mms_reject_message_v1(
+    $conn,
+    $is_orig,
+    self.pdu.invokeId,
+    self.pdu.rejectReasonTag,
+    self.pdu.rejectReason,
+    self.provenanceCode
+);
+
+# Keep the original events at the parser boundary.  Versioned events carry
+# provenance and richer evidence directly, while these retain legacy arguments
+# and timing.  Policy consumers tolerate either relative sibling-hook order.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 3 &&
+    self.pdu.unconfirmedServiceTag == 0
+) -> event ICCP::mms_information_report_results_v2(
+    $conn, $is_orig, self.pdu.accessChoice, self.pdu.namedListScope,
+    self.pdu.namedListDomain, self.pdu.namedListName,
+    self.pdu.resultCount, self.pdu.failureCount,
+    self.pdu.reportVariableScopes, self.pdu.reportVariableDomains,
+    self.pdu.reportVariableNames, self.pdu.reportResultChoices,
+    self.pdu.reportResultErrors, self.pdu.reportResultRaws,
+    self.pdu.reportResultIntegerValues,
+    self.pdu.reportResultFloatingValues,
+    self.pdu.reportResultBooleanValues,
+    self.pdu.reportResultStringValues, self.provenanceCode
+);
+
+# Emit exact Write-value evidence for the legacy control event.  The policy
+# correlates it by parser sequence and defers classification until all sibling
+# completion hooks have delivered, so declaration order is not significant.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 0 &&
+    self.pdu.serviceTag == 5
+) -> event ICCP::mms_control_value_shape_v4(
+    $conn,
+    $is_orig,
+    self.pdu.writeFirstDataChoice,
+    self.pdu.writeFirstDataRaw,
+    self.pdu.writeFirstDataIntegerValue,
+    self.pdu.writeFirstDataFloatingValue,
+    self.pdu.writeComponentChoices,
+    self.pdu.writeComponentRaws,
+    self.pdu.writeComponentIntegerValues
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 0 &&
+    self.pdu.serviceTag == 5
+) -> event ICCP::mms_control_value_shape_v3(
+    $conn,
+    $is_orig,
+    self.pdu.writeFirstDataChoice,
+    self.pdu.writeFirstDataRaw,
+    self.pdu.writeFirstDataIntegerValue,
+    self.pdu.writeFirstDataFloatingValue
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1) &&
+    (self.pdu.serviceTag == 4 || self.pdu.serviceTag == 5)
+) -> event ICCP::mms_control_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    # These aggregate ObjectName fields are populated for an explicit Write
+    # target, but remain empty for a NamedVariableList selector. The complete
+    # selector is retained by mms_write_evidence_v1 above.
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.firstIdentifier,
+    self.pdu.variableCount,
+    self.pdu.dataCount,
+    self.pdu.dataNodeCount,
+    self.pdu.resultCount,
+    self.pdu.successCount,
+    self.pdu.failureCount
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 5 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_transfer_control_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.accessChoice,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.variableCount,
+    self.pdu.dataCount,
+    self.pdu.writeFirstDataChoice,
+    self.pdu.writeFirstDataBoolean,
+    self.pdu.writeFirstDataChildCount,
+    self.pdu.writeFirstDataTwelfthChoice,
+    self.pdu.writeFirstDataTwelfthBoolean,
+    self.pdu.writeFirstDataDSTransferSetShape,
+    self.pdu.resultCount,
+    self.pdu.successCount,
+    self.pdu.failureCount
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 6 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_variable_type_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.firstIdentifier,
+    self.pdu.typeChoice,
+    self.pdu.typeNameScope,
+    self.pdu.typeNameDomain,
+    self.pdu.typeNameItem
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded && self.pdu.serviceTag == 4 &&
+    (cast<uint64>(self.pdu.pduType) == 0 ||
+     cast<uint64>(self.pdu.pduType) == 1)
+) -> event ICCP::mms_transfer_support_value_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.resultCount,
+    self.pdu.failureCount,
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultComponentCount,
+    self.pdu.firstResultFirstChoice,
+    self.pdu.firstResultSecondChoice,
+    self.pdu.firstResultThirdChoice,
+    self.pdu.firstResultIntegerValue,
+    self.pdu.firstResultFlagsRaw,
+    self.pdu.firstResultThirdRaw
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 2
+) -> event ICCP::mms_error_message(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.modifierPosition,
+    self.pdu.errorClass,
+    self.pdu.errorCode,
+    self.pdu.additionalCode,
+    self.pdu.additionalDescription
+);
+
+# Keep the aggregate compatibility event after the additive hooks for runtimes
+# that preserve declaration order. Policy code also handles the opposite order
+# because completion-hook delivery order is not an API contract.
+on ICCP_MMS::ProvenancedMMSpdu::%done -> event ICCP::mms_message(
+    $conn,
+    $is_orig,
+    self.pdu.recognized,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.semanticDecoded,
+    self.pdu.bodyLength,
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.unconfirmedServiceTag,
+    self.pdu.iccpRequiredService,
+    cast<uint64>(ICCP_TYPES::operationForMms(
+        self.pdu.pduType,
+        self.pdu.serviceTag,
+        self.pdu.unconfirmedServiceTag
+    )),
+    self.pdu.parameterCbb,
+    self.pdu.services,
+    self.pdu.objectScope,
+    self.pdu.objectDomain,
+    self.pdu.firstIdentifier,
+    cast<uint64>(ICCP_TYPES::objectCategory(
+        self.pdu.objectScope,
+        self.pdu.firstIdentifier
+    )),
+    ICCP_TYPES::isTase2ObjectEvidenceForMms(
+        self.pdu.pduType,
+        self.pdu.serviceTag,
+        self.pdu.objectScope,
+        self.pdu.firstIdentifier,
+        self.pdu.firstVariableScope,
+        self.pdu.firstVariableName
+    ),
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    cast<uint64>(ICCP_TYPES::objectCategory(
+        self.pdu.firstVariableScope,
+        self.pdu.firstVariableName
+    )),
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultComponentIntegerCount,
+    self.pdu.firstResultFirstInteger,
+    self.pdu.firstResultSecondInteger,
+    self.pdu.firstResultComponentCount,
+    self.pdu.firstResultFirstChoice,
+    self.pdu.firstResultSecondChoice,
+    self.pdu.firstResultThirdChoice,
+    self.pdu.firstResultIntegerValue,
+    self.pdu.firstResultFloatingValue,
+    self.pdu.firstResultFlagsRaw,
+    self.pdu.firstResultTimestampValue
+);
+
+# Rich value-shape hooks are correlated by parser sequence.  Aggregate policy
+# defers the applicable parser families until all sibling completion hooks have
+# delivered, and the v2/v3 evidence handlers merge correctly in either order.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (
+        (cast<uint64>(self.pdu.pduType) == 1 &&
+         self.pdu.serviceTag == 4) ||
+        (cast<uint64>(self.pdu.pduType) == 3 &&
+         self.pdu.unconfirmedServiceTag == 0)
+    )
+) -> event ICCP::mms_point_value_shape_v2(
+    $conn, $is_orig, |self.pdu.firstResultRaw|,
+    |self.pdu.firstResultFirstRaw|, |self.pdu.firstResultSecondRaw|,
+    |self.pdu.firstResultThirdRaw|
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    (
+        (cast<uint64>(self.pdu.pduType) == 1 &&
+         self.pdu.serviceTag == 4) ||
+        (cast<uint64>(self.pdu.pduType) == 3 &&
+         self.pdu.unconfirmedServiceTag == 0)
+    )
+) -> event ICCP::mms_point_value_shape_v3(
+    $conn, $is_orig, |self.pdu.firstResultRaw|,
+    self.pdu.pointComponentChoices, self.pdu.pointComponentRaws,
+    self.pdu.pointComponentIntegerValues,
+    self.pdu.pointNestedComponentIndex, self.pdu.pointNestedChoices,
+    self.pdu.pointNestedRaws, self.pdu.pointNestedIntegerValues
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 1 && self.pdu.serviceTag == 4
+) -> event ICCP::mms_control_read_value_shape_v1(
+    $conn, $is_orig, cast<uint64>(self.pdu.pduType), self.pdu.invokeId,
+    self.pdu.serviceTag, |self.pdu.firstResultRaw|,
+    self.pdu.pointComponentChoices, self.pdu.pointComponentRaws,
+    self.pdu.pointComponentIntegerValues
+);
+
+# Emit self-contained DSTransferSet evidence for the same Write represented by
+# the compatibility transfer-control hook.  Policy requires these exact
+# components instead of treating the coarse 13-component shape as sufficient;
+# neither handler consumes the other's event.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 0 && self.pdu.serviceTag == 5 &&
+    self.pdu.writeFirstDataChoice == 2
+) -> event ICCP::mms_ds_transfer_set_message_v1(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.accessChoice,
+    self.pdu.firstVariableScope,
+    self.pdu.firstVariableDomain,
+    self.pdu.firstVariableName,
+    self.pdu.variableCount,
+    self.pdu.dataCount,
+    self.pdu.writeFirstDataChoice,
+    self.pdu.writeComponentChoices,
+    self.pdu.writeComponentRaws,
+    self.pdu.writeComponentIntegerValues,
+    self.pdu.writeNestedComponentChoices,
+    self.pdu.writeNestedComponentRaws,
+    self.pdu.writeNestedComponentIntegerValues,
+    self.provenanceCode
+);
+
+# Device-action evidence is self-contained and carries its provenance directly.
+# Its relative delivery order with the aggregate compatibility event, and thus
+# cross-log row interleaving, is intentionally unspecified.
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 3 &&
+    self.pdu.unconfirmedServiceTag == 2
+) -> event ICCP::mms_device_action_message_v1(
+    $conn,
+    $is_orig,
+    self.pdu.eventEnrollmentScope,
+    self.pdu.eventEnrollmentDomain,
+    self.pdu.eventEnrollmentName,
+    self.pdu.eventConditionScope,
+    self.pdu.eventConditionDomain,
+    self.pdu.eventConditionName,
+    self.pdu.eventSeverity,
+    self.pdu.eventCurrentStatePresent,
+    self.pdu.eventCurrentState,
+    self.pdu.eventTransitionTimeChoice,
+    self.pdu.eventTransitionTimeRaw,
+    self.pdu.eventTransitionTimeSequenceIdentifier,
+    self.pdu.eventNotificationLost,
+    self.pdu.eventAlarmAcknowledgmentRulePresent,
+    self.pdu.eventAlarmAcknowledgmentRule,
+    self.pdu.eventActionResultPresent,
+    self.provenanceCode
+);

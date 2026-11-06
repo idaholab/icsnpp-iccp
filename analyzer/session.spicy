@@ -1,0 +1,537 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses and reassembles the OSI Session layer used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_SESSION;
+
+import spicy;
+import ICCP_BER;
+import ICCP_PRESENTATION;
+
+const MAX_PARAMETER_DEPTH: uint64 = 4;
+const MAX_PARAMETER_COUNT: uint64 = 256;
+const MAX_PRESENTATION_PAYLOAD: uint64 = 16 * 1024 * 1024;
+const MAX_SSDU_FRAGMENTS: uint64 = 256;
+
+public type SPDUType = enum {
+    DATA_TRANSFER = 1,
+    NOT_FINISHED = 8,
+    FINISH = 9,
+    DISCONNECT = 10,
+    REFUSE = 12,
+    CONNECT = 13,
+    ACCEPT = 14,
+    ABORT = 25,
+    ABORT_ACCEPT = 26
+};
+
+public type ParseState = struct {
+    parameterDepth: uint64;
+    parameterCount: uint64;
+};
+
+public type ReassemblyState = struct {
+    pending: bytes;
+    fragmentCount: uint64;
+    active: bool;
+};
+
+public type LengthIndicator = unit {
+    first: uint8;
+    extended: uint16 if (self.first == 255);
+
+    var value: uint64;
+    var encodedOctets: uint64 = 1;
+
+    on %done {
+        if (self.first == 255) {
+            if (self.extended < 255)
+                throw "Session extended length is not minimally encoded";
+
+            self.value = self.extended;
+            self.encodedOctets = 3;
+        }
+        else
+            self.value = self.first;
+    }
+};
+
+public type Parameter = unit(state: ParseState&) {
+    on %init {
+        state.parameterCount += 1;
+        if (state.parameterCount > MAX_PARAMETER_COUNT)
+            throw "Session parameter count exceeds configured limit";
+    }
+
+    code: uint8;
+    length: LengthIndicator;
+
+    var value: bytes;
+
+    switch (self.code) {
+        # Connection Identifier and Connect/Accept Item are PGI units whose
+        # parameter fields contain nested PI units.
+        1,
+        5 -> group: ParameterList(self.length.value, state);
+
+        * -> raw: bytes &size=self.length.value {
+            self.value = $$;
+        }
+    };
+};
+
+public type ParameterList = unit(length: uint64, state: ParseState&) {
+    var parameterCount: uint64 = 0;
+    var lastCode: uint8 = 0;
+    var haveCode: bool = False;
+    var userData: bytes;
+    var haveUserData: bool = False;
+    var enclosure: uint8 = 0;
+    var haveEnclosure: bool = False;
+
+    on %init {
+        state.parameterDepth += 1;
+        if (state.parameterDepth > MAX_PARAMETER_DEPTH)
+            throw "Session parameter groups exceed configured depth limit";
+    }
+
+    parameters: Parameter(state)[] &eod foreach {
+        if (self.haveCode && $$.code < self.lastCode)
+            throw "Session parameters are not in increasing code order";
+
+        self.lastCode = $$.code;
+        self.haveCode = True;
+        self.parameterCount += 1;
+
+        if ($$.code == 193 || $$.code == 194) {
+            if (self.haveUserData)
+                throw "Session SPDU contains multiple user-data parameters";
+
+            self.userData = $$.value;
+            self.haveUserData = True;
+        }
+
+        if ($$.code == 25) {
+            if (self.haveEnclosure)
+                throw "Session SPDU contains multiple enclosure items";
+
+            if (|$$.value| != 1)
+                throw "Session enclosure item must contain one octet";
+
+            self.enclosure = *$$.value.at(0);
+            if (self.enclosure > 3)
+                throw "Session enclosure item contains reserved bits";
+
+            self.haveEnclosure = True;
+        }
+    }
+
+    on %done {
+        state.parameterDepth -= 1;
+    }
+} &size=length;
+
+function hasConcatenatedDataTransfer(value: bytes): bool {
+    if (|value| < 2)
+        return False;
+
+    return *value.at(0) == 1;
+}
+
+function isSupportedControlSpdu(identifier: uint8): bool {
+    switch (identifier) {
+        case 8, 9, 10, 12, 13, 14, 25, 26:
+            return True;
+        default:
+            return False;
+    }
+}
+
+# Return the encoded width of a Session length indicator, or zero when the
+# indicator is truncated or non-minimal. This preflight is intentionally
+# independent of the parsing units below so a malformed detached &parse-from
+# view cannot abort TPKT synchronization with a runtime range exception.
+function safeLengthOctets(value: bytes, offset: uint64): uint64 {
+    if (offset >= |value|)
+        return 0;
+
+    local first = *value.at(offset);
+    if (first != 255)
+        return 1;
+
+    if (offset + 3 > |value|)
+        return 0;
+
+    local length =
+        (uint64(*value.at(offset + 1)) << 8) |
+        uint64(*value.at(offset + 2));
+    if (length < 255)
+        return 0;
+
+    return 3;
+}
+
+function safeLengthValue(value: bytes, offset: uint64): uint64 {
+    local octets = safeLengthOctets(value, offset);
+    if (octets == 0)
+        return 0;
+
+    local first = *value.at(offset);
+    if (octets == 1)
+        return uint64(first);
+
+    return
+        (uint64(*value.at(offset + 1)) << 8) |
+        uint64(*value.at(offset + 2));
+}
+
+function parameterListIsSafe(
+    value: bytes, start: uint64, length: uint64, depth: uint64,
+    count: uint64&
+): bool {
+    if (depth > MAX_PARAMETER_DEPTH || start > |value|)
+        return False;
+    if (length > |value| - start)
+        return False;
+
+    local limit = start + length;
+    local offset = start;
+    local lastCode: uint8 = 0;
+    local haveCode = False;
+    local haveUserData = False;
+    local haveEnclosure = False;
+
+    while (offset < limit) {
+        if (offset + 2 > limit)
+            return False;
+
+        local code = *value.at(offset);
+        local lengthOffset = offset + 1;
+        local lengthOctets = safeLengthOctets(value, lengthOffset);
+        if (lengthOctets == 0 || lengthOffset + lengthOctets > limit)
+            return False;
+
+        local parameterLength = safeLengthValue(value, lengthOffset);
+        local parameterStart = lengthOffset + lengthOctets;
+        if (parameterLength > limit - parameterStart)
+            return False;
+
+        if (haveCode && code < lastCode)
+            return False;
+
+        if (code == 193 || code == 194) {
+            if (haveUserData)
+                return False;
+            haveUserData = True;
+        }
+
+        if (code == 25) {
+            if (haveEnclosure || parameterLength != 1)
+                return False;
+            if (*value.at(parameterStart) > 3)
+                return False;
+            haveEnclosure = True;
+        }
+
+        *count += 1;
+        if (*count > MAX_PARAMETER_COUNT)
+            return False;
+
+        if (
+            (code == 1 || code == 5) &&
+            ! parameterListIsSafe(
+                value, parameterStart, parameterLength, depth + 1, count
+            )
+        )
+            return False;
+
+        lastCode = code;
+        haveCode = True;
+        offset = parameterStart + parameterLength;
+    }
+
+    return offset == limit;
+}
+
+public function frameIsSafe(value: bytes): bool {
+    if (|value| < 2)
+        return False;
+
+    local identifier = *value.at(0);
+    local lengthOctets = safeLengthOctets(value, 1);
+    if (lengthOctets == 0)
+        return False;
+
+    local parameterLength = safeLengthValue(value, 1);
+    local parameterStart = 1 + lengthOctets;
+    local parameterCount: uint64& = new uint64;
+    if (parameterLength > |value| - parameterStart)
+        return False;
+    if (! parameterListIsSafe(
+        value, parameterStart, parameterLength, 1, parameterCount
+    ))
+        return False;
+
+    local remainderStart = parameterStart + parameterLength;
+    if (
+        identifier != 1 &&
+        isSupportedControlSpdu(identifier) &&
+        remainderStart != |value|
+    )
+        return False;
+
+    # A concatenated Data Transfer has its own identifier, length indicator,
+    # and parameter list before the user information.
+    if (
+        identifier == 1 &&
+        remainderStart < |value| &&
+        *value.at(remainderStart) == 1
+    ) {
+        local tailLengthOffset = remainderStart + 1;
+        local tailLengthOctets = safeLengthOctets(value, tailLengthOffset);
+        if (tailLengthOctets == 0)
+            return False;
+
+        local tailParameterLength =
+            safeLengthValue(value, tailLengthOffset);
+        local tailParameterStart = tailLengthOffset + tailLengthOctets;
+        if (tailParameterLength > |value| - tailParameterStart)
+            return False;
+        if (! parameterListIsSafe(
+            value, tailParameterStart, tailParameterLength, 1,
+            parameterCount
+        ))
+            return False;
+    }
+
+    return True;
+}
+
+public function isAssociationBoundary(identifier: uint8): bool {
+    return (
+        identifier == 10 ||
+        identifier == 12 ||
+        identifier == 13 ||
+        identifier == 25 ||
+        identifier == 26
+    );
+}
+
+public type DataTransferTail = unit(state: ParseState&) {
+    identifier: uint8 &requires=self.identifier == 1;
+    length: LengthIndicator;
+    parameters: ParameterList(self.length.value, state);
+    userInformation: bytes &eod;
+};
+
+# One complete Session TSDU supplied by COTP reassembly.
+public type Data = unit(
+    reassembly: ReassemblyState&,
+    presentationState: ICCP_PRESENTATION::State&
+) {
+    var state: ParseState& = new ParseState;
+    # Keep each Session TSDU's Presentation mutations transactional. This is
+    # especially important for ABORT: its ARU may consult the pre-abort
+    # contexts, while the shared state must be cleared even if its nested PPDU
+    # later proves malformed.
+    var presentationWorkingState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    on %init {
+        self.presentationWorkingState.contexts = presentationState.contexts;
+        self.presentationWorkingState.nextResult = presentationState.nextResult;
+        self.presentationWorkingState.unmatchedResults =
+            presentationState.unmatchedResults;
+    }
+    var presentationPayload: bytes;
+    var presentationLength: uint64 = 0;
+    var parameterCount: uint64 = 0;
+    var concatenatedDataTransfer: bool = False;
+    var recognized: bool = False;
+    var segmented: bool = False;
+    var ssduComplete: bool = False;
+    var enclosure: uint8 = 3;
+    var fragmentCount: uint64 = 0;
+    var presentationFrameSafe: bool = False;
+
+    identifier: uint8 {
+        # These SPDUs replace or terminate the Session/Presentation
+        # association.  Invalidate the shared contexts as soon as the SPDU
+        # identifier is available so a malformed parameter list or nested
+        # Presentation value cannot leave an earlier association authorized.
+        if (isAssociationBoundary($$)) {
+            reassembly.pending = b"";
+            reassembly.fragmentCount = 0;
+            reassembly.active = False;
+            ICCP_PRESENTATION::resetContextNegotiation(presentationState);
+        }
+    }
+    length: LengthIndicator;
+    parameters: ParameterList(self.length.value, self.state) {
+        self.parameterCount = $$.parameterCount;
+    }
+
+    remainder: bytes &eod;
+
+    concatenated: DataTransferTail(self.state) &parse-from=self.remainder
+        if (
+            self.identifier == 1 &&
+            hasConcatenatedDataTransfer(self.remainder)
+        );
+
+    : void {
+        local fragment: bytes;
+        local haveEnclosure = self.parameters.haveEnclosure;
+        local fragmentEnclosure = self.parameters.enclosure;
+
+        if (self.identifier == 1) {
+            self.recognized = True;
+
+            if (self?.concatenated) {
+                self.concatenatedDataTransfer = True;
+                fragment = self.concatenated.userInformation;
+                haveEnclosure = self.concatenated.parameters.haveEnclosure;
+                fragmentEnclosure = self.concatenated.parameters.enclosure;
+            }
+            else
+                fragment = self.remainder;
+        }
+        else if (isSupportedControlSpdu(self.identifier)) {
+            self.recognized = True;
+
+            if (|self.remainder| != 0)
+                throw "Session control SPDU has bytes outside its parameter field";
+
+            if (self.parameters.haveUserData)
+                fragment = self.parameters.userData;
+        }
+
+        if (haveEnclosure) {
+            self.enclosure = fragmentEnclosure;
+            self.segmented = self.enclosure != 3;
+
+            local isBegin = (self.enclosure & 1) != 0;
+            local isEnd = (self.enclosure & 2) != 0;
+
+            if (isBegin && isEnd) {
+                if (reassembly.active)
+                    throw "Session unsegmented SSDU interrupts segmented SSDU";
+
+                self.presentationPayload = fragment;
+                self.ssduComplete = True;
+                self.fragmentCount = 1;
+            }
+            else {
+                if (isBegin) {
+                    if (reassembly.active)
+                        throw "Session segmented SSDU has multiple begin fragments";
+
+                    reassembly.pending = b"";
+                    reassembly.fragmentCount = 0;
+                    reassembly.active = True;
+                }
+                else if (! reassembly.active)
+                    throw "Session segmented SSDU continuation has no begin fragment";
+
+                if (
+                    |reassembly.pending| + |fragment| >
+                    MAX_PRESENTATION_PAYLOAD
+                )
+                    throw "Session SSDU exceeds configured reassembly length limit";
+
+                reassembly.pending += fragment;
+                reassembly.fragmentCount += 1;
+
+                if (reassembly.fragmentCount > MAX_SSDU_FRAGMENTS)
+                    throw "Session SSDU exceeds configured fragment limit";
+
+                self.fragmentCount = reassembly.fragmentCount;
+
+                if (isEnd) {
+                    self.presentationPayload = reassembly.pending;
+                    self.ssduComplete = True;
+                    reassembly.pending = b"";
+                    reassembly.fragmentCount = 0;
+                    reassembly.active = False;
+                }
+            }
+        }
+        else {
+            if (reassembly.active)
+                throw "Session segmented SSDU fragment is missing an enclosure item";
+
+            self.presentationPayload = fragment;
+            self.ssduComplete = self.recognized;
+            if (self.recognized)
+                self.fragmentCount = 1;
+        }
+
+        if (|self.presentationPayload| > MAX_PRESENTATION_PAYLOAD)
+            throw "Session presentation payload exceeds configured limit";
+
+        self.presentationLength = |self.presentationPayload|;
+        if (self.presentationLength > 0)
+            self.presentationFrameSafe =
+                ICCP_BER::tlvEnvelopeIsSafe(self.presentationPayload);
+
+        # CONNECT starts a new Presentation connection even with no CP user
+        # data.  The shared state was invalidated at the identifier boundary;
+        # this private reset prevents the pre-boundary snapshot from being
+        # committed by a successful replacement CP that omits its context
+        # definition list.
+        if (self.identifier == 13)
+            ICCP_PRESENTATION::resetContextNegotiation(
+                self.presentationWorkingState);
+    }
+
+    presentation: ICCP_PRESENTATION::Data(
+            self.presentationWorkingState, self.identifier)
+        &parse-from=self.presentationPayload
+        if (
+            self.ssduComplete &&
+            self.presentationFrameSafe
+        );
+
+    on %done {
+        # Terminal Session SPDUs may carry Presentation diagnostics decoded
+        # against the pre-boundary snapshot, but they must never restore that
+        # snapshot to the live connection state.
+        if (
+            self.identifier != 10 &&
+            self.identifier != 12 &&
+            self.identifier != 25 &&
+            self.identifier != 26
+        ) {
+            presentationState.contexts =
+                self.presentationWorkingState.contexts;
+            presentationState.nextResult =
+                self.presentationWorkingState.nextResult;
+            presentationState.unmatchedResults =
+                self.presentationWorkingState.unmatchedResults;
+        }
+    }
+
+    on %finally {
+        # Boundary SPDUs must not leave a newly-created partial SSDU behind
+        # after their identifier hook invalidated the prior association.  In
+        # particular, a malformed or incomplete CONNECT/REFUSE/DISCONNECT/
+        # ABORT cannot authorize a later DATA continuation.  Session control
+        # overflow variants are outside this analyzer's supported profile.
+        if (
+            self?.identifier &&
+            isAssociationBoundary(self.identifier)
+        ) {
+            reassembly.pending = b"";
+            reassembly.fragmentCount = 0;
+            reassembly.active = False;
+        }
+    }
+};

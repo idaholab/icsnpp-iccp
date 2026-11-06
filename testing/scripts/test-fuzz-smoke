@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+corpus="${project_dir}/testing/fuzz/stack-regressions.tsv"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/iccp-fuzz-tests.XXXXXX")"
+plugin="${ICCP_FUZZ_TEST_PLUGIN:-}"
+diagnostic_dir="${test_root}/diagnostics"
+
+cleanup() {
+    rm -rf -- "${test_root}"
+}
+trap cleanup EXIT
+
+mkdir -p "${diagnostic_dir}"
+
+if [[ -n "${plugin}" ]]; then
+    if [[ ! -f "${plugin}" || ! -O "${plugin}" || -L "${plugin}" ]]; then
+        echo "ICCP_FUZZ_TEST_PLUGIN must be a user-owned regular file" >&2
+        exit 2
+    fi
+    plugin="$(realpath -e -- "${plugin}")"
+else
+    plugin="${test_root}/transport-tests.hlto"
+    export HILTI_JIT_PARALLELISM="${HILTI_JIT_PARALLELISM:-2}"
+    spicyc -j -o "${plugin}" \
+        "${project_dir}/testing/spicy/transport_driver.spicy" \
+        "${project_dir}/analyzer/tpkt.spicy" \
+        "${project_dir}/analyzer/cotp.spicy" \
+        "${project_dir}/analyzer/session.spicy" \
+        "${project_dir}/analyzer/presentation.spicy" \
+        "${project_dir}/analyzer/acse.spicy" \
+        "${project_dir}/analyzer/mms.spicy" \
+        "${project_dir}/analyzer/mms_types.spicy" \
+        "${project_dir}/analyzer/ber.spicy"
+fi
+
+campaign_count=0
+accepted_mutation_count=0
+parsed_mutation_count=0
+rejected_mutation_count=0
+driver_status=0
+
+run_driver() {
+    local hex_input="$1"
+    local increment="$2"
+    local diagnostic="$3"
+
+    set +e
+    if [[ "${increment}" -eq 0 ]]; then
+        {
+            printf '%s' "${hex_input}" | xxd -r -p |
+                timeout --kill-after=1s 3s spicy-driver \
+                    -p ICCP_TRANSPORT_TEST::StreamCase "${plugin}"
+        } >"${diagnostic}" 2>&1
+    else
+        {
+            printf '%s' "${hex_input}" | xxd -r -p |
+                timeout --kill-after=1s 3s spicy-driver -i "${increment}" \
+                    -p ICCP_TRANSPORT_TEST::StreamCase "${plugin}"
+        } >"${diagnostic}" 2>&1
+    fi
+    driver_status=$?
+    set -e
+}
+
+report_failure() {
+    local description="$1"
+    local diagnostic="$2"
+
+    echo "fuzz smoke failure: ${description}" >&2
+    if [[ -s "${diagnostic}" ]]; then
+        sed 's/^/  /' "${diagnostic}" >&2
+    fi
+    exit 1
+}
+
+check_valid_control() {
+    local increment="$1"
+    local diagnostic="${diagnostic_dir}/valid-${increment}.log"
+    local valid_hex="0300000b02f08001004000"
+    local expected="packet=1 tpkt=11 reserved=0 cotp=0xf0 li=2 nr=0 eot=true payload=4 complete=true tsdu=4"
+
+    run_driver "${valid_hex}" "${increment}" "${diagnostic}"
+    if [[ "${driver_status}" -ne 0 ]]; then
+        report_failure \
+            "valid control increment=${increment} status=${driver_status}" \
+            "${diagnostic}"
+    fi
+    if ! grep -Fqx "${expected}" "${diagnostic}"; then
+        report_failure \
+            "valid control increment=${increment} produced unexpected output" \
+            "${diagnostic}"
+    fi
+}
+
+check_rejection_control() {
+    local name="$1"
+    local hex_input="$2"
+    local expected_error="$3"
+    local increment
+    local diagnostic
+
+    for increment in 0 1; do
+        diagnostic="${diagnostic_dir}/rejection-${name}-${increment}.log"
+        run_driver "${hex_input}" "${increment}" "${diagnostic}"
+
+        # Upper-layer candidates are deliberately bounded and preflighted
+        # after the enclosing TPKT/COTP record has synchronized.  An unsafe
+        # Session/Presentation/ACSE frame is skipped while the following TPKT
+        # remains parseable, so these recovery controls succeed without an
+        # exception diagnostic.
+        if [[ "${expected_error}" == "safe upper-layer skip" ]]; then
+            if [[ "${driver_status}" -ne 0 ]]; then
+                report_failure \
+                    "upper-layer recovery ${name} increment=${increment} status=${driver_status}" \
+                    "${diagnostic}"
+            fi
+            if [[ "$(grep -c '^packet=' "${diagnostic}" || true)" -ne 2 ]]; then
+                report_failure \
+                    "upper-layer recovery ${name} increment=${increment} did not retain both TPKTs" \
+                    "${diagnostic}"
+            fi
+            continue
+        fi
+
+        if [[ "${driver_status}" -ne 1 ]]; then
+            report_failure \
+                "rejection control ${name} increment=${increment} status=${driver_status}" \
+                "${diagnostic}"
+        fi
+        if [[ ! -s "${diagnostic}" ]]; then
+            report_failure \
+                "rejection control ${name} increment=${increment} rejected silently" \
+                "${diagnostic}"
+        fi
+        if ! grep -Fq -- "${expected_error}" "${diagnostic}"; then
+            report_failure \
+                "rejection control ${name} increment=${increment} lacked expected parser diagnostic" \
+                "${diagnostic}"
+        fi
+        if grep -Eqi \
+            'internal (compiler |runtime )?error|fatal error|segmentation fault|stack trace|backtrace|undefined symbol|uncaught exception|terminate called|assertion.*failed|addresssanitizer|error while loading shared libraries|failed to (load|open).*(hlto|module|library)|cannot (load|open).*(hlto|module|library)|unknown parser|no parser found' \
+            "${diagnostic}"; then
+            report_failure \
+                "rejection control ${name} increment=${increment} hit a loader/runtime failure" \
+                "${diagnostic}"
+        fi
+    done
+}
+
+check_valid_control 0
+check_valid_control 1
+
+run_mutation() {
+    local name="$1"
+    local hex_input="$2"
+    local increment="$3"
+    local diagnostic="${diagnostic_dir}/${name}-${increment}.log"
+
+    run_driver "${hex_input}" "${increment}" "${diagnostic}"
+    if [[ "${driver_status}" -ne 0 && "${driver_status}" -ne 1 ]]; then
+        report_failure \
+            "${name} increment=${increment} status=${driver_status}" \
+            "${diagnostic}"
+    fi
+
+    if [[ "${driver_status}" -eq 1 ]]; then
+        rejected_mutation_count=$((rejected_mutation_count + 1))
+
+        if [[ ! -s "${diagnostic}" ]]; then
+            report_failure \
+                "${name} increment=${increment} rejected without a diagnostic" \
+                "${diagnostic}"
+        fi
+
+        if grep -Eqi \
+            'internal (compiler |runtime )?error|fatal error|segmentation fault|stack trace|backtrace|undefined symbol|uncaught exception|terminate called|assertion.*failed|addresssanitizer|error while loading shared libraries|failed to (load|open).*(hlto|module|library)|cannot (load|open).*(hlto|module|library)|unknown parser|no parser found' \
+            "${diagnostic}"; then
+            report_failure \
+                "${name} increment=${increment} hit a loader/runtime failure" \
+                "${diagnostic}"
+        fi
+    else
+        accepted_mutation_count=$((accepted_mutation_count + 1))
+        if grep -q '^packet=' "${diagnostic}"; then
+            parsed_mutation_count=$((parsed_mutation_count + 1))
+        fi
+    fi
+
+    campaign_count=$((campaign_count + 1))
+}
+
+mutate_nibble() {
+    local input="$1"
+    local position="$2"
+    local original="${input:${position}:1}"
+    local replacement="0"
+    if [[ "${original}" == "0" ]]; then replacement="f"; fi
+    printf '%s%s%s' "${input:0:${position}}" "${replacement}" \
+        "${input:$((position + 1))}"
+}
+
+while IFS=$'\t' read -r seed_name seed_hex seed_error; do
+    if [[ -z "${seed_name}" || "${seed_name}" == \#* ]]; then
+        continue
+    fi
+
+    if [[ ! "${seed_name}" =~ ^[[:alnum:]_.-]+$ ]]; then
+        echo "invalid fuzz seed name: ${seed_name}" >&2
+        exit 1
+    fi
+    if [[ ! "${seed_hex}" =~ ^([[:xdigit:]]{2})+$ ]]; then
+        echo "fuzz seed ${seed_name} is not an even-length hexadecimal value" >&2
+        exit 1
+    fi
+    if [[ -z "${seed_error}" ]]; then
+        echo "fuzz seed ${seed_name} has no expected parser diagnostic" >&2
+        exit 1
+    fi
+
+    check_rejection_control "${seed_name}" "${seed_hex}" "${seed_error}"
+
+    hex_length="${#seed_hex}"
+    midpoint=$(((hex_length / 4) * 2))
+    if [[ "${midpoint}" -ge "${hex_length}" ]]; then midpoint=0; fi
+
+    mutations=(
+        "${seed_hex:0:2}"
+        "${seed_hex:0:${midpoint}}"
+        "${seed_hex:0:$((hex_length - 2))}"
+        "$(mutate_nibble "${seed_hex}" 0)"
+        "$(mutate_nibble "${seed_hex}" "${midpoint}")"
+        "$(mutate_nibble "${seed_hex}" "$((hex_length - 1))")"
+        "00${seed_hex}"
+        "${seed_hex}00"
+        "${seed_hex}ff"
+        "${seed_hex}00000000"
+    )
+
+    mutation_index=0
+    for mutation in "${mutations[@]}"; do
+        run_mutation "${seed_name}-${mutation_index}" "${mutation}" 0
+        run_mutation "${seed_name}-${mutation_index}" "${mutation}" 1
+        mutation_index=$((mutation_index + 1))
+    done
+done < "${corpus}"
+
+if [[ "${campaign_count}" -eq 0 ]]; then
+    echo "fuzz smoke campaign did not discover any inputs" >&2
+    exit 1
+fi
+if [[ "${accepted_mutation_count}" -eq 0 ]]; then
+    echo "fuzz smoke campaign rejected every mutated input" >&2
+    exit 1
+fi
+if [[ "${parsed_mutation_count}" -eq 0 ]]; then
+    echo "fuzz smoke campaign produced no parsed packet from a mutated input" >&2
+    exit 1
+fi
+
+echo "${campaign_count} deterministic fuzz smoke mutations passed (${accepted_mutation_count} accepted, ${parsed_mutation_count} parsed a packet, ${rejected_mutation_count} rejected)"

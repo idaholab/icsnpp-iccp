@@ -1,0 +1,542 @@
+module ICCP_TRANSPORT_TEST;
+
+import spicy;
+import ICCP_TPKT;
+import ICCP_COTP;
+import ICCP_SESSION;
+import ICCP_PRESENTATION;
+
+function printPacket(
+    packetCount: uint64,
+    packetLength: uint16,
+    reserved: uint8,
+    tpdu: ICCP_COTP::TPDU
+): void {
+    if (tpdu.typeCode == 0xe0 || tpdu.typeCode == 0xd0)
+        print "packet=%d tpkt=%d reserved=%d cotp=0x%02x li=%d dst=%d src=%d params=%d payload=%d" % (
+            packetCount,
+            packetLength,
+            reserved,
+            tpdu.typeCode,
+            tpdu.lengthIndicator,
+            tpdu.destinationReference,
+            tpdu.sourceReference,
+            tpdu.parameterCount,
+            tpdu.payloadLength
+        );
+    else if (tpdu.typeCode == 0xf0)
+        print "packet=%d tpkt=%d reserved=%d cotp=0x%02x li=%d nr=%d eot=%s payload=%d complete=%s tsdu=%d" % (
+            packetCount,
+            packetLength,
+            reserved,
+            tpdu.typeCode,
+            tpdu.lengthIndicator,
+            tpdu.tpduNumber,
+            tpdu.endOfTsdu,
+            tpdu.payloadLength,
+            tpdu.tsduComplete,
+            tpdu.reassembledLength
+        );
+    else
+        print "packet=%d tpkt=%d reserved=%d cotp=0x%02x li=%d payload=%d" % (
+            packetCount,
+            packetLength,
+            reserved,
+            tpdu.typeCode,
+            tpdu.lengthIndicator,
+            tpdu.payloadLength
+        );
+}
+
+public type StreamCase = unit {
+    %port = 102/tcp;
+    %sync-advance-block-size = ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE;
+
+    var state: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var peerState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var peerSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var recoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var peerRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var usePeerDirection: bool = False;
+    var packetCount: uint64 = 0;
+    var lastConfirmedOffset: uint64 = 0;
+    var gapBytesAtLastConfirmation: uint64 = 0;
+    var gapBytesAtLastEpochReset: uint64 = 0;
+    var recoveryScanBytes: uint64 = 0;
+    var lastRecoveryAdvanceOffset: uint64 = 0;
+
+    : (ICCP_TPKT::Packet(
+        self.usePeerDirection ? self.peerState : self.state,
+        self.usePeerDirection ? self.peerSessionState : self.sessionState,
+        self.presentationState,
+        self.usePeerDirection ? self.peerRecoveryState : self.recoveryState
+    ) &synchronize)[] foreach {
+        if ($$.complete) {
+            self.packetCount += 1;
+            confirm;
+            self.lastConfirmedOffset = self.offset();
+            self.lastRecoveryAdvanceOffset = self.lastConfirmedOffset;
+            self.gapBytesAtLastConfirmation = $$.gapBytesAtStart;
+            self.recoveryScanBytes = 0;
+            if (self.usePeerDirection)
+                self.peerRecoveryState.active = False;
+            else
+                self.recoveryState.active = False;
+
+            printPacket(
+                self.packetCount,
+                $$.packetLength,
+                $$.reserved,
+                $$.tpdu
+            );
+
+            # Raw standalone input has no TCP direction metadata. Model CR/CC
+            # as an exchange by switching to the peer after each complete
+            # handshake record; other consecutive records remain on the
+            # active direction.
+            if ($$.tpdu.typeCode == 0xe0 || $$.tpdu.typeCode == 0xd0)
+                self.usePeerDirection = ! self.usePeerDirection;
+        }
+    }
+
+    on %synced {
+        local currentGapBytes =
+            self.stream().statistics().num_gap_bytes;
+        if (self.usePeerDirection) {
+            self.peerRecoveryState.active = True;
+            self.peerRecoveryState.crossedGap =
+                currentGapBytes > self.gapBytesAtLastConfirmation;
+        }
+        else {
+            self.recoveryState.active = True;
+            self.recoveryState.crossedGap =
+                currentGapBytes > self.gapBytesAtLastConfirmation;
+        }
+
+        if (currentGapBytes > self.gapBytesAtLastEpochReset) {
+            if (self.usePeerDirection)
+                ICCP_COTP::beginGapEpoch(
+                    self.peerState,
+                    self.peerSessionState,
+                    self.presentationState
+                );
+            else
+                ICCP_COTP::beginGapEpoch(
+                    self.state,
+                    self.sessionState,
+                    self.presentationState
+                );
+            self.gapBytesAtLastEpochReset = currentGapBytes;
+        }
+        else if (self.usePeerDirection) {
+            self.peerState.pending = b"";
+            self.peerState.fragmentCount = 0;
+            self.peerSessionState.pending = b"";
+            self.peerSessionState.fragmentCount = 0;
+            self.peerSessionState.active = False;
+        }
+        else {
+            self.state.pending = b"";
+            self.state.fragmentCount = 0;
+            self.sessionState.pending = b"";
+            self.sessionState.fragmentCount = 0;
+            self.sessionState.active = False;
+        }
+    }
+
+    on %sync_advance(offset: uint64) {
+        local currentGapBytes =
+            self.stream().statistics().num_gap_bytes;
+        if (currentGapBytes > self.gapBytesAtLastEpochReset) {
+            if (self.usePeerDirection)
+                ICCP_COTP::beginGapEpoch(
+                    self.peerState,
+                    self.peerSessionState,
+                    self.presentationState
+                );
+            else
+                ICCP_COTP::beginGapEpoch(
+                    self.state,
+                    self.sessionState,
+                    self.presentationState
+                );
+            self.gapBytesAtLastEpochReset = currentGapBytes;
+        }
+
+        local baseline = self.lastConfirmedOffset;
+        if (self.lastRecoveryAdvanceOffset > baseline)
+            baseline = self.lastRecoveryAdvanceOffset;
+
+        if (offset > baseline) {
+            local advance = offset - baseline;
+            if (advance > ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE)
+                advance = ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE;
+            self.recoveryScanBytes += advance;
+            self.lastRecoveryAdvanceOffset = offset;
+        }
+
+        if (self.recoveryScanBytes > ICCP_TPKT::MAX_RECOVERY_SCAN_BYTES)
+            throw "TPKT recovery scan exceeds configured byte limit";
+    }
+
+    on %done {
+        if (self.packetCount > 0 &&
+            (
+                (! self.usePeerDirection &&
+                    self.recoveryState.packetInProgress &&
+                    ! self.recoveryState.active) ||
+                (self.usePeerDirection &&
+                    self.peerRecoveryState.packetInProgress &&
+                    ! self.peerRecoveryState.active)
+            ))
+            print "terminal-incomplete=true";
+        if (self.state.fragmentLimitExceeded ||
+            self.peerState.fragmentLimitExceeded)
+            throw "COTP TSDU exceeds configured fragment limit";
+        if (self.packetCount == 0)
+            throw "TPKT stream contains no complete records";
+    }
+};
+
+# A non-synchronizing driver exposes connection-state transitions directly.
+# It complements recovery tests, whose successful packet list intentionally
+# omits rejected boundary candidates.
+public type ConnectionStateCase = unit {
+    var state: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var peerState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var peerSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var recoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var peerRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var usePeerDirection: bool = False;
+
+    packets: ICCP_TPKT::Packet(
+        self.usePeerDirection ? self.peerState : self.state,
+        self.usePeerDirection ? self.peerSessionState : self.sessionState,
+        self.presentationState,
+        self.usePeerDirection ? self.peerRecoveryState : self.recoveryState
+    )[] &eod foreach {
+        if ($$.complete) {
+            print "type=0x%02x epoch=%d class0=%s pending-cr=%s reconnect=%s" % (
+                $$.tpdu.typeCode,
+                self.presentationState.cotpTransportEpoch,
+                self.presentationState.cotpClassZeroKnown,
+                self.presentationState.haveCotpConnectionRequest,
+                self.presentationState.cotpReconnectRequired
+            );
+            if ($$.tpdu.typeCode == 0xe0 || $$.tpdu.typeCode == 0xd0)
+                self.usePeerDirection = ! self.usePeerDirection;
+        }
+        else if ($$.cotpBoundaryProcessed)
+            print "partial=0x%02x epoch=%d class0=%s pending-cr=%s reconnect=%s marker=%s disposition=%d" % (
+                $$.cotpBoundaryCode,
+                self.presentationState.cotpTransportEpoch,
+                self.presentationState.cotpClassZeroKnown,
+                self.presentationState.haveCotpConnectionRequest,
+                self.presentationState.cotpReconnectRequired,
+                $$.publishCotpLifecycleMarker,
+                $$.cotpBoundaryDisposition
+            );
+    }
+};
+
+# Deliberately keep every Packet on one direction so negative tests can prove
+# that a same-direction CC cannot consume or confirm that direction's CR.
+public type SameDirectionConnectionStateCase = unit {
+    var state: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var recoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+
+    packets: ICCP_TPKT::Packet(
+        self.state,
+        self.sessionState,
+        self.presentationState,
+        self.recoveryState
+    )[] &eod;
+};
+
+# A fixed three-record exchange proves that CR and CC use distinct stable
+# direction tokens and that DATA is enabled only after the peer confirmation.
+public type OppositeDirectionHandshakeCase = unit {
+    var requestState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var requestSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var confirmState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var confirmSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var requestRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var confirmRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+
+    request: ICCP_TPKT::Packet(
+        self.requestState,
+        self.requestSessionState,
+        self.presentationState,
+        self.requestRecoveryState
+    );
+    afterRequest: bytes &size=0 {
+        print "cr-token=%d epoch=%d class0=%s pending-cr=%s reconnect=%s" % (
+            self.requestState.directionToken,
+            self.presentationState.cotpTransportEpoch,
+            self.presentationState.cotpClassZeroKnown,
+            self.presentationState.haveCotpConnectionRequest,
+            self.presentationState.cotpReconnectRequired
+        );
+    }
+    confirmation: ICCP_TPKT::Packet(
+        self.confirmState,
+        self.confirmSessionState,
+        self.presentationState,
+        self.confirmRecoveryState
+    );
+    data: ICCP_TPKT::Packet(
+        self.requestState,
+        self.requestSessionState,
+        self.presentationState,
+        self.requestRecoveryState
+    );
+
+    on %done {
+        print "cc-token=%d epoch=%d class0=%s pending-cr=%s reconnect=%s data=0x%02x" % (
+            self.confirmState.directionToken,
+            self.presentationState.cotpTransportEpoch,
+            self.presentationState.cotpClassZeroKnown,
+            self.presentationState.haveCotpConnectionRequest,
+            self.presentationState.cotpReconnectRequired,
+            self.data.tpdu.typeCode
+        );
+    }
+};
+
+# Parse a CR on one direction and a malformed correlated CC on its peer under
+# synchronization. The error hook exposes the retry-stable marker/disposition
+# cache: epoch two proves that late invalidation happened exactly once.
+public type MalformedCorrelatedCcCase = unit {
+    %sync-advance-block-size = ICCP_TPKT::RECOVERY_SCAN_BLOCK_SIZE;
+
+    var requestState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var requestSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var confirmState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var confirmSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var requestRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var confirmRecoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+    var confirmationCount: uint64 = 0;
+
+    request: ICCP_TPKT::Packet(
+        self.requestState,
+        self.requestSessionState,
+        self.presentationState,
+        self.requestRecoveryState
+    );
+    confirmations: (ICCP_TPKT::Packet(
+        self.confirmState,
+        self.confirmSessionState,
+        self.presentationState,
+        self.confirmRecoveryState
+    ) &synchronize)[] &eod foreach {
+        if ($$.complete)
+            self.confirmationCount += 1;
+    }
+
+    : void {
+        if (self.confirmationCount == 0)
+            throw "malformed correlated CC produced no complete recovery record";
+    }
+
+    on %error {
+        print "malformed-cc epoch=%d disposition=%d marker=%s offset=%d code=0x%02x pending-cr=%s reconnect=%s" % (
+            self.presentationState.cotpTransportEpoch,
+            self.confirmState.lastCotpBoundaryDisposition,
+            self.confirmState.haveCotpLifecycleMarker,
+            self.confirmState.lastCotpLifecycleOffset,
+            self.confirmState.lastCotpLifecycleCode,
+            self.presentationState.haveCotpConnectionRequest,
+            self.presentationState.cotpReconnectRequired
+        );
+    }
+};
+
+# Model the two direction parsers' shared Presentation/transport context. A
+# partial boundary must reset the active direction immediately and advance the
+# shared epoch; the peer drops its stale fragments when it next parses input.
+public type SharedBoundaryCase = unit {
+    var state: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var peerState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var peerSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var recoveryState: ICCP_TPKT::RecoveryState& =
+        new ICCP_TPKT::RecoveryState;
+
+    on %init {
+        local syntaxes: vector<string>;
+        syntaxes.push_back("2.1.1");
+        local context: ICCP_PRESENTATION::Context = [
+            $identifier = 3,
+            $abstractSyntax = "1.0.9506.2.1",
+            $proposedTransferSyntaxes = syntaxes,
+            $selectedTransferSyntax = "2.1.1",
+            $outcome = 0
+        ];
+        self.presentationState.contexts.push_back(context);
+        self.presentationState.cotpClassZeroKnown = True;
+        self.state.pending = b"\x01";
+        self.sessionState.pending = b"\x02";
+        self.peerState.pending = b"\x03";
+        self.peerSessionState.pending = b"\x04";
+    }
+
+    packet: ICCP_TPKT::Packet(
+        self.state,
+        self.sessionState,
+        self.presentationState,
+        self.recoveryState
+    );
+
+    on %done {
+        print "boundary=0x%02x epoch=%d contexts=%d local-cotp=%d local-session=%d peer-cotp-before=%d peer-session-before=%d reconnect=%s" % (
+            self.packet.cotpBoundaryCode,
+            self.presentationState.cotpTransportEpoch,
+            |self.presentationState.contexts|,
+            |self.state.pending|,
+            |self.sessionState.pending|,
+            |self.peerState.pending|,
+            |self.peerSessionState.pending|,
+            self.presentationState.cotpReconnectRequired
+        );
+
+        ICCP_COTP::synchronizeTransportEpoch(
+            self.peerState,
+            self.peerSessionState,
+            self.presentationState
+        );
+        print "peer-epoch=%d peer-cotp-after=%d peer-session-after=%d" % (
+            self.peerState.transportEpoch,
+            |self.peerState.pending|,
+            |self.peerSessionState.pending|
+        );
+    }
+};
+
+# Exercise the epoch guard independently of TCP delivery scheduling: apply a
+# CR/CC prefix, advance the shared epoch through a peer-side DR, and only then
+# parse the original complete TPDU body. Neither stale completion may revive
+# connection state from the superseded epoch.
+public type SupersededBoundaryCase = unit {
+    var state: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var sessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var peerState: ICCP_COTP::ReassemblyState& =
+        new ICCP_COTP::ReassemblyState;
+    var peerSessionState: ICCP_SESSION::ReassemblyState& =
+        new ICCP_SESSION::ReassemblyState;
+    var presentationState: ICCP_PRESENTATION::State& =
+        new ICCP_PRESENTATION::State;
+    var typeCode: uint8 = 0;
+    var disposition: uint8 = ICCP_COTP::BOUNDARY_ACCEPTED;
+    var prefixEpoch: uint64 = 0;
+    var hadPendingConnectionRequest: bool = False;
+    var expectedSourceReference: uint16 = 0;
+
+    on %init {
+        ICCP_COTP::ensureTransportDirection(
+            self.state, self.presentationState);
+        ICCP_COTP::ensureTransportDirection(
+            self.peerState, self.presentationState);
+        self.presentationState.cotpClassZeroKnown = True;
+        self.presentationState.cotpReconnectRequired = False;
+    }
+
+    body: bytes &eod {
+        self.typeCode = *$$.at(1) & 0xf0;
+        if (self.typeCode == 0xd0) {
+            self.presentationState.haveCotpConnectionRequest = True;
+            self.presentationState.cotpConnectionRequestSourceReference = 1;
+            self.presentationState.cotpConnectionRequestDirectionToken =
+                self.peerState.directionToken;
+            self.presentationState.cotpReconnectRequired = True;
+            self.hadPendingConnectionRequest = True;
+            self.expectedSourceReference = 1;
+        }
+
+        self.disposition = ICCP_COTP::applyTransportBoundary(
+            self.typeCode,
+            self.state,
+            self.sessionState,
+            self.presentationState
+        );
+        self.prefixEpoch = self.presentationState.cotpTransportEpoch;
+
+        # The peer's observed DR supersedes the still-incomplete first record.
+        ICCP_COTP::applyTransportBoundary(
+            0x80,
+            self.peerState,
+            self.peerSessionState,
+            self.presentationState
+        );
+    }
+
+    tpdu: ICCP_COTP::TPDU(
+        |self.body|,
+        self.state,
+        self.sessionState,
+        self.presentationState,
+        0,
+        True,
+        self.disposition,
+        self.prefixEpoch,
+        self.hadPendingConnectionRequest,
+        self.expectedSourceReference
+    ) &parse-from=self.body;
+
+    on %error {
+        print "stale=0x%02x epoch=%d class0=%s pending-cr=%s reconnect=%s" % (
+            self.typeCode,
+            self.presentationState.cotpTransportEpoch,
+            self.presentationState.cotpClassZeroKnown,
+            self.presentationState.haveCotpConnectionRequest,
+            self.presentationState.cotpReconnectRequired
+        );
+    }
+};

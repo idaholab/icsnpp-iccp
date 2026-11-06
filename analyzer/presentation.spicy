@@ -1,0 +1,1280 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file parses and tracks the OSI Presentation layer used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_PRESENTATION;
+
+import spicy;
+import ICCP_BER;
+import ICCP_ACSE;
+import ICCP_MMS;
+
+const MAX_CONTEXTS: uint64 = 64;
+const MAX_TRANSFER_SYNTAXES: uint64 = 16;
+const MAX_PDV_LISTS: uint64 = 64;
+const MAX_NORMAL_FIELDS: uint64 = 64;
+const ACSE_ABSTRACT_SYNTAX: string = "2.2.1.0.1";
+const MMS_ABSTRACT_SYNTAX: string = "1.0.9506.2.1";
+const BER_TRANSFER_SYNTAX: string = "2.1.1";
+
+public type Context = struct {
+    identifier: int64;
+    abstractSyntax: string;
+    proposedTransferSyntaxes: vector<string>;
+    selectedTransferSyntax: string;
+    outcome: int64;
+};
+
+public type State = struct {
+    contexts: vector<Context>;
+    nextResult: uint64;
+    unmatchedResults: uint64;
+
+    # This is the analyzer's connection-scoped state and is shared by both
+    # TCP direction parsers. These fields retain the known class profile and
+    # the pending peer CR's source reference/direction token; each direction's
+    # COTP reassembly state supplies its own stable token for the comparison.
+    nextCotpDirectionToken: uint64;
+    haveCotpConnectionRequest: bool;
+    cotpConnectionRequestSourceReference: uint16;
+    cotpConnectionRequestDirectionToken: uint64;
+    cotpClassZeroKnown: bool;
+    cotpReconnectRequired: bool;
+    cotpTransportEpoch: uint64;
+};
+
+function findContext(state: State&, identifier: int64): int64 {
+    local index: uint64 = 0;
+    while (index < |state.contexts|) {
+        if (state.contexts[index].identifier == identifier)
+            return cast<int64>(index);
+        index += 1;
+    }
+
+    return -1;
+}
+
+function registerContext(
+    state: State&,
+    identifier: int64,
+    abstractSyntax: string,
+    transferSyntaxes: vector<string>
+) {
+    local existing = findContext(state, identifier);
+    if (existing >= 0)
+        throw "Presentation context identifier is defined more than once";
+
+    if (|state.contexts| >= MAX_CONTEXTS)
+        throw "Presentation context state exceeds configured limit";
+
+    local context: Context = [
+        $identifier = identifier,
+        $abstractSyntax = abstractSyntax,
+        $proposedTransferSyntaxes = transferSyntaxes,
+        $selectedTransferSyntax = "",
+        $outcome = -1
+    ];
+    state.contexts.push_back(context);
+}
+
+function syntaxWasProposed(context: Context, transferSyntax: string): bool {
+    local index: uint64 = 0;
+    while (index < |context.proposedTransferSyntaxes|) {
+        if (context.proposedTransferSyntaxes[index] == transferSyntax)
+            return True;
+        index += 1;
+    }
+
+    return False;
+}
+
+function registerResult(
+    state: State&,
+    outcome: int64,
+    transferSyntax: string
+): int64 {
+    if (state.nextResult >= |state.contexts|) {
+        state.unmatchedResults += 1;
+        throw "Presentation result has no matching proposed context";
+    }
+
+    local matched = state.nextResult;
+    if (
+        outcome == 0 &&
+        ! syntaxWasProposed(state.contexts[matched], transferSyntax)
+    )
+        throw "Presentation accepted transfer syntax was not proposed";
+
+    state.contexts[matched].outcome = outcome;
+    if (outcome == 0)
+        state.contexts[matched].selectedTransferSyntax = transferSyntax;
+    state.nextResult += 1;
+    return state.contexts[matched].identifier;
+}
+
+public function resetContextNegotiation(state: State&) {
+    local contexts: vector<Context>;
+    state.contexts = contexts;
+    state.nextResult = 0;
+    state.unmatchedResults = 0;
+}
+
+function contextSelectsAcse(
+    state: State&, identifier: int64, transferSyntax: string
+): bool {
+    local index = findContext(state, identifier);
+    if (index < 0)
+        return False;
+
+    local context = state.contexts[cast<uint64>(index)];
+    return (
+        context.abstractSyntax == ACSE_ABSTRACT_SYNTAX &&
+        context.outcome == 0 &&
+        context.selectedTransferSyntax == transferSyntax &&
+        syntaxWasProposed(context, transferSyntax) &&
+        transferSyntax == BER_TRANSFER_SYNTAX &&
+        transferSyntax != ""
+    );
+}
+
+# A CP carries its AARQ in the same connection PPDU that proposes the ACSE
+# context.  That one value necessarily precedes CPA selection, so it is the
+# only place where a proposal (rather than an accepted result) authorizes ACSE
+# decoding.  Ordinary P-DATA remains restricted to accepted contexts.
+function contextProposesAcse(
+    state: State&, identifier: int64, transferSyntax: string
+): bool {
+    local index = findContext(state, identifier);
+    if (index < 0)
+        return False;
+
+    local context = state.contexts[cast<uint64>(index)];
+    return (
+        context.abstractSyntax == ACSE_ABSTRACT_SYNTAX &&
+        context.outcome == -1 &&
+        syntaxWasProposed(context, transferSyntax) &&
+        transferSyntax == BER_TRANSFER_SYNTAX
+    );
+}
+
+function contextSelectsMms(
+    state: State&, identifier: int64, transferSyntax: string
+): bool {
+    local index = findContext(state, identifier);
+    if (index < 0)
+        return False;
+
+    local context = state.contexts[cast<uint64>(index)];
+    return (
+        context.abstractSyntax == MMS_ABSTRACT_SYNTAX &&
+        context.selectedTransferSyntax == transferSyntax &&
+        syntaxWasProposed(context, transferSyntax) &&
+        transferSyntax == BER_TRANSFER_SYNTAX &&
+        context.outcome == 0
+    );
+}
+
+# Association-information identifies its embedded MMS value indirectly with a
+# Presentation context identifier.  Pass a context into ACSE only when exactly
+# one MMS/BER context is eligible in the relevant negotiation phase.  Refusing
+# ambiguous duplicate MMS contexts is conservative: APDU cannot inspect
+# Presentation state directly without introducing an import cycle, while
+# guessing would let an EXTERNAL confer trust on the wrong abstract syntax.
+function eligibleAssociationMmsContext(
+    state: State&, proposed: bool
+): int64 {
+    local identifier: int64 = 0;
+    local index: uint64 = 0;
+    while (index < |state.contexts|) {
+        local context = state.contexts[index];
+        local eligible = (
+            context.abstractSyntax == MMS_ABSTRACT_SYNTAX &&
+            syntaxWasProposed(context, BER_TRANSFER_SYNTAX) &&
+            (
+                (
+                    proposed &&
+                    context.outcome == -1
+                ) ||
+                (
+                    ! proposed &&
+                    context.outcome == 0 &&
+                    context.selectedTransferSyntax == BER_TRANSFER_SYNTAX
+                )
+            )
+        );
+
+        if (eligible) {
+            if (identifier != 0)
+                return 0;
+            identifier = context.identifier;
+        }
+        index += 1;
+    }
+
+    return identifier;
+}
+
+function looksLikeMms(value: bytes): bool {
+    if (|value| < 2)
+        return False;
+
+    local first = *value.at(0);
+    switch (first) {
+        case 0xa0, 0xa1, 0xa2, 0xa3, 0xa4,
+             0x85, 0x86, 0xa7, 0xa8, 0xa9, 0xaa,
+             0x8b, 0x8c, 0xad:
+            return True;
+        default:
+            return False;
+    }
+}
+
+public type PPDUType = enum {
+    UNKNOWN = 0,
+    CONNECTION = 1,
+    USER_DATA = 2,
+    PROVIDER_ABORT = 3
+};
+
+public type Integer = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 2
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::IntegerValue(self.length.value);
+};
+
+public type ObjectIdentifier = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 6
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::ObjectIdentifierValue(self.length.value);
+};
+
+public type TransferSyntaxList = unit(length: uint64) {
+    var count: uint64 = 0;
+    var firstOid: string;
+    var oids: vector<string>;
+
+    syntaxes: ObjectIdentifier[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_TRANSFER_SYNTAXES)
+            throw "Presentation transfer-syntax list exceeds configured limit";
+
+        if (self.count == 1)
+            self.firstOid = $$.value.value;
+        self.oids.push_back($$.value.value);
+    }
+
+    : void &requires=self.count > 0;
+} &size=length;
+
+public type ContextDefinitionContent = unit {
+    contextIdentifier: Integer;
+    : void &requires=(
+        self.contextIdentifier.value.value > 0 &&
+        self.contextIdentifier.value.value <= 0x7fffffff
+    );
+    abstractSyntax: ObjectIdentifier;
+
+    transferListIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.transferListIdentifier.first.class_ ==
+            ICCP_BER::TagClass::UNIVERSAL &&
+        self.transferListIdentifier.first.constructed &&
+        self.transferListIdentifier.tagNumber == 16
+    );
+    transferListLength: ICCP_BER::DefiniteLength;
+    transferSyntaxes: TransferSyntaxList(self.transferListLength.value);
+};
+
+public type ContextDefinition = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: ContextDefinitionContent &size=self.length.value;
+};
+
+public type ContextDefinitionList = unit(length: uint64, state: State&) {
+    var count: uint64 = 0;
+    var firstContextIdentifier: int64 = 0;
+    var firstAbstractSyntax: string;
+    var firstTransferSyntax: string;
+
+    definitions: ContextDefinition[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_CONTEXTS)
+            throw "Presentation context-definition list exceeds configured limit";
+
+        registerContext(
+            state,
+            $$.content.contextIdentifier.value.value,
+            $$.content.abstractSyntax.value.value,
+            $$.content.transferSyntaxes.oids
+        );
+
+        if (self.count == 1) {
+            self.firstContextIdentifier =
+                $$.content.contextIdentifier.value.value;
+            self.firstAbstractSyntax =
+                $$.content.abstractSyntax.value.value;
+            self.firstTransferSyntax =
+                $$.content.transferSyntaxes.firstOid;
+        }
+    }
+
+} &size=length;
+
+public type ContextResultContent = unit {
+    resultIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.resultIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.resultIdentifier.first.constructed &&
+        self.resultIdentifier.tagNumber == 0
+    );
+    resultLength: ICCP_BER::DefiniteLength;
+    outcome: ICCP_BER::IntegerValue(self.resultLength.value);
+    : void &requires=(self.outcome.value >= 0 && self.outcome.value <= 2);
+
+    var transferSyntax: string;
+    var optionalCount: uint64 = 0;
+    var lastOptionalTag: uint64 = 0;
+    var haveTransferSyntax: bool = False;
+    var haveProviderReason: bool = False;
+
+    optionals: ContextResultOptional[] &eod foreach {
+        self.optionalCount += 1;
+        if (
+            self.optionalCount > 2 ||
+            ($$.tagNumber == 1 && self.lastOptionalTag != 0) ||
+            ($$.tagNumber == 2 && self.lastOptionalTag == 2)
+        )
+            throw "Presentation context result has invalid optional fields";
+
+        self.lastOptionalTag = $$.tagNumber;
+        if ($$.tagNumber == 1) {
+            self.transferSyntax = $$.oid;
+            self.haveTransferSyntax = True;
+        }
+        else
+            self.haveProviderReason = True;
+    }
+
+    on %done {
+        if (self.outcome.value == 0 && ! self.haveTransferSyntax)
+            throw "Presentation accepted context is missing transfer syntax";
+        if (self.outcome.value != 0 && self.haveTransferSyntax)
+            throw "Presentation rejected context contains transfer syntax";
+        if (self.outcome.value == 2 && ! self.haveProviderReason)
+            throw "Presentation provider rejection is missing provider reason";
+        if (self.outcome.value != 2 && self.haveProviderReason)
+            throw "Presentation provider reason is invalid for this result";
+    }
+};
+
+public type ContextResultOptional = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        (self.identifier.tagNumber == 1 || self.identifier.tagNumber == 2)
+    );
+    length: ICCP_BER::DefiniteLength;
+
+    var tagNumber: uint64;
+    var oid: string;
+
+    switch (self.identifier.tagNumber) {
+        1 -> transferSyntax: ICCP_BER::ObjectIdentifierValue(
+            self.length.value
+        ) {
+            self.oid = $$.value;
+        }
+        2 -> providerReason: ICCP_BER::IntegerValue(self.length.value) {
+            if ($$.value < 0 || $$.value > 3)
+                throw "Presentation context provider reason is outside range 0..3";
+        }
+    };
+
+    on %done {
+        self.tagNumber = self.identifier.tagNumber;
+    }
+};
+
+public type ContextResult = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: ContextResultContent &size=self.length.value;
+};
+
+public type ContextResultList = unit(length: uint64, state: State&) {
+    var count: uint64 = 0;
+    var firstContextIdentifier: int64 = 0;
+    var firstAbstractSyntax: string;
+    var firstResult: int64 = -1;
+    var firstTransferSyntax: string;
+
+    results: ContextResult[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_CONTEXTS)
+            throw "Presentation context-result list exceeds configured limit";
+
+        local matchedContextIdentifier = registerResult(
+            state,
+            $$.content.outcome.value,
+            $$.content.transferSyntax
+        );
+
+        if (self.count == 1) {
+            self.firstContextIdentifier = matchedContextIdentifier;
+            self.firstResult = $$.content.outcome.value;
+            local matchedIndex = findContext(state, matchedContextIdentifier);
+            if (matchedIndex >= 0) {
+                local matched = state.contexts[cast<uint64>(matchedIndex)];
+                self.firstAbstractSyntax = matched.abstractSyntax;
+                self.firstTransferSyntax = matched.selectedTransferSyntax;
+            }
+            else
+                self.firstTransferSyntax = $$.content.transferSyntax;
+        }
+    }
+
+    on %done {
+        if (
+            state.unmatchedResults != 0 ||
+            state.nextResult != |state.contexts|
+        )
+            throw "Presentation result count does not match proposed context count";
+    }
+} &size=length;
+
+public type ModeSelector = unit(length: uint64) {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber == 0
+    );
+    valueLength: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::IntegerValue(self.valueLength.value);
+    : void &requires=self.value.value == 1;
+} &size=length;
+
+public type PDVContent = unit {
+    var haveTransferSyntax: bool = False;
+    var transferSyntax: string;
+
+    firstIdentifier: ICCP_BER::Identifier;
+    firstLength: ICCP_BER::DefiniteLength;
+
+    switch (
+        self.firstIdentifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        ! self.firstIdentifier.first.constructed &&
+        self.firstIdentifier.tagNumber == 6
+    ) {
+        True -> transfer: ICCP_BER::ObjectIdentifierValue(
+            self.firstLength.value
+        ) {
+            self.haveTransferSyntax = True;
+            self.transferSyntax = $$.value;
+        }
+        False -> context: ICCP_BER::IntegerValue(
+            self.firstLength.value
+        );
+    };
+
+    contextIdentifier: Integer if (self.haveTransferSyntax);
+
+    var contextId: int64;
+    : void {
+        if (self.haveTransferSyntax)
+            self.contextId = self.contextIdentifier.value.value;
+        else {
+            if (
+                self.firstIdentifier.first.class_ !=
+                    ICCP_BER::TagClass::UNIVERSAL ||
+                self.firstIdentifier.first.constructed ||
+                self.firstIdentifier.tagNumber != 2
+            )
+                throw "Presentation PDV-list has invalid context identifier";
+
+            self.contextId = self.context.value;
+        }
+
+        if (self.contextId <= 0 || self.contextId > 0x7fffffff)
+            throw "Presentation context identifier is outside supported range";
+    }
+
+    valueIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.valueIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.valueIdentifier.tagNumber <= 2 &&
+        (
+            (
+                self.valueIdentifier.tagNumber == 0 &&
+                self.valueIdentifier.first.constructed
+            ) ||
+            (
+                self.valueIdentifier.tagNumber != 0 &&
+                ! self.valueIdentifier.first.constructed
+            )
+        )
+    );
+    valueLength: ICCP_BER::DefiniteLength;
+
+    var encoding: uint64;
+    var payload: bytes;
+
+    switch (self.valueIdentifier.tagNumber) {
+        2 -> {
+            # Check before subtracting the mandatory unused-bits octet from an
+            # attacker-controlled length.
+            : void &requires=self.valueLength.value >= 1;
+            arbitraryUnusedBits: uint8;
+            arbitrary: bytes &size=(self.valueLength.value - 1) {
+                self.payload = $$;
+            }
+            : void &requires=(
+                ICCP_BER::bitStringIsValid(
+                    self.arbitraryUnusedBits,
+                    self.arbitrary
+                )
+            );
+        }
+        * -> value: bytes &size=self.valueLength.value {
+            self.payload = $$;
+        }
+    };
+
+    on %done {
+        self.encoding = self.valueIdentifier.tagNumber;
+    }
+};
+
+public type PDV = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: PDVContent &size=self.length.value;
+};
+
+public type FullyEncodedData = unit(length: uint64) {
+    var count: uint64 = 0;
+    var firstContextIdentifier: int64 = 0;
+    var firstEncoding: uint64 = 0;
+    var firstPayload: bytes;
+    var firstTransferSyntax: string;
+
+    pdvs: PDV[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_PDV_LISTS)
+            throw "Presentation fully-encoded data exceeds configured PDV limit";
+
+        # The current parser/event interface can dispatch one abstract value.
+        # Reject multiplicity explicitly rather than silently dropping later
+        # PDV-list values after parsing them.
+        if (self.count > 1)
+            throw "multiple Presentation PDV-list values are unsupported";
+
+        if (self.count == 1) {
+            self.firstContextIdentifier = $$.content.contextId;
+            self.firstEncoding = $$.content.encoding;
+            self.firstPayload = $$.content.payload;
+            self.firstTransferSyntax = $$.content.transferSyntax;
+        }
+    }
+
+    : void &requires=self.count > 0;
+} &size=length;
+
+# X.226 ARU-PPDU normal-mode parameters carry an explicit list mapping each
+# presentation-context identifier used by the abort user data to its transfer
+# syntax.  This is distinct from simply-encoded-data even though both use
+# APPLICATION 0 at different grammar levels.
+public type AbortContextContent = unit {
+    contextIdentifier: Integer;
+    transferSyntax: ObjectIdentifier;
+};
+
+public type AbortContext = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::UNIVERSAL &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber == 16
+    );
+    length: ICCP_BER::DefiniteLength;
+    content: AbortContextContent &size=self.length.value;
+};
+
+public type AbortContextList = unit(length: uint64) {
+    var count: uint64 = 0;
+    var identifiers: vector<int64>;
+    var transferSyntaxes: vector<string>;
+
+    contexts: AbortContext[] &eod foreach {
+        self.count += 1;
+        if (self.count > MAX_CONTEXTS)
+            throw "Presentation abort context list exceeds configured limit";
+
+        local identifier = $$.content.contextIdentifier.value.value;
+        if (identifier <= 0 || identifier > 0x7fffffff)
+            throw "Presentation abort context identifier is outside supported range";
+        self.identifiers.push_back(identifier);
+        self.transferSyntaxes.push_back($$.content.transferSyntax.value.value);
+    }
+
+    # FullyEncodedData below intentionally supports one PDV.  Requiring one
+    # corresponding context entry prevents unrelated or duplicate mappings
+    # from being parsed and then silently ignored.
+    : void &requires=self.count == 1;
+} &size=length;
+
+public type AbortUserData = unit(length: uint64) {
+    contextListIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.contextListIdentifier.first.class_ ==
+            ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.contextListIdentifier.first.constructed &&
+        self.contextListIdentifier.tagNumber == 0
+    );
+    contextListLength: ICCP_BER::DefiniteLength;
+    contextList: AbortContextList(self.contextListLength.value);
+
+    userDataIdentifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.userDataIdentifier.first.class_ == ICCP_BER::TagClass::APPLICATION &&
+        self.userDataIdentifier.first.constructed &&
+        self.userDataIdentifier.tagNumber == 1
+    );
+    userDataLength: ICCP_BER::DefiniteLength;
+    userData: FullyEncodedData(self.userDataLength.value);
+
+    var contextIdentifier: int64 = 0;
+    var transferSyntax: string;
+    var payload: bytes;
+
+    on %done {
+        local index: uint64 = 0;
+        while (index < |self.contextList.identifiers|) {
+            if (
+                self.contextList.identifiers[index] ==
+                    self.userData.firstContextIdentifier
+            ) {
+                if (self.contextIdentifier != 0)
+                    throw "Presentation abort context is listed more than once";
+                self.contextIdentifier = self.contextList.identifiers[index];
+                self.transferSyntax = self.contextList.transferSyntaxes[index];
+            }
+            index += 1;
+        }
+
+        if (self.contextIdentifier == 0)
+            throw "Presentation abort user data has no matching context entry";
+        if (
+            self.userData.firstTransferSyntax != "" &&
+            self.userData.firstTransferSyntax != self.transferSyntax
+        )
+            throw "Presentation abort transfer syntax conflicts with its context list";
+
+        self.payload = self.userData.firstPayload;
+    }
+} &size=length;
+
+# X.226 distinguishes a provider-generated ARP-PPDU from the application-user
+# ARU-PPDU above. ARP is a UNIVERSAL SEQUENCE whose two IMPLICIT INTEGER fields
+# are optional. Parse it explicitly so it cannot be confused with an ARU that
+# carries an ACSE ABRT.
+public type ProviderAbortField = unit {
+    identifier: ICCP_BER::Identifier;
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        ! self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 1
+    );
+    length: ICCP_BER::DefiniteLength;
+    value: ICCP_BER::IntegerValue(self.length.value);
+
+    on %done {
+        if (
+            self.identifier.tagNumber == 0 &&
+            (self.value.value < 0 || self.value.value > 6)
+        )
+            throw "Presentation provider-abort reason is outside range 0..6";
+        if (
+            self.identifier.tagNumber == 1 &&
+            (self.value.value < 0 || self.value.value > 32)
+        )
+            throw "Presentation provider-abort event identifier is outside range 0..32";
+    }
+};
+
+public type ProviderAbort = unit(length: uint64) {
+    var count: uint64 = 0;
+    var lastTag: uint64 = 0;
+    var haveTag: bool = False;
+
+    fields: ProviderAbortField[] &eod foreach {
+        self.count += 1;
+        if (
+            self.count > 2 ||
+            (self.haveTag && $$.identifier.tagNumber <= self.lastTag)
+        )
+            throw "Presentation provider-abort fields are duplicated or out of order";
+        self.lastTag = $$.identifier.tagNumber;
+        self.haveTag = True;
+    }
+} &size=length;
+
+public type NormalField = unit(state: State&) {
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    : void {
+        if (
+            self.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            self.identifier.first.constructed &&
+            self.identifier.tagNumber == 4
+        ) {
+            self.contextDefinitionPresent = True;
+            resetContextNegotiation(state);
+        }
+        else if (
+            self.identifier.first.class_ ==
+                ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+            self.identifier.first.constructed &&
+            self.identifier.tagNumber == 5
+        )
+            self.contextResultPresent = True;
+    }
+
+    var contextDefinitionCount: uint64 = 0;
+    var contextResultCount: uint64 = 0;
+    var contextDefinitionPresent: bool = False;
+    var contextResultPresent: bool = False;
+    var pdvCount: uint64 = 0;
+    var contextIdentifier: int64 = 0;
+    var abstractSyntax: string;
+    var transferSyntax: string;
+    var outcome: int64 = -1;
+    var payload: bytes;
+
+    switch (self.identifier.first.class_) {
+        ICCP_BER::TagClass::CONTEXT_SPECIFIC -> {
+            switch (self.identifier.tagNumber) {
+                4 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    definitions: ContextDefinitionList(
+                        self.length.value, state
+                    ) {
+                        # A context-definition list identifies a new CP. Reset
+                        # prior proposal/result state before registering it so
+                        # a second negotiation cannot inherit stale contexts.
+                        self.contextDefinitionCount = $$.count;
+                        self.contextIdentifier = $$.firstContextIdentifier;
+                        self.abstractSyntax = $$.firstAbstractSyntax;
+                        self.transferSyntax = $$.firstTransferSyntax;
+                    }
+                }
+                5 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    results: ContextResultList(self.length.value, state) {
+                        self.contextResultCount = $$.count;
+                        self.contextIdentifier = $$.firstContextIdentifier;
+                        self.abstractSyntax = $$.firstAbstractSyntax;
+                        self.outcome = $$.firstResult;
+                        self.transferSyntax = $$.firstTransferSyntax;
+                    }
+                }
+                * -> rawContext: bytes &size=self.length.value;
+            };
+        }
+        ICCP_BER::TagClass::APPLICATION -> {
+            switch (self.identifier.tagNumber) {
+                0 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    simplyEncoded: bytes &size=self.length.value {
+                        self.payload = $$;
+                    }
+                }
+                1 -> {
+                    : void &requires=self.identifier.first.constructed;
+                    fullyEncoded: FullyEncodedData(self.length.value) {
+                        self.pdvCount = $$.count;
+                        self.contextIdentifier = $$.firstContextIdentifier;
+                        self.transferSyntax = $$.firstTransferSyntax;
+                        self.payload = $$.firstPayload;
+                    }
+                }
+                * -> rawApplication: bytes &size=self.length.value;
+            };
+        }
+        * -> raw: bytes &size=self.length.value;
+    };
+};
+
+public type NormalMode = unit(length: uint64, state: State&) {
+    var contextDefinitionCount: uint64 = 0;
+    var contextResultCount: uint64 = 0;
+    var pdvCount: uint64 = 0;
+    var contextIdentifier: int64 = 0;
+    var abstractSyntax: string;
+    var transferSyntax: string;
+    var outcome: int64 = -1;
+    var payload: bytes;
+    var haveDefinitions: bool = False;
+    var haveResults: bool = False;
+    var haveUserData: bool = False;
+    var fieldCount: uint64 = 0;
+
+    fields: NormalField(state)[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > MAX_NORMAL_FIELDS)
+            throw "Presentation normal-mode exceeds configured field limit";
+        if ($$.contextDefinitionPresent) {
+            if (self.haveDefinitions || self.haveResults || self.haveUserData)
+                throw "Presentation normal-mode fields are duplicated or out of order";
+            self.haveDefinitions = True;
+        }
+        if ($$.contextResultPresent) {
+            if (self.haveResults || self.haveDefinitions || self.haveUserData)
+                throw "Presentation normal-mode fields are duplicated or out of order";
+            self.haveResults = True;
+        }
+        if ($$.pdvCount > 0 || |$$.payload| > 0) {
+            if (self.haveUserData)
+                throw "Presentation normal-mode user data is duplicated";
+            self.haveUserData = True;
+        }
+        self.contextDefinitionCount += $$.contextDefinitionCount;
+        self.contextResultCount += $$.contextResultCount;
+        self.pdvCount += $$.pdvCount;
+
+        if ($$.contextIdentifier != 0)
+            self.contextIdentifier = $$.contextIdentifier;
+        if ($$.abstractSyntax != "")
+            self.abstractSyntax = $$.abstractSyntax;
+        if ($$.transferSyntax != "")
+            self.transferSyntax = $$.transferSyntax;
+        if ($$.outcome != -1)
+            self.outcome = $$.outcome;
+        if (|$$.payload| > 0)
+            self.payload = $$.payload;
+    }
+} &size=length;
+
+public type ConnectionField = unit(state: State&) {
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    var contextDefinitionCount: uint64 = 0;
+    var contextResultCount: uint64 = 0;
+    var contextDefinitionPresent: bool = False;
+    var contextResultPresent: bool = False;
+    var pdvCount: uint64 = 0;
+    var contextIdentifier: int64 = 0;
+    var abstractSyntax: string;
+    var transferSyntax: string;
+    var outcome: int64 = -1;
+    var payload: bytes;
+    var fieldTag: uint64 = 255;
+
+    : void &requires=(
+        self.identifier.first.class_ == ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
+        self.identifier.first.constructed &&
+        self.identifier.tagNumber <= 2
+    );
+
+    switch (self.identifier.tagNumber) {
+        0 -> mode: ModeSelector(self.length.value);
+        1 -> x410Mode: bytes &size=self.length.value;
+        2 -> normal: NormalMode(self.length.value, state) {
+            self.contextDefinitionCount = $$.contextDefinitionCount;
+            self.contextResultCount = $$.contextResultCount;
+            self.contextDefinitionPresent = $$.haveDefinitions;
+            self.contextResultPresent = $$.haveResults;
+            self.pdvCount = $$.pdvCount;
+            self.contextIdentifier = $$.contextIdentifier;
+            self.abstractSyntax = $$.abstractSyntax;
+            self.transferSyntax = $$.transferSyntax;
+            self.outcome = $$.outcome;
+            self.payload = $$.payload;
+        }
+    };
+
+    on %done {
+        self.fieldTag = self.identifier.tagNumber;
+    }
+};
+
+public type Connection = unit(length: uint64, state: State&) {
+    var contextDefinitionCount: uint64 = 0;
+    var contextResultCount: uint64 = 0;
+    var contextDefinitionPresent: bool = False;
+    var contextResultPresent: bool = False;
+    var pdvCount: uint64 = 0;
+    var contextIdentifier: int64 = 0;
+    var abstractSyntax: string;
+    var transferSyntax: string;
+    var outcome: int64 = -1;
+    var payload: bytes;
+    var haveModeSelector: bool = False;
+    var haveX410Mode: bool = False;
+    var haveNormalMode: bool = False;
+    var fieldCount: uint64 = 0;
+
+    fields: ConnectionField(state)[] &eod foreach {
+        self.fieldCount += 1;
+        if (self.fieldCount > 3)
+            throw "Presentation connection PPDU exceeds configured field limit";
+        if ($$.fieldTag == 0) {
+            if (self.haveModeSelector)
+                throw "Presentation mode-selector is duplicated";
+            self.haveModeSelector = True;
+        }
+        else if ($$.fieldTag == 1) {
+            if (self.haveX410Mode)
+                throw "Presentation X.410 mode field is duplicated";
+            self.haveX410Mode = True;
+        }
+        else if ($$.fieldTag == 2) {
+            if (self.haveNormalMode)
+                throw "Presentation normal-mode field is duplicated";
+            self.haveNormalMode = True;
+        }
+        self.contextDefinitionCount += $$.contextDefinitionCount;
+        self.contextResultCount += $$.contextResultCount;
+        if ($$.contextDefinitionPresent)
+            self.contextDefinitionPresent = True;
+        if ($$.contextResultPresent)
+            self.contextResultPresent = True;
+        self.pdvCount += $$.pdvCount;
+
+        if ($$.contextIdentifier != 0)
+            self.contextIdentifier = $$.contextIdentifier;
+        if ($$.abstractSyntax != "")
+            self.abstractSyntax = $$.abstractSyntax;
+        if ($$.transferSyntax != "")
+            self.transferSyntax = $$.transferSyntax;
+        if ($$.outcome != -1)
+            self.outcome = $$.outcome;
+        if (|$$.payload| > 0)
+            self.payload = $$.payload;
+    }
+
+    on %done {
+        # CP-type and CPA-PPDU are ASN.1 SET values, so their fields may arrive
+        # in either order. The selector is mandatory; the mode-specific
+        # parameter SET/SEQUENCE is optional. This implementation supports only
+        # normal mode and rejects conflicting X.410 parameters explicitly.
+        if (! self.haveModeSelector)
+            throw "Presentation connection PPDU is missing mode-selector";
+        if (self.haveX410Mode)
+            throw "Presentation X.410 mode parameters conflict with supported normal mode";
+    }
+} &size=length;
+
+public type Data = unit(state: State&, sessionSpdu: uint8 = 0) {
+    # Context definitions/results are parsed into a private copy.  They become
+    # connection state only after the whole PPDU, including embedded ACSE/MMS,
+    # has validated; malformed CP/CPA input therefore cannot poison later
+    # context-based dispatch.
+    var workingState: State& = new State;
+    var sessionSpduCode: uint8 = sessionSpdu;
+    on %init {
+        self.workingState.contexts = state.contexts;
+        self.workingState.nextResult = state.nextResult;
+        self.workingState.unmatchedResults = state.unmatchedResults;
+
+        # Session CONNECT starts a new Presentation connection even if its CP
+        # omits the optional context list. Reset only this transaction so a
+        # malformed replacement CP cannot destroy the last valid shared state.
+        if (sessionSpdu == 13)
+            resetContextNegotiation(self.workingState);
+    }
+
+    var ppduType: PPDUType = PPDUType::UNKNOWN;
+    var recognized: bool = False;
+    var contextDefinitionCount: uint64 = 0;
+    var contextResultCount: uint64 = 0;
+    var contextDefinitionPresent: bool = False;
+    var contextResultPresent: bool = False;
+    var pdvCount: uint64 = 0;
+    var contextIdentifier: int64 = 0;
+    var abstractSyntax: string;
+    var transferSyntax: string;
+    var selectedResult: int64 = -1;
+    var payload: bytes;
+    var dispatchAcse: bool = False;
+    var dispatchMms: bool = False;
+    var inferredMms: bool = False;
+    var expectedAssociationMmsContext: int64 = 0;
+    var requiredAcseApduTag: int64 = -1;
+    var abortPpdu: bool = False;
+
+    identifier: ICCP_BER::Identifier;
+    length: ICCP_BER::DefiniteLength;
+
+    switch (self.identifier.first.class_) {
+        ICCP_BER::TagClass::UNIVERSAL -> {
+            connection: Connection(self.length.value, self.workingState)
+                if (
+                    self.identifier.first.constructed &&
+                    self.identifier.tagNumber == 17
+                );
+            providerAbort: ProviderAbort(self.length.value)
+                if (
+                    ! self?.connection &&
+                    self.identifier.first.constructed &&
+                    self.identifier.tagNumber == 16 &&
+                    sessionSpdu == 25
+                );
+            rawUniversal: bytes &size=self.length.value
+                if (! self?.connection && ! self?.providerAbort);
+        }
+        ICCP_BER::TagClass::APPLICATION -> {
+            switch (self.identifier.tagNumber) {
+                0 -> {
+                    : void &requires=! self.identifier.first.constructed;
+                    simplyEncoded: bytes &size=self.length.value;
+                }
+                1 -> fullyEncoded: FullyEncodedData(self.length.value);
+                * -> rawApplication: bytes &size=self.length.value;
+            };
+        }
+        ICCP_BER::TagClass::CONTEXT_SPECIFIC -> {
+            abort: AbortUserData(self.length.value)
+                if (
+                    self.identifier.first.constructed &&
+                    self.identifier.tagNumber == 0 &&
+                    sessionSpdu == 25
+                );
+            rawContext: bytes &size=self.length.value
+                if (! self?.abort);
+        }
+        * -> raw: bytes &size=self.length.value;
+    };
+
+    : void {
+        if (self?.connection) {
+            self.ppduType = PPDUType::CONNECTION;
+            self.recognized = True;
+            self.contextDefinitionCount =
+                self.connection.contextDefinitionCount;
+            self.contextResultCount =
+                self.connection.contextResultCount;
+            self.contextDefinitionPresent =
+                self.connection.contextDefinitionPresent;
+            self.contextResultPresent =
+                self.connection.contextResultPresent;
+            self.pdvCount = self.connection.pdvCount;
+            self.contextIdentifier = self.connection.contextIdentifier;
+            self.abstractSyntax = self.connection.abstractSyntax;
+            self.transferSyntax = self.connection.transferSyntax;
+            self.selectedResult = self.connection.outcome;
+            self.payload = self.connection.payload;
+
+            if (
+                sessionSpdu != 0 &&
+                (
+                    (sessionSpdu != 13 && sessionSpdu != 14) ||
+                    (self.contextDefinitionPresent && sessionSpdu != 13) ||
+                    (self.contextResultPresent && sessionSpdu != 14)
+                )
+            )
+                throw "Presentation connection PPDU does not match its Session service";
+        }
+        else if (self?.simplyEncoded) {
+            self.ppduType = PPDUType::USER_DATA;
+            self.recognized = True;
+            self.payload = self.simplyEncoded;
+        }
+        else if (self?.fullyEncoded) {
+            self.ppduType = PPDUType::USER_DATA;
+            self.recognized = True;
+            self.pdvCount = self.fullyEncoded.count;
+            self.contextIdentifier =
+                self.fullyEncoded.firstContextIdentifier;
+            self.transferSyntax =
+                self.fullyEncoded.firstTransferSyntax;
+            self.payload = self.fullyEncoded.firstPayload;
+        }
+        else if (self?.abort) {
+            self.ppduType = PPDUType::USER_DATA;
+            self.recognized = True;
+            self.abortPpdu = True;
+            self.pdvCount = self.abort.userData.count;
+            self.contextIdentifier = self.abort.contextIdentifier;
+            self.transferSyntax = self.abort.transferSyntax;
+            self.payload = self.abort.payload;
+        }
+        else if (self?.providerAbort) {
+            self.ppduType = PPDUType::PROVIDER_ABORT;
+            self.recognized = True;
+            self.abortPpdu = True;
+        }
+
+        if (self.contextIdentifier != 0) {
+            local selectedIndex = findContext(
+                self.workingState, self.contextIdentifier
+            );
+            if (selectedIndex >= 0) {
+                local selected = self.workingState.contexts[
+                    cast<uint64>(selectedIndex)];
+                if (self.abstractSyntax == "")
+                    self.abstractSyntax = selected.abstractSyntax;
+                if (self.transferSyntax == "") {
+                    if (selected.selectedTransferSyntax != "")
+                        self.transferSyntax = selected.selectedTransferSyntax;
+                    else if (|selected.proposedTransferSyntaxes| > 0)
+                        self.transferSyntax =
+                            selected.proposedTransferSyntaxes[0];
+                }
+                self.selectedResult = selected.outcome;
+            }
+        }
+
+        local cpCarriesAarq = (
+            self?.connection &&
+            self.contextDefinitionPresent &&
+            ! self.contextResultPresent &&
+            self.contextIdentifier != 0 &&
+            |self.payload| > 0 &&
+            (sessionSpdu == 0 || sessionSpdu == 13) &&
+            contextProposesAcse(
+                self.workingState,
+                self.contextIdentifier,
+                self.transferSyntax
+            )
+        );
+
+        local selectedAcse = contextSelectsAcse(
+            self.workingState,
+            self.contextIdentifier,
+            self.transferSyntax
+        );
+        local sessionAllowsSelectedAcse = (
+            sessionSpdu == 0 ||
+            (sessionSpdu == 14 && self.contextResultPresent) ||
+            sessionSpdu == 8 ||
+            sessionSpdu == 9 ||
+            sessionSpdu == 10 ||
+            (sessionSpdu == 25 && self.abortPpdu)
+        );
+
+        if (
+            self.contextIdentifier != 0 &&
+            |self.payload| > 0 &&
+            (
+                (selectedAcse && sessionAllowsSelectedAcse) ||
+                cpCarriesAarq
+            )
+        ) {
+            self.dispatchAcse = True;
+
+            if (cpCarriesAarq) {
+                self.requiredAcseApduTag = 0;
+                self.expectedAssociationMmsContext =
+                    eligibleAssociationMmsContext(
+                        self.workingState, True
+                    );
+            }
+            else {
+                if (
+                    self?.connection &&
+                    self.contextResultPresent
+                )
+                    self.requiredAcseApduTag = 1;
+                else if (sessionSpdu == 9)
+                    self.requiredAcseApduTag = 2;
+                else if (sessionSpdu == 8 || sessionSpdu == 10)
+                    self.requiredAcseApduTag = 3;
+                else if (sessionSpdu == 25)
+                    self.requiredAcseApduTag = 4;
+                self.expectedAssociationMmsContext =
+                    eligibleAssociationMmsContext(
+                        self.workingState, False
+                    );
+            }
+        }
+
+        if (
+            self.contextIdentifier != 0 &&
+            |self.payload| > 0 &&
+            (sessionSpdu == 0 || sessionSpdu == 1) &&
+            contextSelectsMms(
+                self.workingState,
+                self.contextIdentifier,
+                self.transferSyntax
+            )
+        )
+            self.dispatchMms = True;
+        else if (
+            self.contextIdentifier != 0 &&
+            |self.payload| > 0 &&
+            (sessionSpdu == 0 || sessionSpdu == 1) &&
+            |self.workingState.contexts| == 0 &&
+            (
+                self.transferSyntax == "" ||
+                self.transferSyntax == BER_TRANSFER_SYNTAX
+            ) &&
+            looksLikeMms(self.payload)
+        ) {
+            self.dispatchMms = True;
+            self.inferredMms = True;
+        }
+    }
+
+    acse: ICCP_ACSE::APDU(
+            self.expectedAssociationMmsContext,
+            self.requiredAcseApduTag,
+            sessionSpdu)
+        &parse-from=self.payload
+        if (self.dispatchAcse);
+
+    mms: ICCP_MMS::ProvenancedMMSpdu(
+            cast<uint8>(self.inferredMms ? 2 : 1))
+        &parse-from=self.payload
+        if (self.dispatchMms);
+
+    on %done {
+        if (self?.connection) {
+            state.contexts = self.workingState.contexts;
+            state.nextResult = self.workingState.nextResult;
+            state.unmatchedResults = self.workingState.unmatchedResults;
+        }
+    }
+};

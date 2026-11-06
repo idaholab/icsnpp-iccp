@@ -1,0 +1,10 @@
+STATE_TIME	state_q_time	2	-	-	1700000000	-	-
+REAL_COV	real_extended	-	-	10.0	1700000000	42	-
+STATE_COV	state_extended	2	-	-	1700000000	42	-
+DISCRETE_COV	discrete_extended	-	123	-	1700000000	42	-
+REAL_TIME_EXT	real_q_time_extended	-	-	10.0	1700000000123	-	-
+STATE_TIME_EXT	state_q_time_extended	2	-	-	1700000000123	-	-
+DISCRETE_TIME_EXT	discrete_q_time_extended	-	123	-	1700000000123	-	-
+BAD_ORDER	-	-	-	-	-	-	6261642d6f72646572
+BAD_MILLISECONDS	-	-	-	-	-	-	6261642d6d696c6c697365636f6e6473
+BAD_COV	-	-	-	-	-	-	6261642d636f76

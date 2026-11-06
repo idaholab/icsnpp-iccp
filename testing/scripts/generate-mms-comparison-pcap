@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ "$#" -ne 1 ]]; then
+    echo "usage: $0 OUTPUT.pcap" >&2
+    exit 2
+fi
+
+output_pcap="$1"
+temporary_hexdump="$(mktemp)"
+trap 'rm -f "${temporary_hexdump}"' EXIT
+packet_index=0
+
+hex_length() {
+    printf '%02x' "$((${#1} / 2))"
+}
+
+tlv() {
+    local tag="$1"
+    local content="$2"
+    printf '%s%s%s' "${tag}" "$(hex_length "${content}")" "${content}"
+}
+
+hex_string() {
+    printf '%s' "$1" | xxd -p -c 999
+}
+
+emit_packet() {
+    local timestamp
+    timestamp="$(printf '2020-01-01T00:00:00.%06dZ' "${packet_index}")"
+    printf '%s' "$1" | xxd -r -p | xxd -g 1 |
+        sed "1s/^/${timestamp} /" >> "${temporary_hexdump}"
+    printf '\n' >> "${temporary_hexdump}"
+    packet_index=$((packet_index + 1))
+}
+
+read_request() {
+    local invoke_id="$1"
+    local object_name="$2"
+    local domain_hex
+    local item_hex
+    local object
+    local variable_specification
+    local variable_entry
+    local access_specification
+    local read_body
+    local service
+
+    domain_hex="$(hex_string CONTROL_CENTER_B)"
+    item_hex="$(hex_string "${object_name}")"
+    object="$(tlv a1 "$(tlv 1a "${domain_hex}")$(tlv 1a "${item_hex}")")"
+    variable_specification="$(tlv a0 "${object}")"
+    variable_entry="$(tlv 30 "${variable_specification}")"
+    access_specification="$(tlv a0 "${variable_entry}")"
+    read_body="$(tlv a1 "${access_specification}")"
+    service="$(tlv a4 "${read_body}")"
+    tlv a0 "0201$(printf '%02x' "${invoke_id}")${service}"
+}
+
+emit_packet "$(read_request 10 Next_DSTransfer_Set)"
+emit_packet "$(read_request 11 Transfer_Set_Name)"
+emit_packet "$(read_request 12 Transfer_Set_Time_Stamp)"
+emit_packet "$(read_request 13 Transfer_Report_ACK)"
+emit_packet "$(read_request 14 Transfer_Report_NACK)"
+
+# Read responses for GMTBasedS=1700000000 and DSConditions bits 0, 2, and 4.
+emit_packet "a10d020114a408a10685046553f100"
+emit_packet "a10b020115a406a104840203a8"
+
+TZ=UTC text2pcap -q -F pcap -l 147 -t ISO \
+    "${temporary_hexdump}" "${output_pcap}"

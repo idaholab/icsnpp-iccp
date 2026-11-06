@@ -1,0 +1,9 @@
+delete	requested	10	icc	D	L1	0	-	-	T	-	-
+delete	confirmed_count_deviation	10	icc	D	L1	-	2	1	F	standards_deviation	deleted_count_differs_requested_names
+delete	requested	11	-	-	-	1	-	-	-	standards_deviation	delete_not_specific_domain_vector
+delete	confirmed_profile_deviation	11	-	-	-	-	1	1	F	standards_deviation	delete_not_specific_domain_vector
+delete	invalid_identifier	12	icc	D	L3	0	-	-	T	-	-
+delete	requested	13	icc	D	L3	0	-	-	T	-	-
+delete	confirmed_count_deviation	13	icc	D	L3	-	1	0	T	standards_deviation	deleted_count_differs_requested_names
+delete	requested	14	icc	D	L3	0	-	-	T	-	-
+delete	confirmed_count_deviation	14	icc	D	L3	-	0	1	F	standards_deviation	matched_count_differs_requested_names

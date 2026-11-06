@@ -1,0 +1,653 @@
+# Copyright 2026, Battelle Energy Alliance, LLC. All Rights Reserved.
+
+################################################################################
+##
+## ICSNPP - ICCP
+##
+## This file implements bounded Basic Encoding Rules (BER) parsing and
+## validation used by ICCP.
+##
+## Christopher B. Peterson and Christian J Weelborg
+## Idaho National Lab, November 2026
+##
+################################################################################
+
+module ICCP_BER;
+
+import spicy;
+
+# Runtime safety defaults. These bounds apply before upper-layer MMS/ICCP
+# semantics. They can be revisited as representative traffic demonstrates a
+# legitimate need, but must never be removed without replacement limits.
+const MAX_HIGH_TAG_OCTETS: uint64 = 5;
+const MAX_LENGTH_OCTETS: uint64 = 4;
+const MAX_VALUE_LENGTH: uint64 = 16 * 1024 * 1024;
+const MAX_NESTING_DEPTH: uint64 = 32;
+const MAX_ELEMENT_COUNT: uint64 = 4096;
+const MAX_INTEGER_OCTETS: uint64 = 8;
+const MAX_OID_ARC_OCTETS: uint64 = 9;
+const MAX_OID_VALUE_LENGTH: uint64 = 1024;
+const MAX_OID_ARCS: uint64 = 128;
+const MAX_OID_TEXT_LENGTH: uint64 = 2048;
+
+function tlvEnvelopeSequenceIsSafe(
+    value: bytes, start: uint64, limit: uint64,
+    depth: uint64, elements: uint64&
+): bool {
+    if (depth > MAX_NESTING_DEPTH || start > limit || limit > |value|)
+        return False;
+
+    local offset = start;
+    while (offset < limit) {
+        *elements += 1;
+        if (*elements > MAX_ELEMENT_COUNT)
+            return False;
+
+        local first = *value.at(offset);
+        local constructed = (first & 0x20) != 0;
+        local lowTag = first & 0x1f;
+        offset += 1;
+
+        if (lowTag == 0x1f) {
+            local tagOctets: uint64 = 0;
+            local tagValue: uint64 = 0;
+            local more = True;
+            while (more) {
+                if (offset >= limit)
+                    return False;
+
+                local octet = *value.at(offset);
+                offset += 1;
+                tagOctets += 1;
+                if (tagOctets > MAX_HIGH_TAG_OCTETS)
+                    return False;
+                if (tagOctets == 1 && (octet & 0x7f) == 0)
+                    return False;
+
+                tagValue = (tagValue << 7) | uint64(octet & 0x7f);
+                more = (octet & 0x80) != 0;
+            }
+            if (tagValue < 31)
+                return False;
+        }
+
+        if (offset >= limit)
+            return False;
+
+        local firstLength = *value.at(offset);
+        offset += 1;
+        local contentLength: uint64 = 0;
+        if ((firstLength & 0x80) == 0)
+            contentLength = uint64(firstLength);
+        else {
+            local lengthOctets = uint64(firstLength & 0x7f);
+            if (
+                lengthOctets == 0 ||
+                lengthOctets > MAX_LENGTH_OCTETS ||
+                lengthOctets > limit - offset
+            )
+                return False;
+            if (*value.at(offset) == 0)
+                return False;
+
+            local index: uint64 = 0;
+            while (index < lengthOctets) {
+                contentLength =
+                    (contentLength << 8) | uint64(*value.at(offset));
+                offset += 1;
+                index += 1;
+            }
+            if (contentLength < 128)
+                return False;
+        }
+
+        if (
+            contentLength > MAX_VALUE_LENGTH ||
+            contentLength > limit - offset
+        )
+            return False;
+
+        local contentEnd = offset + contentLength;
+
+        # Unknown high-tag-number constructed alternatives are intentionally
+        # opaque. Their IMPLICIT schema is not available to a generic BER
+        # walker, but their identifier and value boundary are still bounded.
+        if (
+            constructed &&
+            lowTag != 0x1f &&
+            ! tlvEnvelopeSequenceIsSafe(
+                value, offset, contentEnd, depth + 1, elements
+            )
+        )
+            return False;
+
+        offset = contentEnd;
+    }
+
+    return offset == limit;
+}
+
+# Validate one complete outer TLV and every schema-independent nested boundary
+# that can be checked safely before dispatching a detached upper-layer view.
+public function tlvEnvelopeIsSafe(value: bytes): bool {
+    if (|value| == 0)
+        return False;
+
+    local elements: uint64& = new uint64;
+    return tlvEnvelopeSequenceIsSafe(value, 0, |value|, 1, elements);
+}
+
+public type TagClass = enum {
+    UNIVERSAL = 0,
+    APPLICATION = 1,
+    CONTEXT_SPECIFIC = 2,
+    PRIVATE = 3
+};
+
+public type IdentifierOctet = bitfield(8) {
+    lowTag: 0..4;
+    constructed: 5 &convert=cast<bool>($$);
+    class_: 6..7 &convert=TagClass($$);
+};
+
+type HighTagOctet = bitfield(8) {
+    value: 0..6;
+    more: 7 &convert=cast<bool>($$);
+};
+
+type HighTagNumber = unit(tagNumber: uint64&, octetCount: uint64&) {
+    octet: HighTagOctet {
+        octetCount += 1;
+
+        if (*octetCount > MAX_HIGH_TAG_OCTETS)
+            throw "BER high-tag-number exceeds configured octet limit";
+
+        if (*octetCount == 1 && $$.value == 0)
+            throw "BER high-tag-number is not minimally encoded";
+
+        *tagNumber = ((*tagNumber) << 7) | $$.value;
+    }
+
+    next: HighTagNumber(tagNumber, octetCount) if (self.octet.more);
+};
+
+# BER identifier with bounded high-tag-number support.
+public type Identifier = unit {
+    var tagNumber: uint64 = 0;
+    var highTagOctetCount: uint64 = 0;
+    var tagNumberState: uint64& = new uint64;
+    var highTagOctetCountState: uint64& = new uint64;
+
+    first: IdentifierOctet {
+        if ($$.lowTag != 31) {
+            self.tagNumber = $$.lowTag;
+            *self.tagNumberState = $$.lowTag;
+        }
+    }
+
+    highTag: HighTagNumber(
+        self.tagNumberState,
+        self.highTagOctetCountState
+    ) if (self.first.lowTag == 31);
+
+    : void &requires=(
+        self.first.lowTag != 31 ||
+        (*self.highTagOctetCountState > 0 && *self.tagNumberState >= 31)
+    );
+
+    on %done {
+        self.tagNumber = *self.tagNumberState;
+        self.highTagOctetCount = *self.highTagOctetCountState;
+    }
+};
+
+public type LengthFirstOctet = bitfield(8) {
+    valueOrCount: 0..6;
+    longForm: 7 &convert=cast<bool>($$);
+};
+
+# BER definite length. Indefinite lengths are deliberately rejected until a
+# bounded end-of-contents implementation is added and tested.
+public type DefiniteLength = unit {
+    var value: uint64 = 0;
+    var encodedOctets: uint64 = 1;
+    var longOctetCount: uint64 = 0;
+
+    first: LengthFirstOctet {
+        if (! $$.longForm)
+            self.value = $$.valueOrCount;
+        else {
+            if ($$.valueOrCount == 0)
+                throw "BER indefinite length is unsupported";
+
+            if ($$.valueOrCount > MAX_LENGTH_OCTETS)
+                throw "BER length-of-length exceeds configured octet limit";
+        }
+    }
+
+    longOctets: uint8[self.first.valueOrCount]
+        if (self.first.longForm)
+        foreach {
+            self.longOctetCount += 1;
+
+            if (self.longOctetCount == 1 && $$ == 0)
+                throw "BER long-form length is not minimally encoded";
+
+            self.value = (self.value << 8) | $$;
+        }
+
+    : void &requires=(
+        (! self.first.longForm || self.value >= 128) &&
+        self.value <= MAX_VALUE_LENGTH
+    );
+
+    on %done {
+        if (self.first.longForm)
+            self.encodedOctets += self.longOctetCount;
+    }
+};
+
+# A bounded generic TLV used for unknown or not-yet-decoded content. Nested
+# decoders must parse from this value boundary rather than the outer stream.
+public type RawTLV = unit {
+    identifier: Identifier;
+    length: DefiniteLength;
+    value: bytes &size=self.length.value;
+};
+
+# Universal tag numbers used by Presentation, ACSE, MMS, and ICCP.
+public type UniversalTag = enum {
+    BOOLEAN = 1,
+    INTEGER = 2,
+    BIT_STRING = 3,
+    OCTET_STRING = 4,
+    NULL_VALUE = 5,
+    OBJECT_IDENTIFIER = 6,
+    OBJECT_DESCRIPTOR = 7,
+    EXTERNAL_VALUE = 8,
+    ENUMERATED = 10,
+    UTF8_STRING = 12,
+    SEQUENCE = 16,
+    SET = 17,
+    NUMERIC_STRING = 18,
+    PRINTABLE_STRING = 19,
+    TELETEX_STRING = 20,
+    IA5_STRING = 22,
+    UTC_TIME = 23,
+    GENERALIZED_TIME = 24,
+    GRAPHIC_STRING = 25,
+    VISIBLE_STRING = 26,
+    GENERAL_STRING = 27,
+    UNIVERSAL_STRING = 28,
+    CHARACTER_STRING = 29,
+    BMP_STRING = 30
+};
+
+function integerIsMinimal(value: bytes): bool {
+    if (|value| == 0 || |value| > MAX_INTEGER_OCTETS)
+        return False;
+
+    if (|value| == 1)
+        return True;
+
+    local first = *value.at(0);
+    local second = *value.at(1);
+
+    if (first == 0x00 && (second & 0x80) == 0)
+        return False;
+
+    if (first == 0xff && (second & 0x80) != 0)
+        return False;
+
+    return True;
+}
+
+public function bitStringIsValid(unusedBits: uint8, value: bytes): bool {
+    if (unusedBits > 7)
+        return False;
+
+    if (|value| == 0)
+        return unusedBits == 0;
+
+    if (unusedBits == 0)
+        return True;
+
+    local last = *value.at(|value| - 1);
+    local mask = cast<uint8>((1 << unusedBits) - 1);
+    return (last & mask) == 0;
+}
+
+function oidToString(value: bytes): string {
+    if (|value| == 0)
+        throw "BER OBJECT IDENTIFIER has an empty value";
+
+    if (|value| > MAX_OID_VALUE_LENGTH)
+        throw "BER OBJECT IDENTIFIER exceeds configured value length";
+
+    # Accumulate encoded arc strings and join once. Repeatedly appending to one
+    # string makes a many-arc identifier quadratic in its rendered length.
+    local oidParts: vector<bytes>;
+    local component: uint64 = 0;
+    local componentOctets: uint64 = 0;
+    local componentIndex: uint64 = 0;
+    local arcCount: uint64 = 0;
+    local offset: uint64 = 0;
+
+    while (offset < |value|) {
+        local octet = *value.at(offset);
+
+        if (componentOctets == 0 && octet == 0x80)
+            throw "BER OBJECT IDENTIFIER component is not minimally encoded";
+
+        componentOctets += 1;
+        if (componentOctets > MAX_OID_ARC_OCTETS)
+            throw "BER OBJECT IDENTIFIER component exceeds configured octet limit";
+
+        component = (component << 7) | (octet & 0x7f);
+        offset += 1;
+
+        if ((octet & 0x80) == 0) {
+            if (componentIndex == 0) {
+                local firstArc: uint64 = 2;
+                local secondArc: uint64 = 0;
+
+                if (component < 40) {
+                    firstArc = 0;
+                    secondArc = component;
+                }
+                else if (component < 80) {
+                    firstArc = 1;
+                    secondArc = component - 40;
+                }
+                else
+                    secondArc = component - 80;
+
+                oidParts.push_back(("%d" % firstArc).encode());
+                oidParts.push_back(("%d" % secondArc).encode());
+                arcCount = 2;
+            }
+            else {
+                arcCount += 1;
+                if (arcCount > MAX_OID_ARCS)
+                    throw "BER OBJECT IDENTIFIER exceeds configured arc limit";
+                oidParts.push_back(("%d" % component).encode());
+            }
+
+            component = 0;
+            componentOctets = 0;
+            componentIndex += 1;
+        }
+    }
+
+    if (componentOctets != 0)
+        throw "BER OBJECT IDENTIFIER component is truncated";
+
+    local oidText = b".".join(oidParts).decode(spicy::Charset::ASCII);
+    if (|oidText| > MAX_OID_TEXT_LENGTH)
+        throw "BER OBJECT IDENTIFIER exceeds configured rendered length";
+    return oidText;
+}
+
+function universalConstructedFormAllowed(tagNumber: uint64): bool {
+    switch (tagNumber) {
+        case 3, 4, 8, 12, 16, 17, 18, 19, 20, 22, 25, 26, 27, 28, 29, 30:
+            return True;
+        default:
+            return False;
+    }
+}
+
+function universalPrimitiveFormAllowed(tagNumber: uint64): bool {
+    return tagNumber != 8 && tagNumber != 16 && tagNumber != 17;
+}
+
+function constructedChildrenMustMatch(tagNumber: uint64): bool {
+    switch (tagNumber) {
+        case 3, 4, 12, 18, 19, 20, 22, 25, 26, 27, 28, 29, 30:
+            return True;
+        default:
+            return False;
+    }
+}
+
+public type BooleanValue = unit(length: uint64) {
+    : void &requires=length == 1;
+    encoded: uint8;
+    var value: bool;
+
+    on %done {
+        self.value = self.encoded != 0;
+    }
+};
+
+public type IntegerValue = unit(length: uint64) {
+    encoded: bytes &size=length;
+    : void &requires=integerIsMinimal(self.encoded);
+    var value: int64;
+
+    on %done {
+        self.value = self.encoded.to_int(spicy::ByteOrder::Big);
+    }
+};
+
+public type NullValue = unit(length: uint64) {
+    : void &requires=length == 0;
+};
+
+public type BitStringValue = unit(length: uint64) {
+    : void &requires=length >= 1;
+    unusedBits: uint8;
+    value: bytes &size=(length - 1);
+    : void &requires=bitStringIsValid(self.unusedBits, self.value);
+};
+
+public type OctetStringValue = unit(length: uint64) {
+    value: bytes &size=length;
+};
+
+public type CharacterStringValue = unit(length: uint64, utf8: bool) {
+    encoded: bytes &size=length;
+    var value: string;
+
+    on %done {
+        if (utf8)
+            self.value = self.encoded.decode(spicy::Charset::UTF8);
+        else
+            self.value = self.encoded.decode(spicy::Charset::ASCII);
+    }
+};
+
+public type ObjectIdentifierValue = unit(length: uint64) {
+    : void &requires=length <= MAX_OID_VALUE_LENGTH;
+    encoded: bytes &size=length;
+    var value: string;
+
+    on %done {
+        self.value = oidToString(self.encoded);
+    }
+};
+
+public type PrimitiveUniversalValue = unit(tagNumber: uint64, length: uint64) {
+    switch (tagNumber) {
+        1 -> boolean: BooleanValue(length);
+        2 -> integer: IntegerValue(length);
+        3 -> bitString: BitStringValue(length);
+        4 -> octetString: OctetStringValue(length);
+        5 -> nullValue: NullValue(length);
+        6 -> objectIdentifier: ObjectIdentifierValue(length);
+        10 -> enumerated: IntegerValue(length);
+        12 -> utf8String: CharacterStringValue(length, True);
+        18,
+        19,
+        22,
+        23,
+        24,
+        26 -> characterString: CharacterStringValue(length, False);
+        20,
+        25,
+        27,
+        28,
+        29,
+        30 -> characterStringBytes: OctetStringValue(length);
+        * -> raw: bytes &size=length;
+    };
+};
+
+# Parse one complete BER document with a shared resource budget. Upper layers
+# may use Element directly when they already own a ParseState.
+public type ParseState = struct {
+    depth: uint64;
+    elements: uint64;
+};
+
+public type Document = unit {
+    var state: ParseState& = new ParseState;
+    element: Element(self.state);
+};
+
+public type Element = unit(state: ParseState&) {
+    var startOffset: uint64;
+
+    on %init {
+        self.startOffset = self.offset();
+        state.depth += 1;
+        state.elements += 1;
+
+        if (state.depth > MAX_NESTING_DEPTH)
+            throw "BER nesting exceeds configured depth limit";
+
+        if (state.elements > MAX_ELEMENT_COUNT)
+            throw "BER collection exceeds configured element limit";
+    }
+
+    identifier: Identifier;
+    length: DefiniteLength;
+
+    : void &requires=(
+        self.identifier.first.class_ != TagClass::UNIVERSAL ||
+        (
+            self.identifier.first.constructed &&
+            universalConstructedFormAllowed(self.identifier.tagNumber)
+        ) ||
+        (
+            ! self.identifier.first.constructed &&
+            universalPrimitiveFormAllowed(self.identifier.tagNumber)
+        )
+    );
+
+    switch (self.identifier.first.constructed) {
+        True -> {
+            switch (
+                self.identifier.first.class_ == TagClass::UNIVERSAL &&
+                self.identifier.tagNumber == 8
+            ) {
+                True -> externalValue: ExternalValue(
+                    self.length.value,
+                    state
+                );
+                False -> constructedValue: ConstructedValue(
+                    self.length.value,
+                    state,
+                    self.identifier.first.class_,
+                    self.identifier.tagNumber
+                );
+            };
+        }
+        False -> {
+            switch (self.identifier.first.class_) {
+                TagClass::UNIVERSAL -> universalValue: PrimitiveUniversalValue(
+                    self.identifier.tagNumber,
+                    self.length.value
+                );
+                * -> taggedValue: bytes &size=self.length.value;
+            };
+        }
+    };
+
+    on %done {
+        if (self.offset() <= self.startOffset)
+            throw "BER element parser made no forward progress";
+
+        state.depth -= 1;
+    }
+};
+
+public type ConstructedValue = unit(
+    length: uint64,
+    state: ParseState&,
+    parentClass: TagClass,
+    parentTag: uint64
+) {
+    elements: Element(state)[] &eod foreach {
+        if (
+            parentClass == TagClass::UNIVERSAL &&
+            constructedChildrenMustMatch(parentTag) &&
+            (
+                $$.identifier.first.class_ != TagClass::UNIVERSAL ||
+                $$.identifier.tagNumber != parentTag
+            )
+        )
+            throw "BER constructed string contains a mismatched child tag";
+    }
+} &size=length;
+
+function externalOptionalRank(tagNumber: uint64): uint64 {
+    switch (tagNumber) {
+        case 6:
+            return 1;
+        case 2:
+            return 2;
+        case 7:
+            return 3;
+        default:
+            return 0;
+    }
+}
+
+# ASN.1 EXTERNAL carries optional direct/indirect references followed by one
+# context-specific encoding choice. The embedded [0] form is recursively
+# exposed as a child element; implicit [1]/[2] values remain bounded raw bytes
+# for Presentation to dispatch according to its negotiated context.
+public type ExternalValue = unit(length: uint64, state: ParseState&) {
+    var optionalRank: uint64 = 0;
+    var encodingCount: uint64 = 0;
+
+    elements: Element(state)[] &eod foreach {
+        if ($$.identifier.first.class_ == TagClass::UNIVERSAL) {
+            local rank = externalOptionalRank($$.identifier.tagNumber);
+
+            if (
+                self.encodingCount != 0 ||
+                rank == 0 ||
+                rank <= self.optionalRank
+            )
+                throw "BER EXTERNAL has invalid optional component ordering";
+
+            self.optionalRank = rank;
+        }
+        else if (
+            $$.identifier.first.class_ == TagClass::CONTEXT_SPECIFIC &&
+            $$.identifier.tagNumber <= 2
+        ) {
+            self.encodingCount += 1;
+
+            if (self.encodingCount > 1)
+                throw "BER EXTERNAL has multiple encoding choices";
+
+            if (
+                ($$.identifier.tagNumber == 0 &&
+                 ! $$.identifier.first.constructed) ||
+                ($$.identifier.tagNumber != 0 &&
+                 $$.identifier.first.constructed)
+            )
+                throw "BER EXTERNAL encoding choice has invalid form";
+        }
+        else
+            throw "BER EXTERNAL contains an invalid component";
+    }
+
+    on %done {
+        if (self.encodingCount != 1)
+            throw "BER EXTERNAL is missing its encoding choice";
+    }
+} &size=length;

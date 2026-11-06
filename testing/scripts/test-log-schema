@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+types_file="${project_dir}/scripts/iccp_types.zeek"
+schema_file="${project_dir}/docs/LOG_SCHEMA.md"
+test_root="$(mktemp -d)"
+expected="${test_root}/expected.tsv"
+documented="${test_root}/documented.tsv"
+required_records="${test_root}/required-records.txt"
+source_records="${test_root}/source-records.txt"
+documented_records="${test_root}/documented-records.txt"
+
+trap 'rm -rf "${test_root}"' EXIT
+
+printf '%s\n' \
+    ControlInfo \
+    ErrorInfo \
+    Info \
+    ObjectInfo \
+    TransferInfo > "${required_records}"
+
+awk '
+    /type (Info|ObjectInfo|TransferInfo|ControlInfo|ErrorInfo): record/ {
+        record=$2
+        sub(":", "", record)
+        inside=1
+        next
+    }
+    inside && /^    };/ {
+        inside=0
+        next
+    }
+    inside && /&log/ {
+        field=$1
+        sub(":", "", field)
+        type=$2
+        sub(";", "", type)
+        required=$0 ~ /&optional/ ? "no" : "yes"
+        printf "%s\t%s\t%s\t%s\n", record, field, type, required
+    }
+' "${types_file}" | LC_ALL=C sort > "${expected}"
+
+awk -F '|' '
+    function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+    }
+    function unquote(value) {
+        return substr(value, 2, length(value) - 2)
+    }
+    BEGIN {
+        record="Info"
+    }
+    /`iccp_objects\.log` uses `ICCP::ObjectInfo`/ {
+        record="ObjectInfo"
+    }
+    /`iccp_transfers\.log` uses `ICCP::TransferInfo`/ {
+        record="TransferInfo"
+    }
+    /`iccp_errors\.log` uses `ICCP::ErrorInfo`/ {
+        record="ErrorInfo"
+    }
+    /`iccp_controls\.log` uses `ICCP::ControlInfo`/ {
+        record="ControlInfo"
+    }
+    /^\|/ {
+        field=trim($2)
+        type=trim($3)
+        required=trim($4)
+        if (field ~ /^`[[:alnum:]_]+`$/ &&
+            type ~ /^`[[:alnum:]_]+`$/ &&
+            required ~ /^(yes|no)$/) {
+            printf "%s\t%s\t%s\t%s\n", record, unquote(field), \
+                unquote(type), required
+        }
+    }
+' "${schema_file}" | LC_ALL=C sort > "${documented}"
+
+cut -f1 "${expected}" | LC_ALL=C sort -u > "${source_records}"
+cut -f1 "${documented}" | LC_ALL=C sort -u > "${documented_records}"
+
+if ! diff -u "${required_records}" "${source_records}"; then
+    echo "did not discover all five ICCP log records in iccp_types.zeek" >&2
+    exit 1
+fi
+if ! diff -u "${required_records}" "${documented_records}"; then
+    echo "did not discover all five ICCP log records in LOG_SCHEMA.md" >&2
+    exit 1
+fi
+
+expected_count="$(wc -l < "${expected}")"
+documented_count="$(wc -l < "${documented}")"
+if [[ "${expected_count}" -eq 0 || "${documented_count}" -eq 0 ]]; then
+    echo "no ICCP log fields were discovered" >&2
+    exit 1
+fi
+
+if ! diff -u "${expected}" "${documented}"; then
+    echo "LOG_SCHEMA.md and ICCP Zeek records differ" >&2
+    exit 1
+fi
+
+echo "documented ${expected_count} ICCP log fields in their owning records"

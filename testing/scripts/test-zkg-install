@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+projectDir="$(cd "${scriptDir}/../.." && pwd)"
+testRoot="$(mktemp -d)"
+snapshotDir="${testRoot}/source"
+stateDir="${testRoot}/state"
+configFile="${testRoot}/zkg.conf"
+gitConfigFile="${testRoot}/git.conf"
+gitHooksDir="${testRoot}/git-hooks"
+gitTemplateDir="${testRoot}/git-template"
+traceFile="${testRoot}/synthetic.pcap"
+runDir="${testRoot}/run"
+# `zkg install` first creates a clean test stage and then creates a separate
+# clean installation stage. Both stages build the memory-capped Spicy plugin,
+# so one successful command can legitimately take about thirty minutes in the
+# supported single-worker mode. Keep a finite ceiling that covers both builds
+# without requiring more compile parallelism on a memory-constrained host.
+zkgTimeoutSeconds=2400
+
+trap 'rm -rf "${testRoot}"' EXIT
+
+mkdir -p \
+    "${snapshotDir}" \
+    "${stateDir}" \
+    "${runDir}" \
+    "${gitHooksDir}" \
+    "${gitTemplateDir}"
+
+printf '%s\n' \
+    '[user]' \
+    '    name = ICCP package test' \
+    '    email = package-test.invalid' \
+    '[commit]' \
+    '    gpgSign = false' \
+    '[tag]' \
+    '    gpgSign = false' \
+    '[core]' \
+    "    hooksPath = ${gitHooksDir}" > "${gitConfigFile}"
+
+# Keep both the snapshot commit and zkg's child Git processes independent of
+# developer/system signing, hook, and template configuration.
+export GIT_CONFIG_GLOBAL="${gitConfigFile}"
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_COUNT=0
+export GIT_TEMPLATE_DIR="${gitTemplateDir}"
+
+run_zkg() {
+    local status
+
+    set +e
+    timeout --kill-after=10s "${zkgTimeoutSeconds}s" \
+        zkg --configfile "${configFile}" "$@"
+    status=$?
+    set -e
+
+    if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then
+        echo "zkg $1 exceeded the ${zkgTimeoutSeconds}-second test limit" >&2
+    fi
+
+    if [[ "${status}" -ne 0 ]]; then
+        # zkg captures the package test command's output inside its temporary
+        # stage and otherwise reports only the exit code. Surface those
+        # diagnostics before this script removes its private temporary tree.
+        while IFS= read -r -d '' diagnostic; do
+            echo "zkg package-test diagnostic: ${diagnostic}" >&2
+            sed -n '1,240p' "${diagnostic}" >&2
+        done < <(
+            find "${stateDir}" -type f \
+                \( -name 'zkg.test_command.stdout' -o \
+                   -name 'zkg.test_command.stderr' \) -print0
+        )
+    fi
+
+    return "${status}"
+}
+
+# The Git-known pathname set is the snapshot base.  A review worktree can,
+# however, introduce a new build/runtime dependency before it is staged. Add
+# only files explicitly named by the analyzer and Zeek load manifests so the
+# install smoke tests the current package closure without sweeping arbitrary
+# untracked (and potentially sensitive) files into the snapshot.
+declare -a declaredPackagePaths=()
+declare -a additionalPackagePaths=()
+testClosurePathCount=0
+
+while IFS= read -r analyzerSource; do
+    declaredPackagePaths+=("analyzer/${analyzerSource}")
+done < <(
+    awk '{
+        for (i = 1; i <= NF; ++i) {
+            if ($i ~ /^[A-Za-z0-9_.\/-]+\.(spicy|evt)$/)
+                print $i
+        }
+    }' "${projectDir}/analyzer/CMakeLists.txt"
+)
+
+while IFS= read -r zeekModule; do
+    declaredPackagePaths+=("scripts/${zeekModule}.zeek")
+done < <(
+    sed -nE \
+        's|^[[:space:]]*@load[[:space:]]+\./([A-Za-z0-9_./-]+)[[:space:]]*$|\1|p' \
+        "${projectDir}/scripts/__load__.zeek"
+)
+
+for declaredPath in "${declaredPackagePaths[@]}"; do
+    if [[ "${declaredPath}" == /* || "/${declaredPath}/" == *'/../'* ]]; then
+        echo "package manifest path escapes the source tree: ${declaredPath}" >&2
+        exit 1
+    fi
+
+    if [[ ! -e "${projectDir}/${declaredPath}" ]]; then
+        echo "package manifest references a missing file: ${declaredPath}" >&2
+        exit 1
+    fi
+
+    declaredAbsolute="${projectDir}/${declaredPath}"
+    if [[ -L "${declaredAbsolute}" ]]; then
+        echo "package manifest must not reference a symbolic link: ${declaredPath}" >&2
+        exit 1
+    fi
+
+    declaredResolved="$(realpath -e -- "${declaredAbsolute}")"
+    if [[ "${declaredResolved}" != "${declaredAbsolute}" ]]; then
+        echo "package manifest must not traverse a symbolic link or path alias: ${declaredPath}" >&2
+        exit 1
+    fi
+
+    case "${declaredResolved}" in
+        "${projectDir}/"*)
+            ;;
+        *)
+            echo "package manifest resolves outside the source tree: ${declaredPath}" >&2
+            exit 1
+            ;;
+    esac
+
+    if git -C "${projectDir}" check-ignore -q -- "${declaredPath}"; then
+        echo "package manifest references an ignored file: ${declaredPath}" >&2
+        exit 1
+    fi
+
+    if ! git -C "${projectDir}" ls-files --error-unmatch -- \
+        "${declaredPath}" >/dev/null 2>&1; then
+        echo "including manifest-declared untracked package file: ${declaredPath}" >&2
+        additionalPackagePaths+=("${declaredPath}")
+    fi
+done
+
+# A release review is commonly verified before its new tests and baselines are
+# staged.  The package's test_command runs from the clean snapshot, so omitting
+# those Git-visible files can either skip the new tests or leave a tracked test
+# without its newly added baseline.  Admit only the narrow, text-only btest
+# closure below; never sweep arbitrary untracked files or capture artifacts
+# into the package snapshot.
+while IFS= read -r -d '' testPath; do
+    relativeTail=""
+    sizeLimit=0
+    case "${testPath}" in
+        testing/tests/*.zeek)
+            relativeTail="${testPath#testing/tests/}"
+            sizeLimit=$((256 * 1024))
+            ;;
+        testing/Baseline/tests.*/*)
+            relativeTail="${testPath#testing/Baseline/}"
+            sizeLimit=$((1024 * 1024))
+            ;;
+        *)
+            echo "unexpected untracked test-closure path: ${testPath}" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ -z "${relativeTail}" || "${relativeTail}" == */../* ||
+          "${relativeTail}" == ../* ]]; then
+        echo "test-closure path escapes its allowed tree: ${testPath}" >&2
+        exit 1
+    fi
+
+    testAbsolute="${projectDir}/${testPath}"
+    if [[ ! -f "${testAbsolute}" || -L "${testAbsolute}" ]]; then
+        echo "test-closure path must be a regular non-symlink file: ${testPath}" >&2
+        exit 1
+    fi
+
+    testResolved="$(realpath -e -- "${testAbsolute}")"
+    if [[ "${testResolved}" != "${testAbsolute}" ]]; then
+        echo "test-closure path must not traverse an alias: ${testPath}" >&2
+        exit 1
+    fi
+
+    testSize="$(stat -c %s -- "${testAbsolute}")"
+    if ((testSize > sizeLimit)); then
+        echo "test-closure file exceeds its private snapshot bound: ${testPath}" >&2
+        exit 1
+    fi
+
+    if [[ -s "${testAbsolute}" ]] && ! LC_ALL=C grep -Iq . -- "${testAbsolute}"; then
+        echo "test-closure file is not text: ${testPath}" >&2
+        exit 1
+    fi
+
+    additionalPackagePaths+=("${testPath}")
+    testClosurePathCount=$((testClosurePathCount + 1))
+done < <(
+    git -C "${projectDir}" ls-files --others --exclude-standard -z -- \
+        testing/tests testing/Baseline
+)
+
+if ((testClosurePathCount > 0)); then
+    echo "including ${testClosurePathCount} Git-visible untracked btest files in package-test snapshot"
+fi
+
+(
+    cd "${projectDir}"
+    while IFS= read -r -d '' sourcePath; do
+        if [[ -f "${sourcePath}" || -L "${sourcePath}" ]]; then
+            printf '%s\0' "${sourcePath}"
+        fi
+    done < <(
+        {
+            git ls-files --cached -z
+            if [[ "${#additionalPackagePaths[@]}" -gt 0 ]]; then
+                printf '%s\0' "${additionalPackagePaths[@]}"
+            fi
+        }
+    )
+) |
+    tar -C "${projectDir}" --null --files-from=- -cf - |
+    tar -C "${snapshotDir}" -xf -
+
+for privatePath in reference pcaps .release-private; do
+    if [[ -e "${snapshotDir}/${privatePath}" ]]; then
+        echo "private path was copied into package snapshot: ${privatePath}" >&2
+        exit 1
+    fi
+done
+
+git -C "${snapshotDir}" init -q
+git -C "${snapshotDir}" add .
+git -C "${snapshotDir}" commit -q -m 'local package test snapshot'
+
+printf '%s\n' \
+    '[sources]' \
+    '[paths]' \
+    "state_dir = ${stateDir}" \
+    "script_dir = ${stateDir}/script_dir" \
+    "plugin_dir = ${stateDir}/plugin_dir" \
+    "bin_dir = ${stateDir}/bin" \
+    'zeek_dist =' \
+    '[templates]' > "${configFile}"
+
+run_zkg install \
+    --nodeps --nosuggestions --force "${snapshotDir}"
+
+installedScriptRoot="$(run_zkg config script_dir)"
+installedPluginRoot="$(run_zkg config plugin_dir)"
+defaultZeekPath="$(zeek-config --zeekpath)"
+defaultPluginPath="$(zeek-config --plugin_dir)"
+testZeekPath="${installedScriptRoot}:${defaultZeekPath}"
+testPluginPath="${installedPluginRoot}:${defaultPluginPath}"
+
+pluginListing="$(
+    ZEEKPATH="${testZeekPath}" \
+    ZEEK_PLUGIN_PATH="${testPluginPath}" \
+        zeek -NN
+)"
+
+if ! grep -q 'ANALYZER_ICCP_TCP' <<<"${pluginListing}"; then
+    echo 'installed package did not register ANALYZER_ICCP_TCP' >&2
+    exit 1
+fi
+
+bash "${scriptDir}/generate-synthetic-pcap" "${traceFile}"
+(
+    cd "${runDir}"
+    ZEEKPATH="${testZeekPath}" \
+    ZEEK_PLUGIN_PATH="${testPluginPath}" \
+        zeek -Cr "${traceFile}" packages
+    zeek-cut layer message_type < iccp.log > installed-output
+    grep -qx $'mms\t8' installed-output
+    grep -qx $'mms\t9' installed-output
+)
+
+echo 'zkg installation and installed-log test passed'

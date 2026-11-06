@@ -1,0 +1,10 @@
+define	requested	10	GOOD	1	F	-	-	verified
+define	requested	14	GOOD	1	F	-	-	verified
+define	requested	11	AA_BAD	1	F	standards_deviation	create_data_value_invalid_scope	verified
+define	confirmed_profile_deviation	11	AA_BAD	1	F	standards_deviation	create_data_value_invalid_scope	verified
+define	requested	12	SPECIAL_BAD	1	F	standards_deviation	create_special_member_not_domain_specific	verified
+define	confirmed_profile_deviation	12	SPECIAL_BAD	1	F	standards_deviation	create_special_member_not_domain_specific	verified
+define	requested	13	ALT_BAD	1	F	standards_deviation	create_member_alternate_access	verified
+define	confirmed_profile_deviation	13	ALT_BAD	1	F	standards_deviation	create_member_alternate_access	verified
+define	confirmed	10	GOOD	1	T	-	-	verified
+define	confirmed_existing_name	14	GOOD	1	T	standards_deviation	define_existing_name_confirmed	verified

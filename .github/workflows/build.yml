@@ -1,0 +1,107 @@
+name: build-and-test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zeek-8:
+    name: Zeek ${{ matrix.zeek }}
+    runs-on: ubuntu-latest
+    # Spicy-generated translation units can use several GiB each. Keep the
+    # compatibility build serial so it is reliable on standard hosted runners.
+    timeout-minutes: 90
+    env:
+      HILTI_JIT_PARALLELISM: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exercise the latest patch release in each supported Zeek 8 minor line.
+        zeek:
+          - 8.0.10
+          - 8.1.2
+          - 8.2.2
+    container:
+      image: zeek/zeek:${{ matrix.zeek }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build and capture tooling
+        shell: bash
+        run: |
+          if ! command -v cmake >/dev/null ||
+             ! command -v make >/dev/null ||
+             ! command -v cc >/dev/null ||
+             ! command -v c++ >/dev/null ||
+             ! command -v capinfos >/dev/null ||
+             ! command -v editcap >/dev/null ||
+             ! command -v mergecap >/dev/null ||
+             ! command -v text2pcap >/dev/null ||
+             ! command -v rawshark >/dev/null ||
+             ! command -v xxd >/dev/null ||
+             ! command -v git >/dev/null ||
+             [[ ! -f /usr/include/pcap.h ]]; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential cmake git libpcap-dev wireshark-common xxd
+          fi
+
+      - name: Show toolchain
+        run: |
+          zeek --version
+          spicyz --version
+          cmake --version
+          zkg --version
+
+      - name: Check test-script syntax
+        shell: bash
+        run: |
+          while IFS= read -r -d '' script; do
+            if head -n 1 "${script}" | grep -Eq '^#!.*(ba)?sh([[:space:]]|$)'; then
+              bash -n "${script}"
+            fi
+          done < <(find testing/scripts -maxdepth 1 -type f -print0)
+
+      - name: Build analyzer
+        run: |
+          cmake -S . -B build
+          cmake --build build --parallel 1
+
+      - name: Verify plugin registration
+        shell: bash
+        run: |
+          plugin_listing="$(ZEEK_PLUGIN_PATH="${PWD}/build" zeek -NN)"
+          grep -q "ANALYZER_ICCP_TCP" <<<"${plugin_listing}"
+
+      - name: Run production analyzer tests
+        run: bash testing/scripts/test-btest
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeek-${{ matrix.zeek }}-test-diagnostics
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+          path: |
+            analyzer/hilti-jit-error.log
+            build/**/hilti-jit-error.log
+            testing/.tmp/**/.stderr
+            testing/.tmp/**/.stdout
+            testing/.tmp/**/.diag
+            testing/.tmp/**/hilti-jit-error.log
+            testing/.tmp/**/output
+            testing/.tmp/**/pairs
