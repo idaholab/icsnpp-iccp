@@ -6,7 +6,7 @@ summary = ICSNPP ICCP/TASE.2 analyzer
 description = A Spicy-based Zeek plugin for parsing and logging ICCP/TASE.2 traffic carried by MMS.
 tags = ICCP, TASE.2, MMS, ics, ICS, ICSNPP, zeek, spicy
 depends =
-    zeek >=8.0.0,<9.0.0
+    zeek >=8.0.0,<10.0.0
 build_command = mkdir -p build && cd build && SPICYZ=$(command -v spicyz || echo %(package_base)s/spicy-plugin/build/bin/spicyz) cmake .. && cmake --build . --parallel 2
 
 [template]

@@ -208,13 +208,14 @@ Exact field definitions and provenance values are documented in
 ## Validation boundary
 
 Positive and negative synthetic tests cover representative paths for the
-semantic classifications listed above. Generated comparison captures and
-independent decoders provide additional structural validation; authorized
-deployment captures can extend that evidence but are not distributed with the
-package. This regression evidence is not a formal conformance suite, and the
-project does not claim that every deployed product, optional exchange,
-encoding, or error path has been observed. Unknown and private content is
-therefore kept visible and bounded rather than forced into a known category.
+semantic classifications listed above. Committed synthetic comparison
+captures and independent decoders provide additional structural validation;
+authorized deployment captures can extend that evidence but are not
+distributed with the package. This regression evidence is not a formal
+conformance suite, and the project does not claim that every deployed product,
+optional exchange, encoding, or error path has been observed. Unknown and
+private content is therefore kept visible and bounded rather than forced into
+a known category.
 
 Known profile limits include definite-length BER only, the base VisibleString
 MMS Identifier form (negotiated UTF-8 Identifiers are not yet connection-state

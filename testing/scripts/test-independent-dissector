@@ -6,7 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/../.." && pwd)"
 build_dir="${project_dir}/build"
 
-for command_name in rawshark text2pcap zeek zeek-cut; do
+for command_name in rawshark zeek zeek-cut; do
     if ! command -v "${command_name}" >/dev/null; then
         echo "independent comparison requires ${command_name}" >&2
         exit 1

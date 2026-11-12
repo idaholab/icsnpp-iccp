@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  zeek-8:
+  zeek:
     name: Zeek ${{ matrix.zeek }}
     runs-on: ubuntu-latest
     # Spicy-generated translation units can use several GiB each. Keep the
@@ -25,11 +25,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Exercise the latest patch release in each supported Zeek 8 minor line.
+        # Exercise supported Zeek 8 minor lines and the Zeek 9 release line.
         zeek:
           - 8.0.10
           - 8.1.2
           - 8.2.2
+          - 9.0.0
     container:
       image: zeek/zeek:${{ matrix.zeek }}
 
@@ -37,25 +38,19 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install build and capture tooling
+      - name: Install build tooling
         shell: bash
         run: |
           if ! command -v cmake >/dev/null ||
              ! command -v make >/dev/null ||
              ! command -v cc >/dev/null ||
              ! command -v c++ >/dev/null ||
-             ! command -v capinfos >/dev/null ||
-             ! command -v editcap >/dev/null ||
-             ! command -v mergecap >/dev/null ||
-             ! command -v text2pcap >/dev/null ||
-             ! command -v rawshark >/dev/null ||
-             ! command -v xxd >/dev/null ||
              ! command -v git >/dev/null ||
              [[ ! -f /usr/include/pcap.h ]]; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y --no-install-recommends \
-              build-essential cmake git libpcap-dev wireshark-common xxd
+              build-essential cmake git libpcap-dev
           fi
 
       - name: Show toolchain
