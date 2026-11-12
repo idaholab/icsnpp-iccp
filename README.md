@@ -167,6 +167,9 @@ schema, package-installation, and supported-version tests. Some validation
 steps require Wireshark command-line tools and standard Unix utilities; see the
 verification script for the complete dependency checks.
 
+The default `btest` suite copies committed packet-capture fixtures from
+`testing/traces` and requires no packet-capture generation tools.
+
 ## ICSNPP Packages
 
 Additional ICSNPP protocol parsers are available from the

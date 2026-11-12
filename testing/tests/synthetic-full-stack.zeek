@@ -5,7 +5,7 @@
 # @TEST-EXEC: bash ${SCRIPTS}/generate-synthetic-pcap synthetic.pcap
 # @TEST-EXEC: bash ${SCRIPTS}/generate-synthetic-pcap synthetic-copy.pcap
 # @TEST-EXEC: cmp synthetic.pcap synthetic-copy.pcap
-# @TEST-EXEC: mergecap -F pcap -w retransmitted.pcap synthetic.pcap synthetic.pcap
+# @TEST-EXEC: bash ${SCRIPTS}/generate-synthetic-pcap retransmitted.pcap retransmitted
 # @TEST-EXEC: mkdir clean-run retransmitted-run
 # @TEST-EXEC: cd clean-run && zeek -Cr ../synthetic.pcap ${PACKAGE}/__load__.zeek
 # @TEST-EXEC: cd retransmitted-run && zeek -Cr ../retransmitted.pcap ${PACKAGE}/__load__.zeek
