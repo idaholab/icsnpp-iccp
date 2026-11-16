@@ -48,7 +48,8 @@ may not represent a complete conversation.
 
 ### Package Manager
 
-This package requires Zeek 8.x and a compatible Zeek Spicy installation.
+This package requires Zeek 8.x or 9.x and a compatible Zeek Spicy
+installation.
 
 ```bash
 zkg refresh
@@ -66,8 +67,8 @@ scripts will load automatically.
 
 ## Installation (via git clone)
 
-The manual build requires Zeek 8.x, a compatible Spicy toolchain, CMake 3.15
-or newer, and a supported C/C++ compiler.
+The manual build requires Zeek 8.x or 9.x, a compatible Spicy toolchain,
+CMake 3.15 or newer, and a supported C/C++ compiler.
 
 ```bash
 git clone https://github.com/idaholab/icsnpp-iccp.git
@@ -166,6 +167,9 @@ The workflow builds the analyzer and runs parser, policy, malformed-input,
 schema, package-installation, and supported-version tests. Some validation
 steps require Wireshark command-line tools and standard Unix utilities; see the
 verification script for the complete dependency checks.
+
+The default `btest` suite copies committed packet-capture fixtures from
+`testing/traces` and requires no packet-capture generation tools.
 
 ## ICSNPP Packages
 

@@ -255,15 +255,12 @@ if [[ "$(awk -F '\t' 'NR == 2 {print $3 ":" $7 ":" $8 ":" $9}' "${read_classific
 fi
 
 # Exercise ACK-established capture-gap recovery through the actual PCAP reader.
-# The generator's editcap output defaults to pcapng, while the deliberately
-# small independent reader accepts classic PCAP only, matching the corpus
-# harness's tcpdump/mergecap normalization.
-gap_pcapng="${test_dir}/gap.pcapng"
+# The committed fixture uses classic PCAP, matching the corpus harness's
+# tcpdump/mergecap normalization.
 gap_pcap="${test_dir}/gap.pcap"
 gap_summary="${test_dir}/gap.summary"
 "${script_dir}/generate-synthetic-pcap" \
-    "${gap_pcapng}" direct-mms-gap-recovery > /dev/null
-editcap -F pcap "${gap_pcapng}" "${gap_pcap}"
+    "${gap_pcap}" direct-mms-gap-recovery > /dev/null
 python3 "${script_dir}/extract-local-mms.py" \
     "${gap_pcap}" "${test_dir}/gap-ideal.pcap" "${gap_summary}" \
     --causal-output "${test_dir}/gap-causal.pcap" > /dev/null

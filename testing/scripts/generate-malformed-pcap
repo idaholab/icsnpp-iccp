@@ -2,25 +2,14 @@
 
 set -euo pipefail
 
-if [[ "$#" -ne 2 ]]; then
-    echo "usage: $0 CASE OUTPUT.pcap" >&2
-    exit 2
-fi
-
-case_name="$1"
-output_pcap="$2"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-corpus="${script_dir}/../fuzz/stack-regressions.tsv"
-temporary_hexdump="$(mktemp)"
-trap 'rm -f "${temporary_hexdump}"' EXIT
+scenario="${1:?usage: generate-malformed-pcap SCENARIO OUTPUT}"
+output_pcap="${2:?usage: generate-malformed-pcap SCENARIO OUTPUT}"
+fixture="${script_dir}/../traces/malformed/${scenario}.pcap"
 
-hex_input="$(awk -F '\t' -v name="${case_name}" '$1 == name { print $2 }' "${corpus}")"
-if [[ -z "${hex_input}" ]]; then
-    echo "unknown malformed stack case: ${case_name}" >&2
+if [[ ! -f "${fixture}" ]]; then
+    echo "unknown malformed capture scenario: ${scenario}" >&2
     exit 2
 fi
 
-printf '%s' "${hex_input}" | xxd -r -p | xxd -g 1 |
-    sed '1s/^/2020-01-01T00:00:00.000000Z /' > "${temporary_hexdump}"
-TZ=UTC text2pcap -q -F pcap -t ISO -T 49152,102 \
-    "${temporary_hexdump}" "${output_pcap}"
+cp -- "${fixture}" "${output_pcap}"
