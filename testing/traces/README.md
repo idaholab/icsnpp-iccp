@@ -9,3 +9,7 @@ The `synthetic` directory contains valid and intentionally incomplete traffic.
 The `malformed` directory contains captures designed to exercise parser error
 handling. These files are test inputs and must not be treated as representative
 production traffic.
+
+The `non-iccp` directory contains traffic for other protocols that share
+ICCP's registered ports. It verifies that upper-layer protocol qualification
+prevents those connections from producing ICCP logs.

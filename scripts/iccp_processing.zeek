@@ -15,6 +15,7 @@
 module ICCP;
 
 export {
+    const max_pending_iccp_log_records = 64 &redef;
     const max_pending_confirmed = 128 &redef;
     const max_pending_controls = 128 &redef;
     const max_pending_transfer_sets = 128 &redef;
@@ -36,6 +37,71 @@ export {
     ## directly. Packet-driven production learning always uses mms_gva_message_v3.
     option legacy_gva_direct_event_compatibility = F;
 }
+
+global iccp_logging_eligible: set[string];
+global pending_iccp_log_records: table[string, count] of Info;
+global pending_iccp_log_record_counts: table[string] of count;
+
+function write_iccp_record(c: connection, rec: Info)
+    {
+    if ( c$uid in iccp_logging_eligible )
+        {
+        Log::write(ICCP::LOG, rec);
+        return;
+        }
+
+    local record_count: count = 0;
+    if ( c$uid in pending_iccp_log_record_counts )
+        record_count = pending_iccp_log_record_counts[c$uid];
+
+    if ( record_count >= max_pending_iccp_log_records )
+        return;
+
+    pending_iccp_log_records[c$uid, record_count] = rec;
+    pending_iccp_log_record_counts[c$uid] = record_count + 1;
+    }
+
+function enable_iccp_logging(c: connection)
+    {
+    if ( c$uid in iccp_logging_eligible )
+        return;
+
+    iccp_logging_eligible += { c$uid };
+
+    if ( c$uid !in pending_iccp_log_record_counts )
+        return;
+
+    local record_count = pending_iccp_log_record_counts[c$uid];
+    local index: count = 0;
+    while ( index < record_count )
+        {
+        if ( [c$uid, index] in pending_iccp_log_records )
+            {
+            Log::write(ICCP::LOG, pending_iccp_log_records[c$uid, index]);
+            delete pending_iccp_log_records[c$uid, index];
+            }
+        ++index;
+        }
+
+    delete pending_iccp_log_record_counts[c$uid];
+    }
+
+event ICCP::stream_connection_cleanup_v1(uid: string) &priority=-50
+    {
+    if ( uid in pending_iccp_log_record_counts )
+        {
+        local record_count = pending_iccp_log_record_counts[uid];
+        local index: count = 0;
+        while ( index < record_count )
+            {
+            delete pending_iccp_log_records[uid, index];
+            ++index;
+            }
+        delete pending_iccp_log_record_counts[uid];
+        }
+
+    iccp_logging_eligible -= { uid };
+    }
 
 type PendingConfirmed: record {
     service_tag: count;
@@ -5526,7 +5592,7 @@ function write_object_observation(rec: Info)
 event ICCP::connection_message(c: connection, is_orig: bool)
     {
     local rec = base_record(c, is_orig, "stream", "complete", "parsed", 0);
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 event ICCP::stream_finished(
@@ -5539,7 +5605,7 @@ event ICCP::stream_finished(
     rec$detail = status == "non_exhaustive" ?
         "capture gaps, parser recovery, or an incomplete record prevent an exhaustive direction-level output claim" :
         "direction-level observation verdict";
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 event ICCP::presentation_message_v2(
@@ -5548,6 +5614,12 @@ event ICCP::presentation_message_v2(
     dispatch_acse: bool, dispatch_mms: bool, inferred_mms: bool,
     payload_length: count)
     {
+    # TPKT/COTP are shared with S7comm on 102/tcp. A structurally recognized
+    # Presentation value is the first upper-layer evidence that this stream is
+    # eligible for ICCP diagnostics, including rejected and truncated MMS.
+    if ( recognized )
+        enable_iccp_logging(c);
+
     local status = "decoded";
     local detail = "";
 
@@ -5581,7 +5653,7 @@ event ICCP::presentation_message_v2(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 # Preserve the established parser-to-Zeek event for downstream consumers while
@@ -5639,7 +5711,7 @@ event ICCP::acse_message(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 function capture_mms_processing_context(
@@ -6545,7 +6617,7 @@ function process_mms_message(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     write_object_observation(rec);
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
          information_report_results_available(
@@ -6600,6 +6672,9 @@ event ICCP::mms_message(
     result_integer_value: int, result_floating_value: double,
     result_flags_raw: string, result_timestamp_value: int)
     {
+    if ( recognized && semantic_decoded )
+        enable_iccp_logging(c);
+
     local parser_delivery = consume_mms_parser_marker(c, is_orig);
     if ( parser_delivery && recognized && semantic_decoded &&
          pdu_type == 0 && service_tag == 4 && invoke_id >= 0 )
