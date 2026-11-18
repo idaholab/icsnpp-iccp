@@ -25,10 +25,8 @@ type PendingNameList: record {
     continue_after: string;
 };
 
-global pending_name_lists: table[string, bool, count] of PendingNameList
-    &read_expire=association_state_timeout;
-global invalid_name_list_invokes: set[string, bool, count]
-    &read_expire=association_state_timeout;
+global pending_name_lists: table[string, bool, count] of PendingNameList;
+global invalid_name_list_invokes: set[string, bool, count];
 
 type PendingWriteEvidence: record {
     access_choice: count;
@@ -46,14 +44,120 @@ type PendingWriteEvidence: record {
 };
 
 global pending_write_evidence:
-    table[string, bool, count] of PendingWriteEvidence
-    &read_expire=association_state_timeout;
-global invalid_write_evidence_invokes: set[string, bool, count]
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingWriteEvidence;
+global invalid_write_evidence_invokes: set[string, bool, count];
 global evidence_acse_lifecycle_spdu: table[string, bool] of count
     &read_expire=association_state_timeout;
 global evidence_session_cleanup_spdu: table[string, bool] of count
     &read_expire=association_state_timeout;
+
+type EvidenceStateIndex: record {
+    pending_name_lists: set[bool, count];
+    invalid_name_list_invokes: set[bool, count];
+    pending_write_evidence: set[bool, count];
+    invalid_write_evidence_invokes: set[bool, count];
+};
+
+global evidence_state_index_expire: function(
+    states: table[string] of EvidenceStateIndex, uid: string): interval;
+global evidence_state_indexes: table[string] of EvidenceStateIndex
+    &read_expire=association_state_timeout
+    &expire_func=evidence_state_index_expire;
+
+function initial_evidence_state_index(): EvidenceStateIndex
+    {
+    local name_lists: set[bool, count] = set();
+    local invalid_name_lists: set[bool, count] = set();
+    local writes: set[bool, count] = set();
+    local invalid_writes: set[bool, count] = set();
+    return [
+        $pending_name_lists=name_lists,
+        $invalid_name_list_invokes=invalid_name_lists,
+        $pending_write_evidence=writes,
+        $invalid_write_evidence_invokes=invalid_writes
+    ];
+    }
+
+function evidence_state_index(uid: string): EvidenceStateIndex
+    {
+    if ( uid !in evidence_state_indexes )
+        evidence_state_indexes[uid] = initial_evidence_state_index();
+    return evidence_state_indexes[uid];
+    }
+
+function retain_name_list(
+    uid: string, is_orig: bool, invoke: count, value: PendingNameList)
+    {
+    pending_name_lists[uid, is_orig, invoke] = value;
+    local state = evidence_state_index(uid);
+    add state$pending_name_lists[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function retire_name_list(uid: string, is_orig: bool, invoke: count)
+    {
+    delete pending_name_lists[uid, is_orig, invoke];
+    if ( uid !in evidence_state_indexes ) return;
+    local state = evidence_state_indexes[uid];
+    delete state$pending_name_lists[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function invalidate_name_list(uid: string, is_orig: bool, invoke: count)
+    {
+    add invalid_name_list_invokes[uid, is_orig, invoke];
+    local state = evidence_state_index(uid);
+    add state$invalid_name_list_invokes[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function clear_invalid_name_list(
+    uid: string, is_orig: bool, invoke: count)
+    {
+    delete invalid_name_list_invokes[uid, is_orig, invoke];
+    if ( uid !in evidence_state_indexes ) return;
+    local state = evidence_state_indexes[uid];
+    delete state$invalid_name_list_invokes[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function retain_write_evidence(
+    uid: string, is_orig: bool, invoke: count,
+    value: PendingWriteEvidence)
+    {
+    pending_write_evidence[uid, is_orig, invoke] = value;
+    local state = evidence_state_index(uid);
+    add state$pending_write_evidence[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function retire_write_evidence(uid: string, is_orig: bool, invoke: count)
+    {
+    delete pending_write_evidence[uid, is_orig, invoke];
+    if ( uid !in evidence_state_indexes ) return;
+    local state = evidence_state_indexes[uid];
+    delete state$pending_write_evidence[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function invalidate_write_evidence(
+    uid: string, is_orig: bool, invoke: count)
+    {
+    add invalid_write_evidence_invokes[uid, is_orig, invoke];
+    local state = evidence_state_index(uid);
+    add state$invalid_write_evidence_invokes[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
+
+function clear_invalid_write_evidence(
+    uid: string, is_orig: bool, invoke: count)
+    {
+    delete invalid_write_evidence_invokes[uid, is_orig, invoke];
+    if ( uid !in evidence_state_indexes ) return;
+    local state = evidence_state_indexes[uid];
+    delete state$invalid_write_evidence_invokes[is_orig, invoke];
+    evidence_state_indexes[uid] = state;
+    }
 
 function evidence_provenance_name(code: count): string
     {
@@ -92,24 +196,18 @@ function evidence_raw_prefix(raw: string): string
 
 function pending_name_list_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_name_lists )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_name_list_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in evidence_state_indexes ) return 0;
+    local state = evidence_state_indexes[uid];
+    return |state$pending_name_lists| +
+        |state$invalid_name_list_invokes|;
     }
 
 function pending_write_evidence_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_write_evidence )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_write_evidence_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in evidence_state_indexes ) return 0;
+    local state = evidence_state_indexes[uid];
+    return |state$pending_write_evidence| +
+        |state$invalid_write_evidence_invokes|;
     }
 
 function generic_confirmed_service_conflicts(
@@ -178,15 +276,15 @@ event ICCP::mms_get_name_list_evidence_v1(
             # Invoke IDs are unique across confirmed services for one MMS
             # user.  Invalidate any evidence-family request already using it
             # instead of allowing a later response to pick one arbitrarily.
-            delete pending_write_evidence[c$uid, is_orig, key];
-            add invalid_write_evidence_invokes[c$uid, is_orig, key];
-            add invalid_name_list_invokes[c$uid, is_orig, key];
+            retire_write_evidence(c$uid, is_orig, key);
+            invalidate_write_evidence(c$uid, is_orig, key);
+            invalidate_name_list(c$uid, is_orig, key);
             outcome = "invoke_reused";
             }
         else if ( [c$uid, is_orig, key] in pending_name_lists )
             {
-            delete pending_name_lists[c$uid, is_orig, key];
-            add invalid_name_list_invokes[c$uid, is_orig, key];
+            retire_name_list(c$uid, is_orig, key);
+            invalidate_name_list(c$uid, is_orig, key);
             outcome = "invoke_reused";
             }
         else if ( [c$uid, is_orig, key] in invalid_name_list_invokes )
@@ -207,7 +305,7 @@ event ICCP::mms_get_name_list_evidence_v1(
                 pending_name_list_count(c$uid), invoke_id);
             }
         else
-            pending_name_lists[c$uid, is_orig, key] = name_request_state;
+            retain_name_list(c$uid, is_orig, key, name_request_state);
 
         local request_log = base_name_list_record(
             c, is_orig, invoke_id, "name_list_request", provenance);
@@ -272,9 +370,8 @@ event ICCP::mms_get_name_list_evidence_v1(
 
     if ( response_status != "direction_mismatch" )
         {
-        delete pending_name_lists[c$uid, response_request_is_orig, key];
-        delete invalid_name_list_invokes[
-            c$uid, response_request_is_orig, key];
+        retire_name_list(c$uid, response_request_is_orig, key);
+        clear_invalid_name_list(c$uid, response_request_is_orig, key);
         }
     }
 
@@ -451,15 +548,15 @@ event ICCP::mms_write_evidence_v2(
             [c$uid, is_orig, key] in invalid_confirmed_invokes;
         if ( other_service_reused )
             {
-            delete pending_name_lists[c$uid, is_orig, key];
-            add invalid_name_list_invokes[c$uid, is_orig, key];
-            add invalid_write_evidence_invokes[c$uid, is_orig, key];
+            retire_name_list(c$uid, is_orig, key);
+            invalidate_name_list(c$uid, is_orig, key);
+            invalidate_write_evidence(c$uid, is_orig, key);
             request_outcome = "invoke_reused";
             }
         else if ( [c$uid, is_orig, key] in pending_write_evidence )
             {
-            delete pending_write_evidence[c$uid, is_orig, key];
-            add invalid_write_evidence_invokes[c$uid, is_orig, key];
+            retire_write_evidence(c$uid, is_orig, key);
+            invalidate_write_evidence(c$uid, is_orig, key);
             request_outcome = "invoke_reused";
             }
         else if ( [c$uid, is_orig, key] in
@@ -480,7 +577,7 @@ event ICCP::mms_write_evidence_v2(
                 pending_write_evidence_count(c$uid), invoke_id);
             }
         else if ( request_pairing != "evidence_mismatch" )
-            pending_write_evidence[c$uid, is_orig, key] = request_evidence;
+            retain_write_evidence(c$uid, is_orig, key, request_evidence);
 
         local request_summary = base_write_record(
             c, is_orig, invoke_id, "write_evidence", request_outcome,
@@ -619,9 +716,8 @@ event ICCP::mms_write_evidence_v2(
 
     if ( direction_valid )
         {
-        delete pending_write_evidence[c$uid, request_is_orig, key];
-        delete invalid_write_evidence_invokes[
-            c$uid, request_is_orig, key];
+        retire_write_evidence(c$uid, request_is_orig, key);
+        clear_invalid_write_evidence(c$uid, request_is_orig, key);
         }
     }
 
@@ -722,10 +818,10 @@ event ICCP::mms_error_message(
     if ( pdu_type != 2 || invoke_id < 0 ) return;
     local key = int_to_count(invoke_id);
     local request_is_orig = ! is_orig;
-    delete pending_name_lists[c$uid, request_is_orig, key];
-    delete invalid_name_list_invokes[c$uid, request_is_orig, key];
-    delete pending_write_evidence[c$uid, request_is_orig, key];
-    delete invalid_write_evidence_invokes[c$uid, request_is_orig, key];
+    retire_name_list(c$uid, request_is_orig, key);
+    clear_invalid_name_list(c$uid, request_is_orig, key);
+    retire_write_evidence(c$uid, request_is_orig, key);
+    clear_invalid_write_evidence(c$uid, request_is_orig, key);
     }
 
 event ICCP::mms_reject_message_v1(
@@ -735,69 +831,38 @@ event ICCP::mms_reject_message_v1(
     if ( invoke_id < 0 || reason_tag != 1 ) return;
     local key = int_to_count(invoke_id);
     local request_is_orig = ! is_orig;
-    delete pending_name_lists[c$uid, request_is_orig, key];
-    delete invalid_name_list_invokes[c$uid, request_is_orig, key];
-    delete pending_write_evidence[c$uid, request_is_orig, key];
-    delete invalid_write_evidence_invokes[c$uid, request_is_orig, key];
+    retire_name_list(c$uid, request_is_orig, key);
+    clear_invalid_name_list(c$uid, request_is_orig, key);
+    retire_write_evidence(c$uid, request_is_orig, key);
+    clear_invalid_write_evidence(c$uid, request_is_orig, key);
+    }
+
+function clear_indexed_evidence_state(uid_to_clear: string)
+    {
+    if ( uid_to_clear !in evidence_state_indexes ) return;
+    local state = evidence_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_name_lists )
+        delete pending_name_lists[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_name_list_invokes )
+        delete invalid_name_list_invokes[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_write_evidence )
+        delete pending_write_evidence[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_write_evidence_invokes )
+        delete invalid_write_evidence_invokes[
+            uid_to_clear, is_orig, invoke];
+    }
+
+function evidence_state_index_expire(
+    states: table[string] of EvidenceStateIndex, uid: string): interval
+    {
+    clear_indexed_evidence_state(uid);
+    return 0secs;
     }
 
 function clear_evidence_state(uid_to_clear: string)
     {
-    local name_keys: vector of count;
-    local name_directions: vector of bool;
-    for ( [uid, direction, invoke] in pending_name_lists )
-        if ( uid == uid_to_clear )
-            {
-            name_keys[|name_keys|] = invoke;
-            name_directions[|name_directions|] = direction;
-            }
-    for ( index in name_keys )
-        delete pending_name_lists[
-            uid_to_clear, name_directions[index], name_keys[index]];
-
-    local invalid_name_keys: vector of count;
-    local invalid_name_directions: vector of bool;
-    for ( [invalid_uid, invalid_direction, invalid_invoke] in
-          invalid_name_list_invokes )
-        if ( invalid_uid == uid_to_clear )
-            {
-            invalid_name_keys[|invalid_name_keys|] = invalid_invoke;
-            invalid_name_directions[|invalid_name_directions|] =
-                invalid_direction;
-            }
-    for ( invalid_index in invalid_name_keys )
-        delete invalid_name_list_invokes[
-            uid_to_clear, invalid_name_directions[invalid_index],
-            invalid_name_keys[invalid_index]];
-
-    local write_keys: vector of count;
-    local write_directions: vector of bool;
-    for ( [write_uid, write_direction, write_invoke] in
-          pending_write_evidence )
-        if ( write_uid == uid_to_clear )
-            {
-            write_keys[|write_keys|] = write_invoke;
-            write_directions[|write_directions|] = write_direction;
-            }
-    for ( write_index in write_keys )
-        delete pending_write_evidence[
-            uid_to_clear, write_directions[write_index],
-            write_keys[write_index]];
-
-    local invalid_write_keys: vector of count;
-    local invalid_write_directions: vector of bool;
-    for ( [invalid_write_uid, invalid_write_direction,
-           invalid_write_invoke] in invalid_write_evidence_invokes )
-        if ( invalid_write_uid == uid_to_clear )
-            {
-            invalid_write_keys[|invalid_write_keys|] = invalid_write_invoke;
-            invalid_write_directions[|invalid_write_directions|] =
-                invalid_write_direction;
-            }
-    for ( invalid_write_index in invalid_write_keys )
-        delete invalid_write_evidence_invokes[
-            uid_to_clear, invalid_write_directions[invalid_write_index],
-            invalid_write_keys[invalid_write_index]];
+    clear_indexed_evidence_state(uid_to_clear);
+    delete evidence_state_indexes[uid_to_clear];
     }
 
 event connection_state_remove(c: connection)
@@ -933,25 +998,22 @@ event ICCP::mms_message(
                 [c$uid, is_orig, request_key] in pending_name_lists;
             local had_write =
                 [c$uid, is_orig, request_key] in pending_write_evidence;
-            delete pending_name_lists[c$uid, is_orig, request_key];
-            delete pending_write_evidence[c$uid, is_orig, request_key];
+            retire_name_list(c$uid, is_orig, request_key);
+            retire_write_evidence(c$uid, is_orig, request_key);
             if ( had_name || service_tag == 1 )
-                add invalid_name_list_invokes[
-                    c$uid, is_orig, request_key];
+                invalidate_name_list(c$uid, is_orig, request_key);
             if ( had_write || service_tag == 5 )
-                add invalid_write_evidence_invokes[
-                    c$uid, is_orig, request_key];
+                invalidate_write_evidence(c$uid, is_orig, request_key);
             }
         else if ( [c$uid, is_orig, request_key] !in pending_confirmed )
             {
             # The generic confirmed-request tracker owns the association-wide
             # cap.  A specialized hook may have run first and tentatively
             # retained this request; discard it when generic admission fails.
-            delete pending_name_lists[c$uid, is_orig, request_key];
-            delete invalid_name_list_invokes[c$uid, is_orig, request_key];
-            delete pending_write_evidence[c$uid, is_orig, request_key];
-            delete invalid_write_evidence_invokes[
-                c$uid, is_orig, request_key];
+            retire_name_list(c$uid, is_orig, request_key);
+            clear_invalid_name_list(c$uid, is_orig, request_key);
+            retire_write_evidence(c$uid, is_orig, request_key);
+            clear_invalid_write_evidence(c$uid, is_orig, request_key);
             }
         }
     if ( recognized && semantic_decoded && invoke_id >= 0 &&
@@ -963,14 +1025,13 @@ event ICCP::mms_message(
         # aggregate event intentionally does not carry.
         local terminal_key = int_to_count(invoke_id);
         local terminal_request_is_orig = ! is_orig;
-        delete pending_name_lists[
-            c$uid, terminal_request_is_orig, terminal_key];
-        delete invalid_name_list_invokes[
-            c$uid, terminal_request_is_orig, terminal_key];
-        delete pending_write_evidence[
-            c$uid, terminal_request_is_orig, terminal_key];
-        delete invalid_write_evidence_invokes[
-            c$uid, terminal_request_is_orig, terminal_key];
+        retire_name_list(c$uid, terminal_request_is_orig, terminal_key);
+        clear_invalid_name_list(
+            c$uid, terminal_request_is_orig, terminal_key);
+        retire_write_evidence(
+            c$uid, terminal_request_is_orig, terminal_key);
+        clear_invalid_write_evidence(
+            c$uid, terminal_request_is_orig, terminal_key);
         }
     }
 

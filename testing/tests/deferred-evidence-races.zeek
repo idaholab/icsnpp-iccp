@@ -263,14 +263,18 @@ function seed_lifecycle_state(c: connection)
     pending_confirmed[c$uid, T, 88] = [
         $service_tag=4, $operation=2, $request_is_orig=T
     ];
-    pending_name_lists[c$uid, T, 88] = [
+    update_directional_processing_state(
+        c$uid, T, 88, PROCESSING_PENDING_CONFIRMED, T);
+    local name_list: PendingNameList = [
         $object_class_choice=0, $object_class=0,
         $scope=0, $domain="", $continue_after=""
     ];
+    retain_name_list(c$uid, T, 88, name_list);
     identify_evidence[c$uid, T, 77, 0, 88] = [
         $vendor_name="lifecycle", $model_name="", $revision="",
         $abstract_syntax_count=0, $first_abstract_syntax=""
     ];
+    update_identify_processing_state(c$uid, T, 77, 0, 88, T);
     current_mms_provenance[c$uid, T] = "verified";
     current_mms_parser_sequence[c$uid, T] = 77;
     add pending_mms_parser_markers[c$uid, T];
@@ -329,6 +333,16 @@ event zeek_init() &priority=-5
     known_variable_types[c$uid, F, 0, "", "WRITE_A"] = "Control_Command";
     known_variable_types[c$uid, F, 0, "", "WRITE_B"] = "Control_Command";
     known_variable_types[c$uid, F, 0, "", "BREAKER_TAG"] = "Tag_Value";
+    update_object_processing_state(
+        c$uid, T, 0, "", "REPORT_A", PROCESSING_KNOWN_VARIABLE_TYPE, T);
+    update_object_processing_state(
+        c$uid, T, 0, "", "REPORT_B", PROCESSING_KNOWN_VARIABLE_TYPE, T);
+    update_object_processing_state(
+        c$uid, F, 0, "", "WRITE_A", PROCESSING_KNOWN_VARIABLE_TYPE, T);
+    update_object_processing_state(
+        c$uid, F, 0, "", "WRITE_B", PROCESSING_KNOWN_VARIABLE_TYPE, T);
+    update_object_processing_state(
+        c$uid, F, 0, "", "BREAKER_TAG", PROCESSING_KNOWN_VARIABLE_TYPE, T);
 
     event ICCP::mms_provenance_marker_v1(c, T, 1);
     emit_identify(c, T, 7, "FIRST", 1);
@@ -374,6 +388,12 @@ event zeek_init() &priority=-5
         shape_reuse$uid, F, 0, "", "REUSED_A"] = "Control_Command";
     known_variable_types[
         shape_reuse$uid, F, 0, "", "PRESERVED_B"] = "Control_Command";
+    update_object_processing_state(
+        shape_reuse$uid, F, 0, "", "REUSED_A",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
+    update_object_processing_state(
+        shape_reuse$uid, F, 0, "", "PRESERVED_B",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(shape_reuse, T, 1);
     emit_write(shape_reuse, 51, "REUSED_A", "\x11", 17);
     event ICCP::mms_provenance_marker_v1(shape_reuse, T, 2);

@@ -215,6 +215,8 @@ event lifecycle_after_disconnect(c: connection)
     {
     seed_tase2(c);
     known_variable_types[c$uid, F, 0, "", "NEW_TAG"] = "Tag_Value";
+    update_object_processing_state(
+        c$uid, F, 0, "", "NEW_TAG", PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(c, T, 2);
     emit_get_tag_request(c, 40, "NEW_TAG", 2);
     event ICCP::mms_provenance_marker_v1(c, F, 2);
@@ -283,6 +285,9 @@ event zeek_init() &priority=-5
     seed_tase2(disconnect);
     known_variable_types[
         disconnect$uid, F, 0, "", "OLD_TAG"] = "Tag_Value";
+    update_object_processing_state(
+        disconnect$uid, F, 0, "", "OLD_TAG",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(disconnect, T, 1);
     emit_get_tag_request(disconnect, 40, "OLD_TAG", 1);
     event ICCP::mms_provenance_marker_v1(disconnect, F, 1);

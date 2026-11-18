@@ -147,10 +147,8 @@ type PendingConfirmed: record {
     request_is_orig: bool;
 };
 
-global pending_confirmed: table[string, bool, count] of PendingConfirmed
-    &read_expire=association_state_timeout;
-global invalid_confirmed_invokes: set[string, bool, count]
-    &read_expire=association_state_timeout;
+global pending_confirmed: table[string, bool, count] of PendingConfirmed;
+global invalid_confirmed_invokes: set[string, bool, count];
 global processing_acse_lifecycle_spdu: table[string, bool] of count
     &read_expire=association_state_timeout;
 global processing_session_cleanup_spdu: table[string, bool] of count
@@ -173,8 +171,7 @@ type IdentifyEvidence: record {
 };
 
 global identify_evidence:
-    table[string, bool, count, count, count] of IdentifyEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count, count, count] of IdentifyEvidence;
 
 function identify_evidence_available(
     c: connection, is_orig: bool, sequence: count, pdu_type: count,
@@ -214,12 +211,10 @@ type PointValueShapeEvidence: record {
 };
 
 global point_value_shape_evidence:
-    table[string, bool, count] of PointValueShapeEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PointValueShapeEvidence;
 
 global control_read_value_shape_evidence:
-    table[string, bool, count, count] of PointValueShapeEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count, count] of PointValueShapeEvidence;
 
 function point_value_shape_available(
     c: connection, is_orig: bool, sequence: count): bool
@@ -228,12 +223,10 @@ function point_value_shape_available(
     }
 
 global information_report_results_evidence:
-    table[string, bool, count] of InformationReportResultsEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of InformationReportResultsEvidence;
 
 global first_result_evidence:
-    table[string, bool, count, count] of MMSDataEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count, count] of MMSDataEvidence;
 
 function information_report_results_available(
     c: connection, is_orig: bool, sequence: count): bool
@@ -283,72 +276,316 @@ type ControlValueShapeEvidence: record {
     component_integer_values: vector of int &optional;
 };
 
+type DirectionalProcessingStateKind: enum {
+    PROCESSING_PENDING_CONFIRMED,
+    PROCESSING_INVALID_CONFIRMED,
+    PROCESSING_PENDING_CONTROL,
+    PROCESSING_PENDING_CONTROL_READ,
+    PROCESSING_INVALID_CONTROL_READ,
+    PROCESSING_PENDING_TRANSFER_SET,
+    PROCESSING_PENDING_TRANSFER_SUPPORT,
+    PROCESSING_PENDING_TRANSFER_CONTROL,
+    PROCESSING_PENDING_VARIABLE_TYPE,
+    PROCESSING_INVALID_VARIABLE_TYPE,
+};
+
+type SequenceProcessingStateKind: enum {
+    PROCESSING_INFORMATION_REPORT_RESULTS,
+    PROCESSING_POINT_VALUE_SHAPE,
+    PROCESSING_CONTROL_VALUE_SHAPE,
+    PROCESSING_CONTROL_VALUE_SHAPE_INVOKE,
+};
+
+type SequenceInvokeProcessingStateKind: enum {
+    PROCESSING_CONTROL_READ_VALUE_SHAPE,
+    PROCESSING_FIRST_RESULT_EVIDENCE,
+};
+
+type ObjectProcessingStateKind: enum {
+    PROCESSING_KNOWN_TRANSFER_SET,
+    PROCESSING_ACTIVE_TRANSFER_SET,
+    PROCESSING_KNOWN_VARIABLE_TYPE,
+};
+
+type ProcessingStateIndex: record {
+    pending_confirmed: set[bool, count];
+    invalid_confirmed: set[bool, count];
+    pending_controls: set[bool, count];
+    pending_control_reads: set[bool, count];
+    invalid_control_reads: set[bool, count];
+    pending_transfer_sets: set[bool, count];
+    pending_transfer_support: set[bool, count];
+    pending_transfer_controls: set[bool, count];
+    pending_variable_types: set[bool, count];
+    invalid_variable_types: set[bool, count];
+    identify_evidence: set[bool, count, count, count];
+    information_report_results: set[bool, count];
+    point_value_shapes: set[bool, count];
+    control_value_shapes: set[bool, count];
+    control_value_shape_invokes: set[bool, count];
+    control_read_value_shapes: set[bool, count, count];
+    first_result_evidence: set[bool, count, count];
+    known_transfer_sets: set[bool, count, string, string];
+    active_transfer_sets: set[bool, count, string, string];
+    known_variable_types: set[bool, count, string, string];
+};
+
+global processing_state_index_expire: function(
+    states: table[string] of ProcessingStateIndex, uid: string): interval;
+global processing_state_indexes: table[string] of ProcessingStateIndex
+    &read_expire=association_state_timeout
+    &expire_func=processing_state_index_expire;
+
+function initial_processing_state_index(): ProcessingStateIndex
+    {
+    local pending_confirmed_keys: set[bool, count] = set();
+    local invalid_confirmed_keys: set[bool, count] = set();
+    local pending_control_keys: set[bool, count] = set();
+    local pending_control_read_keys: set[bool, count] = set();
+    local invalid_control_read_keys: set[bool, count] = set();
+    local pending_transfer_set_keys: set[bool, count] = set();
+    local pending_transfer_support_keys: set[bool, count] = set();
+    local pending_transfer_control_keys: set[bool, count] = set();
+    local pending_variable_type_keys: set[bool, count] = set();
+    local invalid_variable_type_keys: set[bool, count] = set();
+    local identify_keys: set[bool, count, count, count] = set();
+    local report_keys: set[bool, count] = set();
+    local point_shape_keys: set[bool, count] = set();
+    local control_shape_keys: set[bool, count] = set();
+    local control_shape_invoke_keys: set[bool, count] = set();
+    local control_read_shape_keys: set[bool, count, count] = set();
+    local first_result_keys: set[bool, count, count] = set();
+    local known_transfer_keys: set[bool, count, string, string] = set();
+    local active_transfer_keys: set[bool, count, string, string] = set();
+    local known_variable_keys: set[bool, count, string, string] = set();
+    return [
+        $pending_confirmed=pending_confirmed_keys,
+        $invalid_confirmed=invalid_confirmed_keys,
+        $pending_controls=pending_control_keys,
+        $pending_control_reads=pending_control_read_keys,
+        $invalid_control_reads=invalid_control_read_keys,
+        $pending_transfer_sets=pending_transfer_set_keys,
+        $pending_transfer_support=pending_transfer_support_keys,
+        $pending_transfer_controls=pending_transfer_control_keys,
+        $pending_variable_types=pending_variable_type_keys,
+        $invalid_variable_types=invalid_variable_type_keys,
+        $identify_evidence=identify_keys,
+        $information_report_results=report_keys,
+        $point_value_shapes=point_shape_keys,
+        $control_value_shapes=control_shape_keys,
+        $control_value_shape_invokes=control_shape_invoke_keys,
+        $control_read_value_shapes=control_read_shape_keys,
+        $first_result_evidence=first_result_keys,
+        $known_transfer_sets=known_transfer_keys,
+        $active_transfer_sets=active_transfer_keys,
+        $known_variable_types=known_variable_keys
+    ];
+    }
+
+function processing_state_index(uid: string): ProcessingStateIndex
+    {
+    if ( uid !in processing_state_indexes )
+        processing_state_indexes[uid] = initial_processing_state_index();
+    return processing_state_indexes[uid];
+    }
+
+function update_directional_processing_state(
+    uid: string, is_orig: bool, key: count,
+    kind: DirectionalProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_PENDING_CONFIRMED )
+        if ( retain ) add state$pending_confirmed[is_orig, key];
+        else delete state$pending_confirmed[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_CONFIRMED )
+        if ( retain ) add state$invalid_confirmed[is_orig, key];
+        else delete state$invalid_confirmed[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_CONTROL )
+        if ( retain ) add state$pending_controls[is_orig, key];
+        else delete state$pending_controls[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_CONTROL_READ )
+        if ( retain ) add state$pending_control_reads[is_orig, key];
+        else delete state$pending_control_reads[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_CONTROL_READ )
+        if ( retain ) add state$invalid_control_reads[is_orig, key];
+        else delete state$invalid_control_reads[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_SET )
+        if ( retain ) add state$pending_transfer_sets[is_orig, key];
+        else delete state$pending_transfer_sets[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_SUPPORT )
+        if ( retain ) add state$pending_transfer_support[is_orig, key];
+        else delete state$pending_transfer_support[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_CONTROL )
+        if ( retain ) add state$pending_transfer_controls[is_orig, key];
+        else delete state$pending_transfer_controls[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_VARIABLE_TYPE )
+        if ( retain ) add state$pending_variable_types[is_orig, key];
+        else delete state$pending_variable_types[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_VARIABLE_TYPE )
+        if ( retain ) add state$invalid_variable_types[is_orig, key];
+        else delete state$invalid_variable_types[is_orig, key];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_sequence_processing_state(
+    uid: string, is_orig: bool, sequence: count,
+    kind: SequenceProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_INFORMATION_REPORT_RESULTS )
+        if ( retain ) add state$information_report_results[
+            is_orig, sequence];
+        else delete state$information_report_results[is_orig, sequence];
+    else if ( kind == PROCESSING_POINT_VALUE_SHAPE )
+        if ( retain ) add state$point_value_shapes[is_orig, sequence];
+        else delete state$point_value_shapes[is_orig, sequence];
+    else if ( kind == PROCESSING_CONTROL_VALUE_SHAPE )
+        if ( retain ) add state$control_value_shapes[is_orig, sequence];
+        else delete state$control_value_shapes[is_orig, sequence];
+    else if ( kind == PROCESSING_CONTROL_VALUE_SHAPE_INVOKE )
+        if ( retain ) add state$control_value_shape_invokes[
+            is_orig, sequence];
+        else delete state$control_value_shape_invokes[is_orig, sequence];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_sequence_invoke_processing_state(
+    uid: string, is_orig: bool, sequence: count, invoke: count,
+    kind: SequenceInvokeProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_CONTROL_READ_VALUE_SHAPE )
+        if ( retain ) add state$control_read_value_shapes[
+            is_orig, sequence, invoke];
+        else delete state$control_read_value_shapes[
+            is_orig, sequence, invoke];
+    else if ( kind == PROCESSING_FIRST_RESULT_EVIDENCE )
+        if ( retain ) add state$first_result_evidence[
+            is_orig, sequence, invoke];
+        else delete state$first_result_evidence[
+            is_orig, sequence, invoke];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_object_processing_state(
+    uid: string, is_orig: bool, scope: count, domain: string, name: string,
+    kind: ObjectProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_KNOWN_TRANSFER_SET )
+        if ( retain ) add state$known_transfer_sets[
+            is_orig, scope, domain, name];
+        else delete state$known_transfer_sets[is_orig, scope, domain, name];
+    else if ( kind == PROCESSING_ACTIVE_TRANSFER_SET )
+        if ( retain ) add state$active_transfer_sets[
+            is_orig, scope, domain, name];
+        else delete state$active_transfer_sets[
+            is_orig, scope, domain, name];
+    else if ( kind == PROCESSING_KNOWN_VARIABLE_TYPE )
+        if ( retain ) add state$known_variable_types[
+            is_orig, scope, domain, name];
+        else delete state$known_variable_types[
+            is_orig, scope, domain, name];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_identify_processing_state(
+    uid: string, is_orig: bool, sequence: count, pdu_type: count,
+    invoke: count, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( retain ) add state$identify_evidence[
+        is_orig, sequence, pdu_type, invoke];
+    else delete state$identify_evidence[
+        is_orig, sequence, pdu_type, invoke];
+    processing_state_indexes[uid] = state;
+    }
+
 global control_value_shape_evidence:
-    table[string, bool, count] of ControlValueShapeEvidence
-    &read_expire=association_state_timeout;
-global control_value_shape_invokes: table[string, bool, count] of count
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of ControlValueShapeEvidence;
+global control_value_shape_invokes: table[string, bool, count] of count;
 
 function clear_control_value_shapes(uid: string, is_orig: bool)
     {
-    # A parser-delivered Write records its invoke alongside the sequence before
-    # the richer shape hooks run. Clear both indexed and standalone/direct-event
-    # evidence when the whole direction or association is retired.
-    local indexed_sequences: vector of count;
-    for ( [indexed_uid, indexed_is_orig, indexed_sequence] in
-          control_value_shape_invokes )
-        if ( indexed_uid == uid && indexed_is_orig == is_orig )
-            indexed_sequences[|indexed_sequences|] = indexed_sequence;
-    for ( indexed_index in indexed_sequences )
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
+    local invoke_sequences: vector of count;
+    for ( [entry_is_orig, indexed_sequence] in
+          state$control_value_shape_invokes )
+        if ( entry_is_orig == is_orig )
+            invoke_sequences[|invoke_sequences|] = indexed_sequence;
+    for ( index in invoke_sequences )
         {
-        delete control_value_shape_invokes[
-            uid, is_orig, indexed_sequences[indexed_index]];
-        delete control_value_shape_evidence[
-            uid, is_orig, indexed_sequences[indexed_index]];
+        local invoke_sequence = invoke_sequences[index];
+        delete control_value_shape_invokes[uid, is_orig, invoke_sequence];
+        delete state$control_value_shape_invokes[
+            is_orig, invoke_sequence];
         }
 
-    local orphan_sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence] in
-          control_value_shape_evidence )
-        if ( entry_uid == uid && entry_is_orig == is_orig )
-            orphan_sequences[|orphan_sequences|] = sequence;
-    for ( orphan_index in orphan_sequences )
+    local shape_sequences: vector of count;
+    for ( [entry_is_orig, shape_sequence] in state$control_value_shapes )
+        if ( entry_is_orig == is_orig )
+            shape_sequences[|shape_sequences|] = shape_sequence;
+    for ( index in shape_sequences )
+        {
+        local retained_sequence = shape_sequences[index];
         delete control_value_shape_evidence[
-            uid, is_orig, orphan_sequences[orphan_index]];
+            uid, is_orig, retained_sequence];
+        delete state$control_value_shapes[is_orig, retained_sequence];
+        }
+    processing_state_indexes[uid] = state;
     }
 
 function clear_control_value_shapes_for_invoke(
     uid: string, is_orig: bool, invoke: count)
     {
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
     local sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence] in
-          control_value_shape_invokes )
-        if ( entry_uid == uid && entry_is_orig == is_orig &&
+    for ( [entry_is_orig, indexed_sequence] in
+          state$control_value_shape_invokes )
+        if ( entry_is_orig == is_orig &&
              control_value_shape_invokes[
-                 entry_uid, entry_is_orig, sequence] == invoke )
-            sequences[|sequences|] = sequence;
+                 uid, is_orig, indexed_sequence] == invoke )
+            sequences[|sequences|] = indexed_sequence;
 
     for ( index in sequences )
         {
+        local retained_sequence = sequences[index];
         delete control_value_shape_invokes[
-            uid, is_orig, sequences[index]];
+            uid, is_orig, retained_sequence];
         delete control_value_shape_evidence[
-            uid, is_orig, sequences[index]];
+            uid, is_orig, retained_sequence];
+        delete state$control_value_shape_invokes[
+            is_orig, retained_sequence];
+        delete state$control_value_shapes[is_orig, retained_sequence];
         }
+    processing_state_indexes[uid] = state;
     }
 
 function clear_control_read_shapes(
     uid: string, is_orig: bool, invoke: count)
     {
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
     local sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence, entry_invoke] in
-          control_read_value_shape_evidence )
-        if ( entry_uid == uid && entry_is_orig == is_orig &&
-             entry_invoke == invoke )
+    for ( [entry_is_orig, sequence, entry_invoke] in
+          state$control_read_value_shapes )
+        if ( entry_is_orig == is_orig && entry_invoke == invoke )
             sequences[|sequences|] = sequence;
     for ( index in sequences )
+        {
         delete control_read_value_shape_evidence[
             uid, is_orig, sequences[index], invoke];
+        delete state$control_read_value_shapes[
+            is_orig, sequences[index], invoke];
+        }
+    processing_state_indexes[uid] = state;
     }
 
 global classify_control_write: function(
@@ -369,6 +606,9 @@ event ICCP::mms_control_value_shape_v3(
     if ( first_data_choice == 0 )
         {
         delete control_value_shape_evidence[c$uid, is_orig, sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         return;
         }
     local evidence: ControlValueShapeEvidence = [
@@ -389,6 +629,8 @@ event ICCP::mms_control_value_shape_v3(
                 existing$component_integer_values;
         }
     control_value_shape_evidence[c$uid, is_orig, sequence] = evidence;
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_CONTROL_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_control_value_shape_v4(
@@ -403,6 +645,9 @@ event ICCP::mms_control_value_shape_v4(
     if ( first_data_choice == 0 )
         {
         delete control_value_shape_evidence[c$uid, is_orig, sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         return;
         }
     control_value_shape_evidence[c$uid, is_orig, sequence] = [
@@ -413,15 +658,14 @@ event ICCP::mms_control_value_shape_v4(
         $component_raws=component_raws,
         $component_integer_values=component_integer_values
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_CONTROL_VALUE_SHAPE, T);
     }
 
-global pending_controls: table[string, bool, count] of PendingControl
-    &read_expire=association_state_timeout;
-global pending_control_reads: table[string, bool, count] of PendingControlRead
-    &read_expire=association_state_timeout;
+global pending_controls: table[string, bool, count] of PendingControl;
+global pending_control_reads: table[string, bool, count] of PendingControlRead;
 global invalid_control_read_invokes:
-    table[string, bool, count] of InvalidControlReadInvoke
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of InvalidControlReadInvoke;
 
 # The compatibility Read events do not expose VariableAccessSpecification.
 # A packet-derived event must therefore be handled by mms_read_message_v3,
@@ -620,13 +864,9 @@ event ICCP::mms_device_action_message_v1(
 
 function pending_confirmed_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_confirmed )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_confirmed_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_confirmed| + |state$invalid_confirmed|;
     }
 
 function mms_error_class_name(error_class: count): string
@@ -664,6 +904,9 @@ event ICCP::mms_identify_message_v2(
         $revision=revision, $abstract_syntax_count=abstract_syntax_count,
         $first_abstract_syntax=first_abstract_syntax
     ];
+    update_identify_processing_state(
+        c$uid, is_orig, sequence, pdu_type,
+        int_to_count(invoke_id), T);
     }
 
 function store_information_report_results_evidence(
@@ -727,6 +970,9 @@ function store_information_report_results_evidence(
         $results=results, $results_complete=complete,
         $exact_raw_metadata=exact_raw_metadata
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence,
+        PROCESSING_INFORMATION_REPORT_RESULTS, T);
     }
 
 ## Deprecated compatibility adapter. Packet-derived reports use v3.
@@ -808,6 +1054,9 @@ event ICCP::mms_first_result_evidence_v1(
         $integer_value=integer_value, $floating_value=floating_value,
         $boolean_value=F, $string_value=""
     ];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, mms_parser_sequence(c, is_orig),
+        int_to_count(invoke_id), PROCESSING_FIRST_RESULT_EVIDENCE, T);
     }
 
 event ICCP::mms_point_value_shape_v2(
@@ -829,6 +1078,8 @@ event ICCP::mms_point_value_shape_v2(
         existing$second_component_length = second_component_length;
         existing$third_component_length = third_component_length;
         point_value_shape_evidence[c$uid, is_orig, sequence] = existing;
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
         return;
         }
     point_value_shape_evidence[c$uid, is_orig, sequence] = [
@@ -837,6 +1088,8 @@ event ICCP::mms_point_value_shape_v2(
         $second_component_length=second_component_length,
         $third_component_length=third_component_length
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_point_value_shape_v3(
@@ -866,6 +1119,8 @@ event ICCP::mms_point_value_shape_v3(
         $nested_raws=nested_raws,
         $nested_integer_values=nested_integer_values
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_control_read_value_shape_v1(
@@ -891,25 +1146,22 @@ event ICCP::mms_control_read_value_shape_v1(
         $component_raws=component_raws,
         $component_integer_values=component_integer_values
     ];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, sequence, key,
+        PROCESSING_CONTROL_READ_VALUE_SHAPE, T);
     }
 
 function pending_control_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_controls )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_controls|;
     }
 
 function pending_control_read_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_control_reads )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, request_is_orig, invoke] in
-          invalid_control_read_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_control_reads| + |state$invalid_control_reads|;
     }
 
 function control_scope_name(scope: count): string
@@ -1126,10 +1378,14 @@ function invalidate_control_read_for_other_request(
         {
         local prior = pending_control_reads[c$uid, is_orig, key];
         delete pending_control_reads[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, F);
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 prior$classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         local reused: ControlInfo = [
             $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
             $association_kind=association_kind(c),
@@ -1163,7 +1419,12 @@ function finish_invalid_control_read_for_other_response(
     local invalid = invalid_control_read_invokes[
         c$uid, request_is_orig, key];
     if ( outcome != "direction_mismatch" )
+        {
         delete invalid_control_read_invokes[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_INVALID_CONTROL_READ, F);
+        }
     local ambiguous: ControlInfo = [
         $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
         $association_kind=association_kind(c),
@@ -1205,24 +1466,41 @@ function begin_control_read_request(
     if ( [c$uid, is_orig, key] in pending_controls )
         {
         delete pending_controls[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL, F);
         if ( [c$uid, is_orig, key] in pending_control_reads )
+            {
             delete pending_control_reads[c$uid, is_orig, key];
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_PENDING_CONTROL_READ, F);
+            }
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         }
     else if ( [c$uid, is_orig, key] in pending_control_reads )
         {
         local prior = pending_control_reads[c$uid, is_orig, key];
         delete pending_control_reads[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, F);
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 prior$classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         }
     else if ( ! state_full && ! reused )
+        {
         pending_control_reads[c$uid, is_orig, key] = pending;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, T);
+        }
 
     if ( state_full )
         event ICCP::resource_limit_exceeded(
@@ -1257,6 +1535,9 @@ function finish_control_read_response(
         local invalid = invalid_control_read_invokes[
             c$uid, request_is_orig, key];
         delete invalid_control_read_invokes[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_INVALID_CONTROL_READ, F);
         local ambiguous: ControlInfo = [
             $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
             $association_kind=association_kind(c),
@@ -1317,6 +1598,9 @@ function finish_control_read_response(
             c$uid, is_orig, parser_sequence, key];
         delete control_read_value_shape_evidence[
             c$uid, is_orig, parser_sequence, key];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, parser_sequence, key,
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
         }
     local tag_success = result_count == 1 && failure_count == 0 &&
         first_result_choice == 2 && point_tag_value_shape(tag_shape);
@@ -1359,6 +1643,9 @@ function finish_control_read_response(
                 c, is_orig, invoke_id, "failed", prior, failure_count,
                 "", -1);
         delete pending_control_reads[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_PENDING_CONTROL_READ, F);
         }
     }
 
@@ -1384,6 +1671,9 @@ function finish_deferred_control_read_response(
             c$uid, is_orig, context$parser_sequence, key];
         delete control_read_value_shape_evidence[
             c$uid, is_orig, context$parser_sequence, key];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, context$parser_sequence, key,
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
         }
 
     local prior: PendingControlRead = [
@@ -1456,8 +1746,13 @@ event mms_control_read_shape_cleanup(
     c: connection, is_orig: bool, parser_sequence: count, invoke_id: int)
     {
     if ( invoke_id >= 0 )
+        {
         delete control_read_value_shape_evidence[
             c$uid, is_orig, parser_sequence, int_to_count(invoke_id)];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, parser_sequence, int_to_count(invoke_id),
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
+        }
     }
 
 event ICCP::mms_error_message(
@@ -1504,6 +1799,9 @@ event ICCP::mms_error_message(
             rec$outcome = "correlated";
             delete pending_confirmed[
                 c$uid, confirmed_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, confirmed_request_is_orig, key,
+                PROCESSING_PENDING_CONFIRMED, F);
             }
         else if ( [c$uid, is_orig, key] in invalid_confirmed_invokes )
             rec$outcome = "direction_mismatch";
@@ -1563,6 +1861,9 @@ event ICCP::mms_error_message(
                     mms_error_class_name(error_class), error_code);
                 delete pending_controls[
                     c$uid, control_request_is_orig, control_key];
+                update_directional_processing_state(
+                    c$uid, control_request_is_orig, control_key,
+                    PROCESSING_PENDING_CONTROL, F);
                 }
             }
         }
@@ -1592,8 +1893,13 @@ event ICCP::mms_error_message(
             local invalid_read = invalid_control_read_invokes[
                 c$uid, read_request_is_orig, invalid_read_key];
             if ( read_direction_valid )
+                {
                 delete invalid_control_read_invokes[
                     c$uid, read_request_is_orig, invalid_read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, invalid_read_key,
+                    PROCESSING_INVALID_CONTROL_READ, F);
+                }
             local ambiguous_read_error: ControlInfo = [
                 $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
                 $association_kind=association_kind(c),
@@ -1634,6 +1940,9 @@ event ICCP::mms_error_message(
                     mms_error_class_name(error_class), error_code);
                 delete pending_control_reads[
                     c$uid, read_request_is_orig, invalid_read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, invalid_read_key,
+                    PROCESSING_PENDING_CONTROL_READ, F);
                 }
             }
         }
@@ -1652,6 +1961,10 @@ event ICCP::mms_reject_message_v1(
     local key = int_to_count(invoke_id);
     delete pending_confirmed[c$uid, request_is_orig, key];
     delete invalid_confirmed_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_CONFIRMED, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_INVALID_CONFIRMED, F);
     purge_confirmed_request_state(c, request_is_orig, invoke_id);
     }
 
@@ -1681,6 +1994,12 @@ event ICCP::mms_control_message(
             c$uid, is_orig, rejected_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, rejected_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, rejected_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, rejected_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
     if ( pdu_type == 1 &&
@@ -1712,6 +2031,9 @@ event ICCP::mms_control_message(
         local control_provenance = mms_provenance(c, is_orig);
         control_value_shape_invokes[
             c$uid, is_orig, control_sequence] = key;
+        update_sequence_processing_state(
+            c$uid, is_orig, control_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, T);
         schedule 0secs {
             ICCP::mms_control_request_deferred_v3(
                 c, is_orig, invoke_id, object_scope, object_domain,
@@ -1771,6 +2093,9 @@ event ICCP::mms_control_message(
                 failure_count, "", -1);
             }
         delete pending_controls[c$uid, response_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, response_request_is_orig, key,
+            PROCESSING_PENDING_CONTROL, F);
         }
     }
 
@@ -1786,6 +2111,12 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
 
@@ -1795,6 +2126,12 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
 
@@ -1808,8 +2145,14 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_evidence[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         }
     delete control_value_shape_invokes[c$uid, is_orig, parser_sequence];
+    update_sequence_processing_state(
+        c$uid, is_orig, parser_sequence,
+        PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
 
     local key = int_to_count(invoke_id);
     local reused = [c$uid, is_orig, key] in pending_controls;
@@ -1846,7 +2189,11 @@ function process_control_request_deferred(
         pending$tag_reason = shape$component_raws[1];
         }
     if ( ! state_full && ! read_reused )
+        {
         pending_controls[c$uid, is_orig, key] = pending;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL, T);
+        }
     else if ( state_full )
         {
         event ICCP::legacy_alert_provenance_marker_v1(
@@ -1916,44 +2263,21 @@ event ICCP::mms_control_request_deferred_v3(
 
 function clear_control_processing_state(uid_to_clear: string)
     {
-    local keys: vector of count;
-    local directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_controls )
-        if ( uid == uid_to_clear )
-            {
-            keys[|keys|] = invoke;
-            directions[|directions|] = request_is_orig;
-            }
-    for ( index in keys )
-        delete pending_controls[
-            uid_to_clear, directions[index], keys[index]];
-    local select_keys: vector of count;
-    local select_directions: vector of bool;
-    for ( [select_uid, select_is_orig, select_invoke] in
-          pending_control_reads )
-        if ( select_uid == uid_to_clear )
-            {
-            select_keys[|select_keys|] = select_invoke;
-            select_directions[|select_directions|] = select_is_orig;
-            }
-    for ( select_index in select_keys )
-        delete pending_control_reads[
-            uid_to_clear, select_directions[select_index],
-            select_keys[select_index]];
-    local invalid_select_keys: vector of count;
-    local invalid_select_directions: vector of bool;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_control_read_invokes )
-        if ( invalid_uid == uid_to_clear )
-            {
-            invalid_select_keys[|invalid_select_keys|] = invalid_invoke;
-            invalid_select_directions[|invalid_select_directions|] =
-                invalid_is_orig;
-            }
-    for ( invalid_select_index in invalid_select_keys )
-        delete invalid_control_read_invokes[
-            uid_to_clear, invalid_select_directions[invalid_select_index],
-            invalid_select_keys[invalid_select_index]];
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_controls )
+        delete pending_controls[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_control_reads )
+        delete pending_control_reads[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_control_reads )
+        delete invalid_control_read_invokes[uid_to_clear, is_orig, invoke];
+    local empty_pending_controls: set[bool, count] = set();
+    local empty_pending_reads: set[bool, count] = set();
+    local empty_invalid_reads: set[bool, count] = set();
+    state$pending_controls = empty_pending_controls;
+    state$pending_control_reads = empty_pending_reads;
+    state$invalid_control_reads = empty_invalid_reads;
+    processing_state_indexes[uid_to_clear] = state;
     clear_control_value_shapes(uid_to_clear, T);
     clear_control_value_shapes(uid_to_clear, F);
     }
@@ -2202,11 +2526,9 @@ global information_report_pairing_status: function(
     c: connection, server_is_orig: bool,
     evidence: InformationReportResultsEvidence): string;
 
-global pending_transfer_sets: table[string, bool, count] of PendingTransferSet
-    &read_expire=association_state_timeout;
+global pending_transfer_sets: table[string, bool, count] of PendingTransferSet;
 global known_transfer_sets:
-    table[string, bool, count, string, string] of TransferMembership
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of TransferMembership;
 
 type DSTransferParameters: record {
     data_set_scope: count &optional;
@@ -2255,15 +2577,12 @@ type PendingTransferSupport: record {
 };
 
 global pending_transfer_support:
-    table[string, bool, count] of PendingTransferSupport
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingTransferSupport;
 
 global pending_transfer_controls:
-    table[string, bool, count] of PendingTransferControl
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingTransferControl;
 global active_ds_transfers:
-    table[string, bool, count, string, string] of ActiveDSTransfer
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of ActiveDSTransfer;
 
 global transfer_scope_name: function(scope: count): string;
 global decode_ds_conditions: function(bits: count): string;
@@ -2313,13 +2632,10 @@ type PendingVariableType: record {
 };
 
 global pending_variable_types:
-    table[string, bool, count] of PendingVariableType
-    &read_expire=association_state_timeout;
-global invalid_variable_type_invokes: table[string, bool, count] of bool
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingVariableType;
+global invalid_variable_type_invokes: table[string, bool, count] of bool;
 global known_variable_types:
-    table[string, bool, count, string, string] of string
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of string;
 
 # Return true when a specialized request handler may retain correlation state.
 # The aggregate event purges additive state on a newly detected global limit;
@@ -2371,6 +2687,29 @@ function purge_confirmed_request_state(
     delete pending_transfer_controls[c$uid, request_is_orig, key];
     delete pending_variable_types[c$uid, request_is_orig, key];
     delete invalid_variable_type_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_CONTROL, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_CONTROL_READ, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_INVALID_CONTROL_READ, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SET, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SUPPORT, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_CONTROL, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_VARIABLE_TYPE, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_INVALID_VARIABLE_TYPE, F);
 
     # Read identity also lives in the association state used by the aggregate
     # logger.  Do not let an overwritten request supply an object identity to a
@@ -2407,6 +2746,9 @@ function track_confirmed_request(
         # Keep a tombstone until one direction-correct terminal response.
         # Further reuse cannot make an already ambiguous invoke resolvable.
         delete pending_confirmed[c$uid, is_orig, request_key];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, F);
         purge_confirmed_request_state(c, is_orig, invoke_id);
         return;
         }
@@ -2418,6 +2760,12 @@ function track_confirmed_request(
         # neither a response nor ConfirmedError can then be safely attributed.
         delete pending_confirmed[c$uid, is_orig, request_key];
         add invalid_confirmed_invokes[c$uid, is_orig, request_key];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, F);
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_INVALID_CONFIRMED, T);
         purge_confirmed_request_state(c, is_orig, invoke_id);
         return;
         }
@@ -2428,6 +2776,9 @@ function track_confirmed_request(
             $service_tag=service_tag, $operation=candidate_operation,
             $request_is_orig=is_orig
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, T);
         return;
         }
 
@@ -2448,22 +2799,16 @@ type KnownVariableTypeKey: record {
 
 function pending_variable_type_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_variable_types )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, request_is_orig, invalid_invoke] in
-          invalid_variable_type_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_variable_types| +
+        |state$invalid_variable_types|;
     }
 
 function known_variable_type_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, server_is_orig, scope, domain, name] in
-          known_variable_types )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$known_variable_types|;
     }
 
 function supported_tase2_variable_type(name: string): bool
@@ -2901,19 +3246,14 @@ function classify_control_write(
 
 function pending_transfer_control_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_controls )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_controls|;
     }
 
 function active_ds_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, client_is_orig, transfer_scope, transfer_domain,
-           transfer_name] in active_ds_transfers )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$active_transfer_sets|;
     }
 
 function transfer_member_matches(membership: TransferMembership,
@@ -3213,12 +3553,14 @@ event ICCP::mms_information_report_results_v2(
     local selected_client_is_orig = F;
     local selected_scope: count = 0;
     local selected_domain = "";
-    for ( [uid, client_is_orig, transfer_scope, transfer_domain,
-           transfer_name] in active_ds_transfers )
+    local active_keys: set[bool, count, string, string] = set();
+    if ( c$uid in processing_state_indexes )
+        active_keys = processing_state_indexes[c$uid]$active_transfer_sets;
+    for ( [client_is_orig, transfer_scope, transfer_domain,
+           transfer_name] in active_keys )
         {
-        if ( uid != c$uid ) next;
         local active = active_ds_transfers[
-            uid, client_is_orig, transfer_scope, transfer_domain,
+            c$uid, client_is_orig, transfer_scope, transfer_domain,
             transfer_name];
         if ( ! report_matches_active_data_set(
                  c, is_orig, evidence, active) ) next;
@@ -3238,12 +3580,11 @@ event ICCP::mms_information_report_results_v2(
         {
         if ( wrong_direction == 1 )
             {
-            for ( [wrong_uid, wrong_client_is_orig, wrong_scope,
-                   wrong_domain, wrong_name] in active_ds_transfers )
+            for ( [wrong_client_is_orig, wrong_scope,
+                   wrong_domain, wrong_name] in active_keys )
                 {
-                if ( wrong_uid != c$uid ) next;
                 local wrong = active_ds_transfers[
-                    wrong_uid, wrong_client_is_orig, wrong_scope,
+                    c$uid, wrong_client_is_orig, wrong_scope,
                     wrong_domain, wrong_name];
                 if ( report_matches_active_data_set(
                          c, is_orig, evidence, wrong) &&
@@ -3260,14 +3601,12 @@ event ICCP::mms_information_report_results_v2(
         if ( access_choice == 0 )
             {
             local blocked_candidates: count = 0;
-            for ( [candidate_uid, candidate_client_is_orig,
-                   candidate_scope, candidate_domain,
-                   candidate_name] in active_ds_transfers )
+            for ( [candidate_client_is_orig, candidate_scope,
+                   candidate_domain, candidate_name] in active_keys )
                 {
-                if ( candidate_uid != c$uid ||
-                     is_orig == candidate_client_is_orig ) next;
+                if ( is_orig == candidate_client_is_orig ) next;
                 local candidate = active_ds_transfers[
-                    candidate_uid, candidate_client_is_orig,
+                    c$uid, candidate_client_is_orig,
                     candidate_scope, candidate_domain, candidate_name];
                 if ( candidate$parameters?$block_data &&
                      candidate$parameters$block_data )
@@ -3342,6 +3681,9 @@ event ICCP::mms_information_report_results_v2(
     active_ds_transfers[
         c$uid, selected_client_is_orig, selected_scope, selected_domain,
         selected_name] = selected;
+    update_object_processing_state(
+        c$uid, selected_client_is_orig, selected_scope, selected_domain,
+        selected_name, PROCESSING_ACTIVE_TRANSFER_SET, T);
     }
 
 event ICCP::mms_information_report_results_v3(
@@ -3372,28 +3714,21 @@ event ICCP::mms_information_report_results_v3(
 
 function pending_transfer_support_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_support )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_support|;
     }
 
 
 function pending_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_sets )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_sets|;
     }
 
 function known_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, server_is_orig, scope, domain, name] in
-          known_transfer_sets )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$known_transfer_sets|;
     }
 
 function transfer_scope_name(scope: count): string
@@ -3787,6 +4122,12 @@ function process_gva_message(
                 c$uid, untrusted_request_is_orig, untrusted_key];
             delete invalid_variable_type_invokes[
                 c$uid, untrusted_request_is_orig, untrusted_key];
+            update_directional_processing_state(
+                c$uid, untrusted_request_is_orig, untrusted_key,
+                PROCESSING_PENDING_VARIABLE_TYPE, F);
+            update_directional_processing_state(
+                c$uid, untrusted_request_is_orig, untrusted_key,
+                PROCESSING_INVALID_VARIABLE_TYPE, F);
             }
         return;
         }
@@ -3810,6 +4151,12 @@ function process_gva_message(
             delete pending_variable_types[c$uid, is_orig, key];
             invalid_variable_type_invokes[c$uid, is_orig, key] =
                 reused$request_is_orig;
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_PENDING_VARIABLE_TYPE, F);
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_INVALID_VARIABLE_TYPE, T);
             return;
             }
         if ( pending_variable_type_count(c$uid) >=
@@ -3828,6 +4175,8 @@ function process_gva_message(
             $scope=object_scope,
             $domain=object_domain, $name=object_name
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, T);
         return;
         }
     if ( pdu_type != 1 ) return;
@@ -3836,12 +4185,20 @@ function process_gva_message(
         {
         if ( [c$uid, request_is_orig, key] in
              invalid_variable_type_invokes )
+            {
             delete invalid_variable_type_invokes[
                 c$uid, request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, request_is_orig, key,
+                PROCESSING_INVALID_VARIABLE_TYPE, F);
+            }
         return;
         }
     local prior = pending_variable_types[c$uid, request_is_orig, key];
     delete pending_variable_types[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_VARIABLE_TYPE, F);
     local configured_type = "";
     if ( [prior$server, prior$peer, prior$scope, prior$domain, prior$name] in
          configured_variable_types )
@@ -3875,6 +4232,9 @@ function process_gva_message(
         {
         delete known_variable_types[
             c$uid, is_orig, prior$scope, prior$domain, prior$name];
+        update_object_processing_state(
+            c$uid, is_orig, prior$scope, prior$domain, prior$name,
+            PROCESSING_KNOWN_VARIABLE_TYPE, F);
         discovery$outcome = "invalid_configuration";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = "invalid_standardized_scope";
@@ -3959,6 +4319,9 @@ function process_gva_message(
         # endpoint-owned object instead of leaving an earlier learned type live.
         delete known_variable_types[
             c$uid, is_orig, prior$scope, prior$domain, prior$name];
+        update_object_processing_state(
+            c$uid, is_orig, prior$scope, prior$domain, prior$name,
+            PROCESSING_KNOWN_VARIABLE_TYPE, F);
         discovery$outcome = "type_mismatch";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = mismatch_reasons;
@@ -3981,6 +4344,9 @@ function process_gva_message(
     known_variable_types[
         c$uid, is_orig, prior$scope, prior$domain, prior$name] =
             configured_type;
+    update_object_processing_state(
+        c$uid, is_orig, prior$scope, prior$domain, prior$name,
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     discovery$outcome = "configured";
     write_transfer_record(c, is_orig, discovery);
     }
@@ -4069,6 +4435,8 @@ function begin_transfer_support_read_request(
         $request_is_orig=is_orig, $scope=object_scope,
         $domain=object_domain, $name=object_name
     ];
+    update_directional_processing_state(
+        c$uid, is_orig, key, PROCESSING_PENDING_TRANSFER_SUPPORT, T);
     }
 
 # Authoritative packet Read request policy.  Unlike the two compatibility
@@ -4158,8 +4526,13 @@ event ICCP::mms_transfer_support_value_message(
                 $named_type=read_pending$named_type
             ];
             if ( read_direction_valid )
+                {
                 delete pending_control_reads[
                     c$uid, read_request_is_orig, read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, read_key,
+                    PROCESSING_PENDING_CONTROL_READ, F);
+                }
             schedule 0secs {
                 ICCP::mms_control_read_response_deferred_v2(
                     c, is_orig, invoke_id, result_count, failure_count,
@@ -4220,6 +4593,9 @@ event ICCP::mms_transfer_support_value_message(
         }
     local prior = pending_transfer_support[c$uid, request_is_orig, key];
     delete pending_transfer_support[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SUPPORT, F);
 
     local decoded = result_count == 1 && failure_count == 0;
     local is_timestamp = prior$name == "Transfer_Set_Time_Stamp";
@@ -4269,6 +4645,9 @@ event ICCP::mms_transfer_support_value_message(
     write_transfer_record(c, is_orig, rec);
     delete first_result_evidence[
         c$uid, is_orig, first_result_sequence, key];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, first_result_sequence, key,
+        PROCESSING_FIRST_RESULT_EVIDENCE, F);
     }
 
 event ICCP::mms_ds_transfer_set_message_v1(
@@ -4580,11 +4959,16 @@ event ICCP::mms_ds_transfer_set_message_v1(
     local state_full = ! reused &&
         pending_transfer_control_count(c$uid) >= max_pending_transfer_sets;
     if ( ! state_full )
+        {
         pending_transfer_controls[c$uid, is_orig, key] = [
             $action=action, $request_is_orig=is_orig,
             $scope=object_scope, $domain=object_domain, $name=object_name,
             $parameters=parameters
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key,
+            PROCESSING_PENDING_TRANSFER_CONTROL, T);
+        }
     else
         event ICCP::resource_limit_exceeded(
             c, is_orig, "pending_transfer_controls",
@@ -4644,11 +5028,16 @@ event ICCP::mms_transfer_control_message(
         local state_full = ! reused &&
             pending_transfer_control_count(c$uid) >= max_pending_transfer_sets;
         if ( ! state_full )
+            {
             pending_transfer_controls[c$uid, is_orig, key] = [
                 $action=action, $request_is_orig=is_orig,
                 $scope=object_scope, $domain=object_domain,
                 $name=object_name
             ];
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_PENDING_TRANSFER_CONTROL, T);
+            }
         else
             event ICCP::resource_limit_exceeded(
                 c, is_orig, "pending_transfer_controls",
@@ -4745,6 +5134,7 @@ event ICCP::mms_transfer_control_message(
                 }
             else if ( existing || active_ds_transfer_count(c$uid) <
                       max_active_transfer_sets )
+                {
                 active_ds_transfers[
                     c$uid, prior$request_is_orig, prior$scope, prior$domain,
                     prior$name] = [
@@ -4753,6 +5143,11 @@ event ICCP::mms_transfer_control_message(
                     $name=prior$name, $parameters=prior$parameters,
                     $state="active"
                 ];
+                update_object_processing_state(
+                    c$uid, prior$request_is_orig, prior$scope,
+                    prior$domain, prior$name,
+                    PROCESSING_ACTIVE_TRANSFER_SET, T);
+                }
             else
                 {
                 response$outcome = "confirmed_state_limit";
@@ -4776,10 +5171,17 @@ event ICCP::mms_transfer_control_message(
                 active_ds_transfers[
                     c$uid, prior$request_is_orig, prior$scope, prior$domain,
                     prior$name] = active;
+                update_object_processing_state(
+                    c$uid, prior$request_is_orig, prior$scope,
+                    prior$domain, prior$name,
+                    PROCESSING_ACTIVE_TRANSFER_SET, T);
                 }
             }
         }
     delete pending_transfer_controls[c$uid, response_request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, response_request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_CONTROL, F);
     write_transfer_record(c, is_orig, response);
     }
 
@@ -4793,11 +5195,21 @@ event ICCP::mms_error_message(
     local key = int_to_count(invoke_id);
     local error_request_is_orig = ! is_orig;
     if ( [c$uid, error_request_is_orig, key] in pending_variable_types )
+        {
         delete pending_variable_types[c$uid, error_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, error_request_is_orig, key,
+            PROCESSING_PENDING_VARIABLE_TYPE, F);
+        }
     if ( [c$uid, error_request_is_orig, key] in
          invalid_variable_type_invokes )
+        {
         delete invalid_variable_type_invokes[
             c$uid, error_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, error_request_is_orig, key,
+            PROCESSING_INVALID_VARIABLE_TYPE, F);
+        }
 
     local set_request_is_orig = ! is_orig;
     local set_direction_valid = T;
@@ -4824,8 +5236,13 @@ event ICCP::mms_error_message(
                 set_error$list_domain = set_prior$domain;
             }
         if ( set_direction_valid )
+            {
             delete pending_transfer_sets[
                 c$uid, set_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, set_request_is_orig, key,
+                PROCESSING_PENDING_TRANSFER_SET, F);
+            }
         write_transfer_record(c, is_orig, set_error);
         }
 
@@ -4851,8 +5268,13 @@ event ICCP::mms_error_message(
             $list_name=support_prior$name
         ];
         if ( support_direction_valid )
+            {
             delete pending_transfer_support[
                 c$uid, support_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, support_request_is_orig, key,
+                PROCESSING_PENDING_TRANSFER_SUPPORT, F);
+            }
         write_transfer_record(c, is_orig, support_error);
         }
 
@@ -4883,7 +5305,12 @@ event ICCP::mms_error_message(
         rejected = add_ds_transfer_parameters(rejected, prior$parameters);
         }
     if ( control_direction_valid )
+        {
         delete pending_transfer_controls[c$uid, control_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, control_request_is_orig, key,
+            PROCESSING_PENDING_TRANSFER_CONTROL, F);
+        }
     write_transfer_record(c, is_orig, rejected);
     }
 
@@ -4946,8 +5373,13 @@ function process_transfer_set_message(
         local state_full = identifiers_valid && ! invoke_reused &&
             pending_transfer_count(c$uid) >= max_pending_transfer_sets;
         if ( identifiers_valid && ! state_full )
+            {
             pending_transfer_sets[
                 c$uid, is_orig, request_pending_key] = pending;
+            update_directional_processing_state(
+                c$uid, is_orig, request_pending_key,
+                PROCESSING_PENDING_TRANSFER_SET, T);
+            }
         else if ( state_full )
             event ICCP::resource_limit_exceeded(
                 c, is_orig, "pending_transfer_sets",
@@ -5080,12 +5512,17 @@ function process_transfer_set_message(
             if ( prior$profile_valid && ! existing_definition &&
                  prior$name != "" &&
                  known_transfer_count(c$uid) < max_known_transfer_sets )
+                {
                 known_transfer_sets[c$uid, is_orig, prior$scope,
                                     prior$domain, prior$name] = [
                     $scopes=prior$member_scopes,
                     $domains=prior$member_domains,
                     $names=prior$member_names
                 ];
+                update_object_processing_state(
+                    c$uid, is_orig, prior$scope, prior$domain, prior$name,
+                    PROCESSING_KNOWN_TRANSFER_SET, T);
+                }
             if ( existing_definition )
                 {
                 response$conformance = "standards_deviation";
@@ -5160,6 +5597,12 @@ function process_transfer_set_message(
                             prior$member_scopes[delete_index],
                             prior$member_domains[delete_index],
                             prior$member_names[delete_index]];
+                        update_object_processing_state(
+                            c$uid, is_orig,
+                            prior$member_scopes[delete_index],
+                            prior$member_domains[delete_index],
+                            prior$member_names[delete_index],
+                            PROCESSING_KNOWN_TRANSFER_SET, F);
                         ++delete_index;
                         }
                     }
@@ -5170,6 +5613,9 @@ function process_transfer_set_message(
             }
         delete pending_transfer_sets[
             c$uid, response_request_is_orig, response_pending_key];
+        update_directional_processing_state(
+            c$uid, response_request_is_orig, response_pending_key,
+            PROCESSING_PENDING_TRANSFER_SET, F);
         write_transfer_record(c, is_orig, response);
         return;
         }
@@ -5331,125 +5777,45 @@ event ICCP::mms_transfer_set_message_v3(
 
 function clear_transfer_processing_state(uid_to_clear: string)
     {
-    local pending_keys: vector of count;
-    local pending_directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_transfer_sets )
-        if ( uid == uid_to_clear )
-            {
-            pending_keys[|pending_keys|] = invoke;
-            pending_directions[|pending_directions|] = request_is_orig;
-            }
-    for ( index in pending_keys )
-        delete pending_transfer_sets[
-            uid_to_clear, pending_directions[index], pending_keys[index]];
-
-    local control_keys: vector of count;
-    local control_directions: vector of bool;
-    for ( [control_uid, control_is_orig, control_invoke] in
-          pending_transfer_controls )
-        if ( control_uid == uid_to_clear )
-            {
-            control_keys[|control_keys|] = control_invoke;
-            control_directions[|control_directions|] = control_is_orig;
-            }
-    for ( control_index in control_keys )
-        delete pending_transfer_controls[
-            uid_to_clear, control_directions[control_index],
-            control_keys[control_index]];
-
-    local active_keys: vector of string;
-    local active_directions: vector of bool;
-    local active_scopes: vector of count;
-    local active_domains: vector of string;
-    for ( [active_uid, active_is_orig, active_scope, active_domain,
-           active_name] in active_ds_transfers )
-        if ( active_uid == uid_to_clear )
-            {
-            active_keys[|active_keys|] = active_name;
-            active_directions[|active_directions|] = active_is_orig;
-            active_scopes[|active_scopes|] = active_scope;
-            active_domains[|active_domains|] = active_domain;
-            }
-    for ( active_index in active_keys )
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_transfer_sets )
+        delete pending_transfer_sets[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_transfer_controls )
+        delete pending_transfer_controls[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_transfer_support )
+        delete pending_transfer_support[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_variable_types )
+        delete pending_variable_types[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_variable_types )
+        delete invalid_variable_type_invokes[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, scope, domain, name] in state$active_transfer_sets )
         delete active_ds_transfers[
-            uid_to_clear, active_directions[active_index],
-            active_scopes[active_index], active_domains[active_index],
-            active_keys[active_index]];
-
-    local support_keys: vector of count;
-    local support_directions: vector of bool;
-    for ( [support_uid, support_is_orig, support_invoke] in
-          pending_transfer_support )
-        if ( support_uid == uid_to_clear )
-            {
-            support_keys[|support_keys|] = support_invoke;
-            support_directions[|support_directions|] = support_is_orig;
-            }
-    for ( support_index in support_keys )
-        delete pending_transfer_support[
-            uid_to_clear, support_directions[support_index],
-            support_keys[support_index]];
-
-    local type_pending_keys: vector of count;
-    local type_pending_directions: vector of bool;
-    for ( [type_uid, type_is_orig, type_invoke] in pending_variable_types )
-        if ( type_uid == uid_to_clear )
-            {
-            type_pending_keys[|type_pending_keys|] = type_invoke;
-            type_pending_directions[|type_pending_directions|] = type_is_orig;
-            }
-    for ( type_pending_index in type_pending_keys )
-        delete pending_variable_types[
-            uid_to_clear, type_pending_directions[type_pending_index],
-            type_pending_keys[type_pending_index]];
-
-    local invalid_type_keys: vector of count;
-    local invalid_type_directions: vector of bool;
-    for ( [invalid_type_uid, invalid_type_is_orig, invalid_type_invoke] in
-          invalid_variable_type_invokes )
-        if ( invalid_type_uid == uid_to_clear )
-            {
-            invalid_type_keys[|invalid_type_keys|] = invalid_type_invoke;
-            invalid_type_directions[|invalid_type_directions|] =
-                invalid_type_is_orig;
-            }
-    for ( invalid_type_index in invalid_type_keys )
-        delete invalid_variable_type_invokes[
-            uid_to_clear, invalid_type_directions[invalid_type_index],
-            invalid_type_keys[invalid_type_index]];
-
-    local type_known_keys: vector of KnownVariableTypeKey;
-    for ( [type_known_uid, type_server_is_orig, type_scope, type_domain,
-           known_type_name] in known_variable_types )
-        if ( type_known_uid == uid_to_clear )
-            type_known_keys[|type_known_keys|] = [
-                $server_is_orig=type_server_is_orig,
-                $scope=type_scope, $domain=type_domain,
-                $name=known_type_name
-            ];
-    for ( type_known_index in type_known_keys )
-        {
-        local type_key = type_known_keys[type_known_index];
-        delete known_variable_types[
-            uid_to_clear, type_key$server_is_orig, type_key$scope,
-            type_key$domain, type_key$name];
-        }
-
-    local known_keys: vector of KnownTransferKey;
-    for ( [uid, server_is_orig, scope, domain, name] in
-          known_transfer_sets )
-        if ( uid == uid_to_clear )
-            known_keys[|known_keys|] = [
-                $server_is_orig=server_is_orig,
-                $scope=scope, $domain=domain, $name=name
-            ];
-    for ( known_index in known_keys )
-        {
-        local known_key = known_keys[known_index];
+            uid_to_clear, is_orig, scope, domain, name];
+    for ( [is_orig, scope, domain, name] in state$known_transfer_sets )
         delete known_transfer_sets[
-            uid_to_clear, known_key$server_is_orig, known_key$scope,
-            known_key$domain, known_key$name];
-        }
+            uid_to_clear, is_orig, scope, domain, name];
+    for ( [is_orig, scope, domain, name] in state$known_variable_types )
+        delete known_variable_types[
+            uid_to_clear, is_orig, scope, domain, name];
+
+    local empty_directional: set[bool, count] = set();
+    local empty_pending_controls: set[bool, count] = set();
+    local empty_pending_support: set[bool, count] = set();
+    local empty_pending_types: set[bool, count] = set();
+    local empty_invalid_types: set[bool, count] = set();
+    local empty_active: set[bool, count, string, string] = set();
+    local empty_known_transfers: set[bool, count, string, string] = set();
+    local empty_known_types: set[bool, count, string, string] = set();
+    state$pending_transfer_sets = empty_directional;
+    state$pending_transfer_controls = empty_pending_controls;
+    state$pending_transfer_support = empty_pending_support;
+    state$pending_variable_types = empty_pending_types;
+    state$invalid_variable_types = empty_invalid_types;
+    state$active_transfer_sets = empty_active;
+    state$known_transfer_sets = empty_known_transfers;
+    state$known_variable_types = empty_known_types;
+    processing_state_indexes[uid_to_clear] = state;
     }
 
 event connection_state_remove(c: connection)
@@ -5473,37 +5839,51 @@ function clear_failed_mms_pdu_evidence(c: connection, is_orig: bool)
     # sequence. Evidence from completed earlier PDUs uses older sequence keys.
     if ( [c$uid, is_orig] !in pending_mms_parser_markers )
         return;
+    if ( c$uid !in processing_state_indexes ) return;
 
     local sequence = mms_parser_sequence(c, is_orig);
+    local state = processing_state_indexes[c$uid];
     local identify_pdus: vector of count;
     local identify_invokes: vector of count;
-    for ( [uid, direction, entry_sequence, pdu_type, invoke] in
-          identify_evidence )
-        if ( uid == c$uid && direction == is_orig &&
-             entry_sequence == sequence )
+    for ( [direction, entry_sequence, pdu_type, invoke] in
+          state$identify_evidence )
+        if ( direction == is_orig && entry_sequence == sequence )
             {
             identify_pdus[|identify_pdus|] = pdu_type;
             identify_invokes[|identify_invokes|] = invoke;
             }
     for ( index in identify_pdus )
+        {
         delete identify_evidence[
             c$uid, is_orig, sequence, identify_pdus[index],
             identify_invokes[index]];
+        delete state$identify_evidence[
+            is_orig, sequence, identify_pdus[index],
+            identify_invokes[index]];
+        }
 
     delete information_report_results_evidence[c$uid, is_orig, sequence];
     delete point_value_shape_evidence[c$uid, is_orig, sequence];
     delete control_value_shape_evidence[c$uid, is_orig, sequence];
     delete control_value_shape_invokes[c$uid, is_orig, sequence];
+    delete state$information_report_results[is_orig, sequence];
+    delete state$point_value_shapes[is_orig, sequence];
+    delete state$control_value_shapes[is_orig, sequence];
+    delete state$control_value_shape_invokes[is_orig, sequence];
 
     local read_invokes: vector of count;
-    for ( [read_uid, read_direction, read_sequence, read_invoke] in
-          control_read_value_shape_evidence )
-        if ( read_uid == c$uid && read_direction == is_orig &&
-             read_sequence == sequence )
+    for ( [read_direction, read_sequence, read_invoke] in
+          state$control_read_value_shapes )
+        if ( read_direction == is_orig && read_sequence == sequence )
             read_invokes[|read_invokes|] = read_invoke;
     for ( read_index in read_invokes )
+        {
         delete control_read_value_shape_evidence[
             c$uid, is_orig, sequence, read_invokes[read_index]];
+        delete state$control_read_value_shapes[
+            is_orig, sequence, read_invokes[read_index]];
+        }
+    processing_state_indexes[c$uid] = state;
     }
 
 event ICCP::parser_error(c: connection, reason: string)
@@ -6525,6 +6905,9 @@ function process_mms_message(
         third_component_length = shape$third_component_length;
         delete point_value_shape_evidence[
             c$uid, is_orig, context$parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, context$parser_sequence,
+            PROCESSING_POINT_VALUE_SHAPE, F);
         }
     local request_invoke_reused = context$request_invoke_reused;
     local request_state_full = context$request_state_full;
@@ -6599,6 +6982,9 @@ function process_mms_message(
         delete identify_evidence[
             c$uid, is_orig, context$parser_sequence, pdu_type,
             identify_key];
+        update_identify_processing_state(
+            c$uid, is_orig, context$parser_sequence, pdu_type,
+            identify_key, F);
         }
 
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
@@ -6821,6 +7207,9 @@ function process_mms_message(
             context$provenance);
         delete information_report_results_evidence[
             c$uid, is_orig, context$parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, context$parser_sequence,
+            PROCESSING_INFORMATION_REPORT_RESULTS, F);
         }
     if ( recognized && semantic_decoded && pdu_type == 0 &&
          rec?$object_name && rec?$object_scope && rec?$name_model &&
@@ -7000,8 +7389,13 @@ event ICCP::mms_message(
         {
         local request_is_orig = ! is_orig;
         if ( [c$uid, request_is_orig, key] in invalid_confirmed_invokes )
+            {
             delete invalid_confirmed_invokes[
                 c$uid, request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, request_is_orig, key,
+                PROCESSING_INVALID_CONFIRMED, F);
+            }
         else if ( [c$uid, request_is_orig, key] in pending_confirmed )
             {
             local pending = pending_confirmed[
@@ -7009,6 +7403,9 @@ event ICCP::mms_message(
             if ( pdu_type == 6 || service_tag == pending$service_tag )
                 {
                 delete pending_confirmed[c$uid, request_is_orig, key];
+                update_directional_processing_state(
+                    c$uid, request_is_orig, key,
+                    PROCESSING_PENDING_CONFIRMED, F);
                 if ( pdu_type == 6 )
                     purge_confirmed_request_state(
                         c, request_is_orig, invoke_id);
@@ -7020,119 +7417,62 @@ event ICCP::mms_message(
 
 function clear_mms_deferred_evidence(uid_to_clear: string)
     {
-    local identify_directions: vector of bool;
-    local identify_sequences: vector of count;
-    local identify_pdus: vector of count;
-    local identify_invokes: vector of count;
-    for ( [uid, is_orig, sequence, pdu_type, invoke] in identify_evidence )
-        if ( uid == uid_to_clear )
-            {
-            identify_directions[|identify_directions|] = is_orig;
-            identify_sequences[|identify_sequences|] = sequence;
-            identify_pdus[|identify_pdus|] = pdu_type;
-            identify_invokes[|identify_invokes|] = invoke;
-            }
-    for ( index in identify_sequences )
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, sequence, pdu_type, invoke] in
+          state$identify_evidence )
         delete identify_evidence[
-            uid_to_clear, identify_directions[index],
-            identify_sequences[index], identify_pdus[index],
-            identify_invokes[index]];
-
-    local report_directions: vector of bool;
-    local report_sequences: vector of count;
-    for ( [report_uid, report_is_orig, report_sequence] in
-          information_report_results_evidence )
-        if ( report_uid == uid_to_clear )
-            {
-            report_directions[|report_directions|] = report_is_orig;
-            report_sequences[|report_sequences|] = report_sequence;
-            }
-    for ( report_index in report_sequences )
+            uid_to_clear, is_orig, sequence, pdu_type, invoke];
+    for ( [is_orig, sequence] in state$information_report_results )
         delete information_report_results_evidence[
-            uid_to_clear, report_directions[report_index],
-            report_sequences[report_index]];
-
-    local point_directions: vector of bool;
-    local point_sequences: vector of count;
-    for ( [point_uid, point_is_orig, point_sequence] in
-          point_value_shape_evidence )
-        if ( point_uid == uid_to_clear )
-            {
-            point_directions[|point_directions|] = point_is_orig;
-            point_sequences[|point_sequences|] = point_sequence;
-            }
-    for ( point_index in point_sequences )
-        delete point_value_shape_evidence[
-            uid_to_clear, point_directions[point_index],
-            point_sequences[point_index]];
-
-    local read_directions: vector of bool;
-    local read_sequences: vector of count;
-    local read_invokes: vector of count;
-    for ( [read_uid, read_is_orig, read_sequence, read_invoke] in
-          control_read_value_shape_evidence )
-        if ( read_uid == uid_to_clear )
-            {
-            read_directions[|read_directions|] = read_is_orig;
-            read_sequences[|read_sequences|] = read_sequence;
-            read_invokes[|read_invokes|] = read_invoke;
-            }
-    for ( read_index in read_sequences )
+            uid_to_clear, is_orig, sequence];
+    for ( [is_orig, sequence] in state$point_value_shapes )
+        delete point_value_shape_evidence[uid_to_clear, is_orig, sequence];
+    for ( [is_orig, sequence, invoke] in state$control_read_value_shapes )
         delete control_read_value_shape_evidence[
-            uid_to_clear, read_directions[read_index],
-            read_sequences[read_index], read_invokes[read_index]];
-
-    local first_result_directions: vector of bool;
-    local first_result_sequences: vector of count;
-    local first_result_invokes: vector of count;
-    for ( [result_uid, result_is_orig, result_sequence, result_invoke] in
-          first_result_evidence )
-        if ( result_uid == uid_to_clear )
-            {
-            first_result_directions[|first_result_directions|] =
-                result_is_orig;
-            first_result_sequences[|first_result_sequences|] =
-                result_sequence;
-            first_result_invokes[|first_result_invokes|] = result_invoke;
-            }
-    for ( result_index in first_result_sequences )
+            uid_to_clear, is_orig, sequence, invoke];
+    for ( [is_orig, sequence, invoke] in state$first_result_evidence )
         delete first_result_evidence[
-            uid_to_clear, first_result_directions[result_index],
-            first_result_sequences[result_index],
-            first_result_invokes[result_index]];
+            uid_to_clear, is_orig, sequence, invoke];
+
+    local empty_identify: set[bool, count, count, count] = set();
+    local empty_sequences: set[bool, count] = set();
+    local empty_points: set[bool, count] = set();
+    local empty_read_shapes: set[bool, count, count] = set();
+    local empty_first_results: set[bool, count, count] = set();
+    state$identify_evidence = empty_identify;
+    state$information_report_results = empty_sequences;
+    state$point_value_shapes = empty_points;
+    state$control_read_value_shapes = empty_read_shapes;
+    state$first_result_evidence = empty_first_results;
+    processing_state_indexes[uid_to_clear] = state;
     clear_control_value_shapes(uid_to_clear, T);
     clear_control_value_shapes(uid_to_clear, F);
     }
 
 function clear_confirmed_processing_state(uid_to_clear: string)
     {
-    local confirmed_keys: vector of count;
-    local confirmed_directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_confirmed )
-        if ( uid == uid_to_clear )
-            {
-            confirmed_keys[|confirmed_keys|] = invoke;
-            confirmed_directions[|confirmed_directions|] = request_is_orig;
-            }
-    for ( index in confirmed_keys )
-        delete pending_confirmed[
-            uid_to_clear, confirmed_directions[index], confirmed_keys[index]];
-
-    local invalid_keys: vector of count;
-    local invalid_directions: vector of bool;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_confirmed_invokes )
-        if ( invalid_uid == uid_to_clear )
-            {
-            invalid_keys[|invalid_keys|] = invalid_invoke;
-            invalid_directions[|invalid_directions|] = invalid_is_orig;
-            }
-    for ( invalid_index in invalid_keys )
-        delete invalid_confirmed_invokes[
-            uid_to_clear, invalid_directions[invalid_index],
-            invalid_keys[invalid_index]];
-
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_confirmed )
+        delete pending_confirmed[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_confirmed )
+        delete invalid_confirmed_invokes[uid_to_clear, is_orig, invoke];
+    local empty_pending: set[bool, count] = set();
+    local empty_invalid: set[bool, count] = set();
+    state$pending_confirmed = empty_pending;
+    state$invalid_confirmed = empty_invalid;
+    processing_state_indexes[uid_to_clear] = state;
     clear_mms_deferred_evidence(uid_to_clear);
+    }
+
+function processing_state_index_expire(
+    states: table[string] of ProcessingStateIndex, uid: string): interval
+    {
+    clear_transfer_processing_state(uid);
+    clear_confirmed_processing_state(uid);
+    clear_control_processing_state(uid);
+    return 0secs;
     }
 
 event connection_state_remove(c: connection)
@@ -7142,6 +7482,11 @@ event connection_state_remove(c: connection)
     delete processing_acse_lifecycle_spdu[c$uid, F];
     delete processing_session_cleanup_spdu[c$uid, T];
     delete processing_session_cleanup_spdu[c$uid, F];
+    }
+
+event connection_state_remove(c: connection) &priority=-30
+    {
+    delete processing_state_indexes[c$uid];
     }
 
 event ICCP::session_spdu_marker_v1(
@@ -7258,6 +7603,9 @@ event ICCP::mms_error_message(
     if ( pdu_type == 2 && invoke_id >= 0 )
         delete invalid_confirmed_invokes[
             c$uid, ! is_orig, int_to_count(invoke_id)];
+        update_directional_processing_state(
+            c$uid, ! is_orig, int_to_count(invoke_id),
+            PROCESSING_INVALID_CONFIRMED, F);
     }
 
 event ICCP::mms_conclude_result_v1(

@@ -96,10 +96,11 @@ event zeek_init()
     # clear.  The Read request populates both association and confirmed-request
     # correlation; the other two entries exercise evidence and provenance.
     emit_read_request(c, T, 41);
-    ICCP::pending_name_lists[c$uid, T, 42] = [
+    local name_list: ICCP::PendingNameList = [
         $object_class_choice=0, $object_class=2, $scope=0,
         $domain="", $continue_after=""
     ];
+    ICCP::retain_name_list(c$uid, T, 42, name_list);
     ICCP::set_mms_provenance(c, T, 1);
 
     # An unmatched response cannot terminate an established association.
