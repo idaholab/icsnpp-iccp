@@ -1511,7 +1511,7 @@ public type DataState = struct {
     valueBytes: uint64;
 };
 
-const MAX_DATA_NESTING_DEPTH: uint64 = 8;
+const MAX_DATA_NESTING_DEPTH: uint64 = 16;
 const MAX_DATA_VALUE_LENGTH: uint64 = 1024 * 1024;
 const MAX_DATA_VALUE_BYTES: uint64 = 4 * 1024 * 1024;
 const MAX_DATA_RAW_PREFIX_LENGTH: uint64 = 256;
@@ -1524,9 +1524,10 @@ function dataRawPrefix(value: bytes): bytes {
 }
 
 function reserveDataValue(
-    length: uint64, depth: uint64, state: DataState&
+    length: uint64, depth: uint64, state: DataState&,
+    maximumDepth: uint64
 ): void {
-    if (depth > MAX_DATA_NESTING_DEPTH)
+    if (depth > maximumDepth)
         throw "MMS Data exceeds configured nesting depth limit";
 
     if (length > MAX_DATA_VALUE_LENGTH)
@@ -1541,7 +1542,8 @@ function reserveDataValue(
 public type DataChildren = unit(
     length: uint64,
     depth: uint64,
-    state: DataState& = new DataState
+    state: DataState& = new DataState,
+    maximumDepth: uint64 = MAX_DATA_NESTING_DEPTH
 ) {
     var count: uint64 = 0;
     var totalNodes: uint64 = 0;
@@ -1571,7 +1573,7 @@ public type DataChildren = unit(
     var nestedRaws: vector<bytes>;
     var nestedIntegerValues: vector<int64>;
 
-    children: DataValue(depth, state)[] &eod foreach {
+    children: DataValue(depth, state, maximumDepth)[] &eod foreach {
         self.count += 1;
         self.choices.push_back($$.choice);
         self.raws.push_back($$.raw);
@@ -1736,7 +1738,8 @@ function timeOfDayIsValid(value: bytes): bool {
 
 public type DataValue = unit(
     depth: uint64,
-    state: DataState& = new DataState
+    state: DataState& = new DataState,
+    maximumDepth: uint64 = MAX_DATA_NESTING_DEPTH
 ) {
     var choice: uint64 = 0;
     var known: bool = False;
@@ -1785,7 +1788,9 @@ public type DataValue = unit(
         )
     );
     length: ICCP_BER::DefiniteLength {
-        reserveDataValue(self.length.value, depth, state);
+        reserveDataValue(
+            self.length.value, depth, state, maximumDepth
+        );
         self.rawLength = self.length.value;
         self.rawTruncated =
             (self.choice == 1 || self.choice == 2) ?
@@ -1793,7 +1798,9 @@ public type DataValue = unit(
                 self.length.value > MAX_DATA_RAW_PREFIX_LENGTH;
     }
     switch (self.choice) {
-        1 -> arrayData: DataChildren(self.length.value, depth + 1, state) {
+        1 -> arrayData: DataChildren(
+            self.length.value, depth + 1, state, maximumDepth
+        ) {
             self.childCount = $$.count;
             self.nodeCount += $$.totalNodes;
             if ($$.maximumDepth > self.maximumDepth)
@@ -1815,7 +1822,8 @@ public type DataValue = unit(
         2 -> structureData: DataChildren(
             self.length.value,
             depth + 1,
-            state
+            state,
+            maximumDepth
         ) {
             self.childCount = $$.count;
             self.nodeCount += $$.totalNodes;
@@ -1899,7 +1907,10 @@ public type DataValue = unit(
     : void &requires=self.choice != 17 || self.length.value == 8;
 };
 
-public type AccessResult = unit(state: DataState& = new DataState) {
+public type AccessResult = unit(
+    state: DataState& = new DataState,
+    maximumDepth: uint64 = MAX_DATA_NESTING_DEPTH
+) {
     var success: bool = False;
     var choice: uint64 = 0;
     var error: int64 = -1;
@@ -1962,7 +1973,9 @@ public type AccessResult = unit(state: DataState& = new DataState) {
     );
     length: ICCP_BER::DefiniteLength {
         if (self.identifier.tagNumber != 0) {
-            reserveDataValue(self.length.value, 0, state);
+            reserveDataValue(
+                self.length.value, 0, state, maximumDepth
+            );
             self.rawLength = self.length.value;
             self.rawTruncated =
                 (self.choice == 1 || self.choice == 2) ?
@@ -1977,7 +1990,9 @@ public type AccessResult = unit(state: DataState& = new DataState) {
                 throw "MMS data access error is out of range";
             self.error = $$.value;
         }
-        1 -> arrayData: DataChildren(self.length.value, 1, state) {
+        1 -> arrayData: DataChildren(
+            self.length.value, 1, state, maximumDepth
+        ) {
             self.nodeCount += $$.totalNodes;
             self.componentIntegerCount = $$.integerCount;
             self.firstComponentInteger = $$.firstInteger;
@@ -2001,7 +2016,9 @@ public type AccessResult = unit(state: DataState& = new DataState) {
             self.nestedRaws = $$.nestedRaws;
             self.nestedIntegerValues = $$.nestedIntegerValues;
         }
-        2 -> structureData: DataChildren(self.length.value, 1, state) {
+        2 -> structureData: DataChildren(
+            self.length.value, 1, state, maximumDepth
+        ) {
             self.nodeCount += $$.totalNodes;
             self.componentIntegerCount = $$.integerCount;
             self.firstComponentInteger = $$.firstInteger;
@@ -2432,7 +2449,10 @@ public type ReadRequest = unit(length: uint64) {
     }
 } &size=length;
 
-public type AccessResultList = unit(length: uint64) {
+public type AccessResultList = unit(
+    length: uint64,
+    maximumDepth: uint64 = MAX_DATA_NESTING_DEPTH
+) {
     # Every AccessResult root and every nested Data node shares this state.
     # The limit therefore applies to the complete forest, not independently
     # to each result.
@@ -2475,7 +2495,7 @@ public type AccessResultList = unit(length: uint64) {
     var resultBooleanValues: vector<bool>;
     var resultStringValues: vector<string>;
 
-    results: AccessResult(self.state)[] &eod foreach {
+    results: AccessResult(self.state, maximumDepth)[] &eod foreach {
         self.count += 1;
         self.totalNodes = self.state.elements;
         self.resultChoices.push_back($$.choice);
@@ -2677,7 +2697,10 @@ public type ReadResponse = unit(length: uint64) {
     }
 } &size=length;
 
-public type DataList = unit(length: uint64) {
+public type DataList = unit(
+    length: uint64,
+    maximumDepth: uint64 = MAX_DATA_NESTING_DEPTH
+) {
     # Write values form one aggregate Data forest even when each root is a
     # separately encoded MMS Data value.
     var state: DataState& = new DataState;
@@ -2708,7 +2731,7 @@ public type DataList = unit(length: uint64) {
     var booleanValues: vector<bool>;
     var stringValues: vector<string>;
 
-    values: DataValue(0, self.state)[] &eod foreach {
+    values: DataValue(0, self.state, maximumDepth)[] &eod foreach {
         self.count += 1;
         self.totalNodes = self.state.elements;
         self.choices.push_back($$.choice);

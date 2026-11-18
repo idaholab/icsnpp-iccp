@@ -876,8 +876,10 @@ def nested_data(depth, leaf_length=1):
     return value
 
 
-(output_dir / "data-depth-at-limit.bin").write_bytes(nested_data(8))
-(output_dir / "data-depth-over-limit.bin").write_bytes(nested_data(9))
+(output_dir / "data-depth-eight.bin").write_bytes(nested_data(8))
+(output_dir / "data-depth-nine.bin").write_bytes(nested_data(9))
+(output_dir / "data-depth-at-limit.bin").write_bytes(nested_data(16))
+(output_dir / "data-depth-over-limit.bin").write_bytes(nested_data(17))
 (output_dir / "data-amplification-regression.bin").write_bytes(
     nested_data(30, 8 * 1024 * 1024)
 )
@@ -899,9 +901,18 @@ PY
 
 runFileCaseValid "${dataParser}" \
     "${testBuildDir}/data-depth-at-limit.bin" \
-    "choice=2 known=true nodes=9 children=1 depth=8 boolean=false integer=0 unused=0 string= oid= rawLength=0"
+    "choice=2 known=true nodes=17 children=1 depth=16 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runFileCaseInvalid "${dataParser}" \
     "${testBuildDir}/data-depth-over-limit.bin" \
+    "MMS Data exceeds configured nesting depth limit"
+runFileCaseValid "${dataParser}" \
+    "${testBuildDir}/data-depth-nine.bin" \
+    "choice=2 known=true nodes=10 children=1 depth=9 boolean=false integer=0 unused=0 string= oid= rawLength=0"
+runFileCaseValid "ICCP_MMS_TEST::DataDepthEightCase" \
+    "${testBuildDir}/data-depth-eight.bin" \
+    "depth=8"
+runFileCaseInvalid "ICCP_MMS_TEST::DataDepthEightCase" \
+    "${testBuildDir}/data-depth-nine.bin" \
     "MMS Data exceeds configured nesting depth limit"
 runFileCaseInvalid "${dataParser}" \
     "${testBuildDir}/data-amplification-regression.bin" \

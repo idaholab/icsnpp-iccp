@@ -15,10 +15,12 @@ value.
 
 ## Versioned Events
 
-- `ICCP::mms_write_evidence_v2` is the parser-produced write event. It adds
-  per-value original lengths and truncation flags. The v1 event remains a
-  supported compatibility entry point and adapts into v2, inferring metadata
-  from the supplied legacy raw strings.
+- `ICCP::mms_write_evidence_v2` is the authoritative parser-produced write
+  event. It adds per-value original lengths and truncation flags. Every v2
+  event also dispatches `ICCP::mms_write_evidence_v1` exactly once with the
+  same bounded raw prefixes, preserving legacy packet subscribers. Direct v1
+  callers remain supported and adapt into v2 with inferred length metadata;
+  bridge guards prevent either direction from recursively redispatching.
 - `ICCP::mms_information_report_results_v3` is the parser-produced report
   event. It adds per-result original lengths and truncation flags. It dispatches
   the existing v2 event after storing exact metadata, preserving existing v2

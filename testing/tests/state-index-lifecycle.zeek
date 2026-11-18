@@ -1,6 +1,6 @@
 # @TEST-DOC: Per-association state indexes keep counts isolated, do not grow
 # @TEST-DOC: on invoke reuse, and retire indexed state on connection cleanup
-# @TEST-DOC: and timeout expiration.
+# @TEST-DOC: while active learned state survives beyond the association timeout.
 #
 # @TEST-EXEC: bash ${SCRIPTS}/generate-synthetic-pcap input.pcap initiate > /dev/null
 # @TEST-EXEC: zeek -b -Cr input.pcap ${PACKAGE}/__load__.zeek %INPUT > output
@@ -70,14 +70,17 @@ event inspect_removed_state(first: connection, second: connection)
 event zeek_done()
     {
     local uid = "Cstate-expiring";
-    print fmt("expired indexes processing=%s evidence=%s",
+    local retained = indexed_connection(uid, 49154/tcp);
+    print fmt("retained indexes processing=%s evidence=%s",
               uid in processing_state_indexes,
               uid in evidence_state_indexes);
-    print fmt("expired tables confirmed=%s names=%s known_type=%s",
+    print fmt("retained tables confirmed=%s names=%s known_type=%s learned=%s",
               [uid, T, 9] in pending_confirmed,
               [uid, T, 9] in pending_name_lists,
               [uid, F, 0, "", "INDEXED_POINT"] in
-                  known_variable_types);
+                  known_variable_types,
+              learned_variable_type_name(
+                  retained, F, 0, "", "INDEXED_POINT"));
     }
 
 event zeek_init()
@@ -93,7 +96,7 @@ event zeek_init()
 
     seed_indexed_state(first, 7);
     print_indexed_counts(first, "invoke-reused");
-    print_indexed_counts(expiring, "expiring-seeded");
+    print_indexed_counts(expiring, "retention-seeded");
 
     event connection_state_remove(first);
     schedule 1msec { inspect_removed_state(first, second) };

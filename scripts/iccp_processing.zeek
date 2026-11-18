@@ -330,11 +330,7 @@ type ProcessingStateIndex: record {
     known_variable_types: set[bool, count, string, string];
 };
 
-global processing_state_index_expire: function(
-    states: table[string] of ProcessingStateIndex, uid: string): interval;
-global processing_state_indexes: table[string] of ProcessingStateIndex
-    &read_expire=association_state_timeout
-    &expire_func=processing_state_index_expire;
+global processing_state_indexes: table[string] of ProcessingStateIndex;
 
 function initial_processing_state_index(): ProcessingStateIndex
     {
@@ -7464,15 +7460,6 @@ function clear_confirmed_processing_state(uid_to_clear: string)
     state$invalid_confirmed = empty_invalid;
     processing_state_indexes[uid_to_clear] = state;
     clear_mms_deferred_evidence(uid_to_clear);
-    }
-
-function processing_state_index_expire(
-    states: table[string] of ProcessingStateIndex, uid: string): interval
-    {
-    clear_transfer_processing_state(uid);
-    clear_confirmed_processing_state(uid);
-    clear_control_processing_state(uid);
-    return 0secs;
     }
 
 event connection_state_remove(c: connection)

@@ -46,6 +46,8 @@ type PendingWriteEvidence: record {
 global pending_write_evidence:
     table[string, bool, count] of PendingWriteEvidence;
 global invalid_write_evidence_invokes: set[string, bool, count];
+global write_v1_to_v2_adapters: table[string, bool, count, int] of count;
+global write_v2_to_v1_adapters: table[string, bool, count, int] of count;
 global evidence_acse_lifecycle_spdu: table[string, bool] of count
     &read_expire=association_state_timeout;
 global evidence_session_cleanup_spdu: table[string, bool] of count
@@ -58,11 +60,7 @@ type EvidenceStateIndex: record {
     invalid_write_evidence_invokes: set[bool, count];
 };
 
-global evidence_state_index_expire: function(
-    states: table[string] of EvidenceStateIndex, uid: string): interval;
-global evidence_state_indexes: table[string] of EvidenceStateIndex
-    &read_expire=association_state_timeout
-    &expire_func=evidence_state_index_expire;
+global evidence_state_indexes: table[string] of EvidenceStateIndex;
 
 function initial_evidence_state_index(): EvidenceStateIndex
     {
@@ -444,6 +442,57 @@ function add_write_value(
     return rec;
     }
 
+# Deliver v2 evidence to legacy v1 subscribers. Bridge counters distinguish
+# generated compatibility events from direct callers so both versions remain
+# valid entry points without recursively adapting each other.
+event ICCP::mms_write_evidence_v2(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    access_choice: count, selector_scope: count,
+    selector_domain: string, selector_name: string,
+    target_count_known: bool, target_count: count, value_count: count,
+    target_scopes: vector of count,
+    target_domains: vector of string,
+    target_names: vector of string,
+    value_choices: vector of count,
+    value_raws: vector of string,
+    value_raw_lengths: vector of count,
+    value_raw_truncated: vector of bool,
+    value_integer_values: vector of int,
+    value_floating_values: vector of double,
+    value_boolean_values: vector of bool,
+    value_string_values: vector of string,
+    result_count: count,
+    result_successes: vector of bool,
+    result_errors: vector of int,
+    provenance: count) &priority=20
+    {
+    if ( [c$uid, is_orig, pdu_type, invoke_id] in
+         write_v1_to_v2_adapters )
+        {
+        if ( write_v1_to_v2_adapters[
+                 c$uid, is_orig, pdu_type, invoke_id] == 1 )
+            delete write_v1_to_v2_adapters[
+                c$uid, is_orig, pdu_type, invoke_id];
+        else
+            --write_v1_to_v2_adapters[
+                c$uid, is_orig, pdu_type, invoke_id];
+        return;
+        }
+
+    if ( [c$uid, is_orig, pdu_type, invoke_id] !in
+         write_v2_to_v1_adapters )
+        write_v2_to_v1_adapters[
+            c$uid, is_orig, pdu_type, invoke_id] = 0;
+    ++write_v2_to_v1_adapters[c$uid, is_orig, pdu_type, invoke_id];
+    event ICCP::mms_write_evidence_v1(
+        c, is_orig, pdu_type, invoke_id, access_choice, selector_scope,
+        selector_domain, selector_name, target_count_known, target_count,
+        value_count, target_scopes, target_domains, target_names,
+        value_choices, value_raws, value_integer_values,
+        value_floating_values, value_boolean_values, value_string_values,
+        result_count, result_successes, result_errors, provenance);
+    }
+
 event ICCP::mms_write_evidence_v2(
     c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
     access_choice: count, selector_scope: count,
@@ -721,8 +770,9 @@ event ICCP::mms_write_evidence_v2(
         }
     }
 
-## Deprecated compatibility adapter. Packet-derived writes use v2 so exact
-## parser length/truncation metadata is preserved.
+## Compatibility adapter for direct v1 callers. Packet-derived v2 events also
+## dispatch v1 once for legacy subscribers while preserving exact metadata in
+## the v2 processing path.
 event ICCP::mms_write_evidence_v1(
     c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
     access_choice: count, selector_scope: count,
@@ -740,8 +790,21 @@ event ICCP::mms_write_evidence_v1(
     result_count: count,
     result_successes: vector of bool,
     result_errors: vector of int,
-    provenance: count)
+    provenance: count) &priority=20
     {
+    if ( [c$uid, is_orig, pdu_type, invoke_id] in
+         write_v2_to_v1_adapters )
+        {
+        if ( write_v2_to_v1_adapters[
+                 c$uid, is_orig, pdu_type, invoke_id] == 1 )
+            delete write_v2_to_v1_adapters[
+                c$uid, is_orig, pdu_type, invoke_id];
+        else
+            --write_v2_to_v1_adapters[
+                c$uid, is_orig, pdu_type, invoke_id];
+        return;
+        }
+
     local raw_lengths: vector of count;
     local raw_truncated: vector of bool;
     local index: count = 0;
@@ -752,6 +815,11 @@ event ICCP::mms_write_evidence_v1(
             |value_raws[index]| > max_logged_result_raw_bytes;
         ++index;
         }
+    if ( [c$uid, is_orig, pdu_type, invoke_id] !in
+         write_v1_to_v2_adapters )
+        write_v1_to_v2_adapters[
+            c$uid, is_orig, pdu_type, invoke_id] = 0;
+    ++write_v1_to_v2_adapters[c$uid, is_orig, pdu_type, invoke_id];
     event ICCP::mms_write_evidence_v2(
         c, is_orig, pdu_type, invoke_id, access_choice, selector_scope,
         selector_domain, selector_name, target_count_known, target_count,
@@ -850,13 +918,6 @@ function clear_indexed_evidence_state(uid_to_clear: string)
     for ( [is_orig, invoke] in state$invalid_write_evidence_invokes )
         delete invalid_write_evidence_invokes[
             uid_to_clear, is_orig, invoke];
-    }
-
-function evidence_state_index_expire(
-    states: table[string] of EvidenceStateIndex, uid: string): interval
-    {
-    clear_indexed_evidence_state(uid);
-    return 0secs;
     }
 
 function clear_evidence_state(uid_to_clear: string)
