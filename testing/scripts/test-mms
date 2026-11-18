@@ -735,10 +735,10 @@ runCaseValid "${accessResultParser}" "850101" \
 runCaseValid "${accessResultParser}" "a100" \
     "success=true choice=1 error=-1 rawLength=0 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=0 floating=0 flagsLength=0 timestamp=0"
 runCaseValid "${accessResultParser}" "a207850207d0850108" \
-    "success=true choice=2 error=-1 rawLength=7 integers=2 first=2000 second=8 components=2 choices=5/5/0 integer=2000 floating=0 flagsLength=1 timestamp=0"
+    "success=true choice=2 error=-1 rawLength=0 integers=2 first=2000 second=8 components=2 choices=5/5/0 integer=2000 floating=0 flagsLength=1 timestamp=0"
 runCaseValid "${accessResultParser}" \
     "a211870508412000008402002a85046553f100" \
-    "success=true choice=2 error=-1 rawLength=17 integers=1 first=1700000000 second=0 components=3 choices=7/4/5 integer=0 floating=10 flagsLength=2 timestamp=1700000000"
+    "success=true choice=2 error=-1 rawLength=0 integers=1 first=1700000000 second=0 components=3 choices=7/4/5 integer=0 floating=10 flagsLength=2 timestamp=1700000000"
 
 scalarAccessResultParser="ICCP_MMS_TEST::ScalarAccessResultCase"
 runCaseValid "${scalarAccessResultParser}" "8301ff" \
@@ -841,6 +841,7 @@ runCaseInvalid "${accessResultParser}" "8c04f0000000" "requires failed"
 runCaseInvalid "${accessResultParser}" "910700000000000000" "requires failed"
 
 dataParser="ICCP_MMS_TEST::DataCase"
+dataEvidenceParser="ICCP_MMS_TEST::DataEvidenceCase"
 accessResultForestParser="ICCP_MMS_TEST::AccessResultForestCase"
 dataForestParser="ICCP_MMS_TEST::DataForestCase"
 
@@ -898,7 +899,7 @@ PY
 
 runFileCaseValid "${dataParser}" \
     "${testBuildDir}/data-depth-at-limit.bin" \
-    "choice=2 known=true nodes=9 children=1 depth=8 boolean=false integer=0 unused=0 string= oid= rawLength=18"
+    "choice=2 known=true nodes=9 children=1 depth=8 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runFileCaseInvalid "${dataParser}" \
     "${testBuildDir}/data-depth-over-limit.bin" \
     "MMS Data exceeds configured nesting depth limit"
@@ -907,7 +908,14 @@ runFileCaseInvalid "${dataParser}" \
     "MMS Data value exceeds configured length limit"
 runFileCaseValid "${dataParser}" \
     "${testBuildDir}/data-value-at-limit.bin" \
-    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=1048576"
+    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=257"
+runFileCaseValid "${dataEvidenceParser}" \
+    "${testBuildDir}/data-value-at-limit.bin" \
+    "choice=32 retained=257 original=1048576 truncated=true"
+runCaseValid "${dataEvidenceParser}" "a1068301ff8501fe" \
+    "choice=1 retained=0 original=6 truncated=true"
+runCaseValid "${dataEvidenceParser}" "850101" \
+    "choice=5 retained=1 original=1 truncated=false"
 runFileCaseInvalid "${dataParser}" \
     "${testBuildDir}/data-value-over-limit.bin" \
     "MMS Data value exceeds configured length limit"
@@ -945,9 +953,9 @@ runCaseInvalid "${dataForestParser}" \
     "Data forest exceeds configured aggregate element limit"
 
 runCaseValid "${dataParser}" "a1068301ff8501fe" \
-    "choice=1 known=true nodes=3 children=2 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=6"
+    "choice=1 known=true nodes=3 children=2 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runCaseValid "${dataParser}" "a202a100" \
-    "choice=2 known=true nodes=2 children=1 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=2"
+    "choice=2 known=true nodes=2 children=1 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runCaseValid "${dataParser}" "8301ff" \
     "choice=3 known=true nodes=1 children=0 depth=0 boolean=true integer=0 unused=0 string= oid= rawLength=1"
 runCaseValid "${dataParser}" "840203a8" \
@@ -1129,7 +1137,7 @@ runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
     "choice=5 rawLength=4 components=0 c1=0 c2=0 c3=0 integer=1700000000 second= third="
 runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
     "a127020101a422a120a21e8601018a10434f4e54524f4c5f43454e5445525f428a0754535f4e455854" \
-    "choice=2 rawLength=30 components=3 c1=6 c2=10 c3=10 integer=1 second=CONTROL_CENTER_B third=TS_NEXT"
+    "choice=2 rawLength=0 components=3 c1=6 c2=10 c3=10 integer=1 second=CONTROL_CENTER_B third=TS_NEXT"
 
 runInvalid "a008020101a4038001ff" \
     "missing variable access specification"

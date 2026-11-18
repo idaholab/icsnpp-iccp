@@ -1505,9 +1505,8 @@ public type BoundedVariableAccessSpecification = unit(
 
 public type DataState = struct {
     # Mutable resource accounting shared by every root in one enclosing
-    # forest. valueBytes counts every materialized Data value, including
-    # constructed parents and their children, so recursive &parse-from views
-    # cannot multiply a transport-sized payload without consuming a budget.
+    # forest. valueBytes counts encoded Data content, including constructed
+    # parents and their children, so accepted semantic work remains bounded.
     elements: uint64;
     valueBytes: uint64;
 };
@@ -1515,6 +1514,18 @@ public type DataState = struct {
 const MAX_DATA_NESTING_DEPTH: uint64 = 8;
 const MAX_DATA_VALUE_LENGTH: uint64 = 1024 * 1024;
 const MAX_DATA_VALUE_BYTES: uint64 = 4 * 1024 * 1024;
+const MAX_DATA_RAW_PREFIX_LENGTH: uint64 = 256;
+const MAX_DATA_RAW_COMPAT_LENGTH: uint64 = 257;
+
+function dataRawPrefix(value: bytes): bytes {
+    # Keep one bounded sentinel byte beyond the logged prefix so existing
+    # Zeek policy continues to identify truncation until Phase 3 transports
+    # rawLength and rawTruncated directly.
+    if (|value| <= MAX_DATA_RAW_COMPAT_LENGTH)
+        return value;
+
+    return value.sub(0, MAX_DATA_RAW_COMPAT_LENGTH);
+}
 
 function reserveDataValue(
     length: uint64, depth: uint64, state: DataState&
@@ -1743,6 +1754,8 @@ public type DataValue = unit(
     var oidValue: string;
     var floatingValue: real = 0.0;
     var raw: bytes;
+    var rawLength: uint64 = 0;
+    var rawTruncated: bool = False;
     var twelfthChildChoice: uint64 = 0;
     var twelfthChildBoolean: bool = False;
     var dstTransferSetShape: bool = False;
@@ -1752,6 +1765,10 @@ public type DataValue = unit(
     var nestedChoices: vector<uint64>;
     var nestedRaws: vector<bytes>;
     var nestedIntegerValues: vector<int64>;
+    var nestedComponentIndex: uint64 = 0;
+    var nestedChildChoices: vector<uint64>;
+    var nestedChildRaws: vector<bytes>;
+    var nestedChildIntegerValues: vector<int64>;
 
     on %init {
         state.elements += 1;
@@ -1759,7 +1776,10 @@ public type DataValue = unit(
             throw "MMS Data forest exceeds configured aggregate element limit";
     }
 
-    identifier: ICCP_BER::Identifier;
+    identifier: ICCP_BER::Identifier {
+        self.choice = $$.tagNumber;
+        self.known = self.choice <= 17 && self.choice != 8;
+    }
     : void &requires=(
         self.identifier.first.class_ ==
             ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
@@ -1770,16 +1790,14 @@ public type DataValue = unit(
     );
     length: ICCP_BER::DefiniteLength {
         reserveDataValue(self.length.value, depth, state);
+        self.rawLength = self.length.value;
+        self.rawTruncated =
+            (self.choice == 1 || self.choice == 2) ?
+                self.length.value > 0 :
+                self.length.value > MAX_DATA_RAW_PREFIX_LENGTH;
     }
-    value: bytes &size=self.length.value {
-        self.choice = self.identifier.tagNumber;
-        self.raw = $$;
-        self.known = self.choice <= 17 && self.choice != 8;
-    }
-
-    nested: DataChildren(|self.value|, depth + 1, state)
-        &parse-from=self.value
-        if (self.choice == 1 || self.choice == 2) {
+    switch (self.choice) {
+        1 -> arrayData: DataChildren(self.length.value, depth + 1, state) {
             self.childCount = $$.count;
             self.nodeCount += $$.totalNodes;
             if ($$.maximumDepth > self.maximumDepth)
@@ -1793,7 +1811,38 @@ public type DataValue = unit(
             self.nestedChoices = $$.choices;
             self.nestedRaws = $$.raws;
             self.nestedIntegerValues = $$.integerValues;
+            self.nestedComponentIndex = $$.nestedComponentIndex;
+            self.nestedChildChoices = $$.nestedChoices;
+            self.nestedChildRaws = $$.nestedRaws;
+            self.nestedChildIntegerValues = $$.nestedIntegerValues;
         }
+        2 -> structureData: DataChildren(
+            self.length.value,
+            depth + 1,
+            state
+        ) {
+            self.childCount = $$.count;
+            self.nodeCount += $$.totalNodes;
+            if ($$.maximumDepth > self.maximumDepth)
+                self.maximumDepth = $$.maximumDepth;
+            self.twelfthChildChoice = $$.twelfthChoice;
+            self.twelfthChildBoolean = $$.twelfthBoolean;
+            self.dstTransferSetShape = $$.dstTransferSetShape;
+            self.nestedFirstChoice = $$.firstChoice;
+            self.nestedSecondChoice = $$.secondChoice;
+            self.nestedThirdChoice = $$.thirdChoice;
+            self.nestedChoices = $$.choices;
+            self.nestedRaws = $$.raws;
+            self.nestedIntegerValues = $$.integerValues;
+            self.nestedComponentIndex = $$.nestedComponentIndex;
+            self.nestedChildChoices = $$.nestedChoices;
+            self.nestedChildRaws = $$.nestedRaws;
+            self.nestedChildIntegerValues = $$.nestedIntegerValues;
+        }
+        * -> value: bytes &size=self.length.value {
+            self.raw = dataRawPrefix($$);
+        }
+    };
 
     booleanData: ICCP_BER::BooleanValue(|self.value|)
         &parse-from=self.value if (self.choice == 3) {
@@ -1859,6 +1908,8 @@ public type AccessResult = unit(state: DataState& = new DataState) {
     var choice: uint64 = 0;
     var error: int64 = -1;
     var raw: bytes;
+    var rawLength: uint64 = 0;
+    var rawTruncated: bool = False;
     var componentIntegerCount: uint64 = 0;
     var firstComponentInteger: int64 = 0;
     var secondComponentInteger: int64 = 0;
@@ -1878,6 +1929,13 @@ public type AccessResult = unit(state: DataState& = new DataState) {
     var booleanValue: bool = False;
     var stringValue: string;
     var unusedBits: uint8 = 0;
+    var componentChoices: vector<uint64>;
+    var componentRaws: vector<bytes>;
+    var componentIntegerValues: vector<int64>;
+    var nestedComponentIndex: uint64 = 0;
+    var nestedChoices: vector<uint64>;
+    var nestedRaws: vector<bytes>;
+    var nestedIntegerValues: vector<int64>;
     # Count the AccessResult/Data root itself for event metadata. The shared
     # DataState enforces the forest budget as descendants are entered.
     var nodeCount: uint64 = 1;
@@ -1888,7 +1946,10 @@ public type AccessResult = unit(state: DataState& = new DataState) {
             throw "MMS Data forest exceeds configured aggregate element limit";
     }
 
-    identifier: ICCP_BER::Identifier;
+    identifier: ICCP_BER::Identifier {
+        self.choice = $$.tagNumber;
+        self.success = self.choice != 0;
+    }
     : void &requires=(
         self.identifier.first.class_ ==
             ICCP_BER::TagClass::CONTEXT_SPECIFIC &&
@@ -1904,27 +1965,23 @@ public type AccessResult = unit(state: DataState& = new DataState) {
         )
     );
     length: ICCP_BER::DefiniteLength {
-        if (self.identifier.tagNumber != 0)
+        if (self.identifier.tagNumber != 0) {
             reserveDataValue(self.length.value, 0, state);
+            self.rawLength = self.length.value;
+            self.rawTruncated =
+                (self.choice == 1 || self.choice == 2) ?
+                    self.length.value > 0 :
+                    self.length.value > MAX_DATA_RAW_PREFIX_LENGTH;
+        }
     }
 
-    switch (self.identifier.tagNumber) {
+    switch (self.choice) {
         0 -> failure: ICCP_BER::IntegerValue(self.length.value) {
             if ($$.value < 0 || $$.value > 11)
                 throw "MMS data access error is out of range";
-            self.choice = 0;
             self.error = $$.value;
         }
-        * -> data: bytes &size=self.length.value {
-            self.success = True;
-            self.choice = self.identifier.tagNumber;
-            self.raw = $$;
-        }
-    };
-
-    structuredData: DataChildren(|self.raw|, 1, state)
-        &parse-from=self.raw
-        if (self.success && (self.choice == 1 || self.choice == 2)) {
+        1 -> arrayData: DataChildren(self.length.value, 1, state) {
             self.nodeCount += $$.totalNodes;
             self.componentIntegerCount = $$.integerCount;
             self.firstComponentInteger = $$.firstInteger;
@@ -1933,21 +1990,52 @@ public type AccessResult = unit(state: DataState& = new DataState) {
             self.firstComponentChoice = $$.firstChoice;
             self.secondComponentChoice = $$.secondChoice;
             self.thirdComponentChoice = $$.thirdChoice;
-            self.firstComponentIntegerValue =
-                $$.firstIntegerValue;
-            self.secondComponentIntegerValue =
-                $$.secondIntegerValue;
-            self.firstComponentFloatingValue =
-                $$.firstFloatingValue;
+            self.firstComponentIntegerValue = $$.firstIntegerValue;
+            self.secondComponentIntegerValue = $$.secondIntegerValue;
+            self.firstComponentFloatingValue = $$.firstFloatingValue;
             self.firstComponentRaw = $$.firstRaw;
             self.secondComponentRaw = $$.secondRaw;
             self.thirdComponentRaw = $$.thirdRaw;
-            self.thirdComponentIntegerValue =
-                $$.thirdIntegerValue;
+            self.thirdComponentIntegerValue = $$.thirdIntegerValue;
+            self.componentChoices = $$.choices;
+            self.componentRaws = $$.raws;
+            self.componentIntegerValues = $$.integerValues;
+            self.nestedComponentIndex = $$.nestedComponentIndex;
+            self.nestedChoices = $$.nestedChoices;
+            self.nestedRaws = $$.nestedRaws;
+            self.nestedIntegerValues = $$.nestedIntegerValues;
         }
+        2 -> structureData: DataChildren(self.length.value, 1, state) {
+            self.nodeCount += $$.totalNodes;
+            self.componentIntegerCount = $$.integerCount;
+            self.firstComponentInteger = $$.firstInteger;
+            self.secondComponentInteger = $$.secondInteger;
+            self.componentCount = $$.count;
+            self.firstComponentChoice = $$.firstChoice;
+            self.secondComponentChoice = $$.secondChoice;
+            self.thirdComponentChoice = $$.thirdChoice;
+            self.firstComponentIntegerValue = $$.firstIntegerValue;
+            self.secondComponentIntegerValue = $$.secondIntegerValue;
+            self.firstComponentFloatingValue = $$.firstFloatingValue;
+            self.firstComponentRaw = $$.firstRaw;
+            self.secondComponentRaw = $$.secondRaw;
+            self.thirdComponentRaw = $$.thirdRaw;
+            self.thirdComponentIntegerValue = $$.thirdIntegerValue;
+            self.componentChoices = $$.choices;
+            self.componentRaws = $$.raws;
+            self.componentIntegerValues = $$.integerValues;
+            self.nestedComponentIndex = $$.nestedComponentIndex;
+            self.nestedChoices = $$.nestedChoices;
+            self.nestedRaws = $$.nestedRaws;
+            self.nestedIntegerValues = $$.nestedIntegerValues;
+        }
+        * -> data: bytes &size=self.length.value {
+            self.raw = dataRawPrefix($$);
+        }
+    };
 
-    integerData: ICCP_BER::IntegerValue(|self.raw|)
-        &parse-from=self.raw
+    integerData: ICCP_BER::IntegerValue(|self.data|)
+        &parse-from=self.data
         if (
             self.success &&
             (self.choice == 5 || self.choice == 6)
@@ -1958,52 +2046,52 @@ public type AccessResult = unit(state: DataState& = new DataState) {
             self.firstComponentIntegerValue = $$.value;
         }
 
-    bcdData: ICCP_BER::IntegerValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 13) {
+    bcdData: ICCP_BER::IntegerValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 13) {
             if ($$.value < 0)
                 throw "MMS BCD access result is negative";
             self.integerValue = $$.value;
             self.firstComponentIntegerValue = $$.value;
         }
 
-    booleanData: ICCP_BER::BooleanValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 3) {
+    booleanData: ICCP_BER::BooleanValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 3) {
             self.booleanValue = $$.value;
         }
 
-    bitStringData: ICCP_BER::BitStringValue(|self.raw|)
-        &parse-from=self.raw
+    bitStringData: ICCP_BER::BitStringValue(|self.data|)
+        &parse-from=self.data
         if (self.success && (self.choice == 4 || self.choice == 14)) {
             self.unusedBits = $$.unusedBits;
         }
 
-    floatingData: FloatingPointValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 7) {
+    floatingData: FloatingPointValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 7) {
             self.floatingValue = $$.value;
         }
 
-    visibleStringData: VisibleStringValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 10) {
+    visibleStringData: VisibleStringValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 10) {
             self.stringValue = $$.value;
         }
 
-    objectIdentifierData: ICCP_BER::ObjectIdentifierValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 15) {
+    objectIdentifierData: ICCP_BER::ObjectIdentifierValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 15) {
             self.stringValue = $$.value;
         }
 
-    mmsStringData: MMSStringValue(|self.raw|)
-        &parse-from=self.raw if (self.success && self.choice == 16) {
+    mmsStringData: MMSStringValue(|self.data|)
+        &parse-from=self.data if (self.success && self.choice == 16) {
             self.stringValue = $$.value;
         }
 
-    utcTimeData: UtcTimeValue &parse-from=self.raw
-        if (self.success && self.choice == 17 && |self.raw| == 8) {
+    utcTimeData: UtcTimeValue &parse-from=self.data
+        if (self.success && self.choice == 17 && |self.data| == 8) {
             self.integerValue = cast<int64>($$.milliseconds);
         }
 
     : void &requires=(
-        ! self.success || self.choice != 12 || timeOfDayIsValid(self.raw)
+        ! self.success || self.choice != 12 || timeOfDayIsValid(self.data)
     );
     : void &requires=(
         ! self.success || self.choice != 17 || self.length.value == 8
@@ -2372,9 +2460,18 @@ public type AccessResultList = unit(length: uint64) {
     var secondComponentRaw: bytes;
     var thirdComponentRaw: bytes;
     var thirdComponentIntegerValue: int64 = 0;
+    var firstComponentChoices: vector<uint64>;
+    var firstComponentRaws: vector<bytes>;
+    var firstComponentIntegerValues: vector<int64>;
+    var firstNestedComponentIndex: uint64 = 0;
+    var firstNestedChoices: vector<uint64>;
+    var firstNestedRaws: vector<bytes>;
+    var firstNestedIntegerValues: vector<int64>;
     var resultChoices: vector<uint64>;
     var resultErrors: vector<int64>;
     var resultRaws: vector<bytes>;
+    var resultRawLengths: vector<uint64>;
+    var resultRawTruncated: vector<bool>;
     var resultIntegerValues: vector<int64>;
     var resultFloatingValues: vector<real>;
     var resultBooleanValues: vector<bool>;
@@ -2386,6 +2483,8 @@ public type AccessResultList = unit(length: uint64) {
         self.resultChoices.push_back($$.choice);
         self.resultErrors.push_back($$.error);
         self.resultRaws.push_back($$.raw);
+        self.resultRawLengths.push_back($$.rawLength);
+        self.resultRawTruncated.push_back($$.rawTruncated);
         self.resultIntegerValues.push_back($$.integerValue);
         self.resultFloatingValues.push_back($$.floatingValue);
         self.resultBooleanValues.push_back($$.booleanValue);
@@ -2414,6 +2513,13 @@ public type AccessResultList = unit(length: uint64) {
             self.thirdComponentRaw = $$.thirdComponentRaw;
             self.thirdComponentIntegerValue =
                 $$.thirdComponentIntegerValue;
+            self.firstComponentChoices = $$.componentChoices;
+            self.firstComponentRaws = $$.componentRaws;
+            self.firstComponentIntegerValues = $$.componentIntegerValues;
+            self.firstNestedComponentIndex = $$.nestedComponentIndex;
+            self.firstNestedChoices = $$.nestedChoices;
+            self.firstNestedRaws = $$.nestedRaws;
+            self.firstNestedIntegerValues = $$.nestedIntegerValues;
         }
         if (! $$.success)
             self.failureCount += 1;
@@ -2451,6 +2557,13 @@ public type ReadResponse = unit(length: uint64) {
     var firstResultFlagsRaw: bytes;
     var firstResultThirdRaw: bytes;
     var firstResultTimestampValue: int64 = 0;
+    var firstResultComponentChoices: vector<uint64>;
+    var firstResultComponentRaws: vector<bytes>;
+    var firstResultComponentIntegerValues: vector<int64>;
+    var firstResultNestedComponentIndex: uint64 = 0;
+    var firstResultNestedChoices: vector<uint64>;
+    var firstResultNestedRaws: vector<bytes>;
+    var firstResultNestedIntegerValues: vector<int64>;
 
     fields: ICCP_BER::RawTLV[] &eod foreach {
         if (
@@ -2519,6 +2632,20 @@ public type ReadResponse = unit(length: uint64) {
                 $$.thirdComponentRaw;
             self.firstResultTimestampValue =
                 $$.thirdComponentIntegerValue;
+            self.firstResultComponentChoices =
+                $$.firstComponentChoices;
+            self.firstResultComponentRaws =
+                $$.firstComponentRaws;
+            self.firstResultComponentIntegerValues =
+                $$.firstComponentIntegerValues;
+            self.firstResultNestedComponentIndex =
+                $$.firstNestedComponentIndex;
+            self.firstResultNestedChoices =
+                $$.firstNestedChoices;
+            self.firstResultNestedRaws =
+                $$.firstNestedRaws;
+            self.firstResultNestedIntegerValues =
+                $$.firstNestedIntegerValues;
 
             # Supported timestamped point values place the timestamp before
             # the flags; retain those components in their semantic slots.
@@ -2561,8 +2688,17 @@ public type DataList = unit(length: uint64) {
     var firstRaw: bytes;
     var firstIntegerValue: int64 = 0;
     var firstFloatingValue: real = 0.0;
+    var firstComponentChoices: vector<uint64>;
+    var firstComponentRaws: vector<bytes>;
+    var firstComponentIntegerValues: vector<int64>;
+    var firstNestedComponentIndex: uint64 = 0;
+    var firstNestedChoices: vector<uint64>;
+    var firstNestedRaws: vector<bytes>;
+    var firstNestedIntegerValues: vector<int64>;
     var choices: vector<uint64>;
     var raws: vector<bytes>;
+    var rawLengths: vector<uint64>;
+    var rawTruncated: vector<bool>;
     var integerValues: vector<int64>;
     var floatingValues: vector<real>;
     var booleanValues: vector<bool>;
@@ -2573,6 +2709,8 @@ public type DataList = unit(length: uint64) {
         self.totalNodes = self.state.elements;
         self.choices.push_back($$.choice);
         self.raws.push_back($$.raw);
+        self.rawLengths.push_back($$.rawLength);
+        self.rawTruncated.push_back($$.rawTruncated);
         self.integerValues.push_back($$.integerValue);
         self.floatingValues.push_back($$.floatingValue);
         self.booleanValues.push_back($$.booleanValue);
@@ -2587,6 +2725,13 @@ public type DataList = unit(length: uint64) {
             self.firstRaw = $$.raw;
             self.firstIntegerValue = $$.integerValue;
             self.firstFloatingValue = $$.floatingValue;
+            self.firstComponentChoices = $$.nestedChoices;
+            self.firstComponentRaws = $$.nestedRaws;
+            self.firstComponentIntegerValues = $$.nestedIntegerValues;
+            self.firstNestedComponentIndex = $$.nestedComponentIndex;
+            self.firstNestedChoices = $$.nestedChildChoices;
+            self.firstNestedRaws = $$.nestedChildRaws;
+            self.firstNestedIntegerValues = $$.nestedChildIntegerValues;
         }
     }
 } &size=length;
@@ -2608,11 +2753,20 @@ public type WriteRequest = unit(length: uint64) {
     var firstDataRaw: bytes;
     var firstDataIntegerValue: int64 = 0;
     var firstDataFloatingValue: real = 0.0;
+    var firstDataComponentChoices: vector<uint64>;
+    var firstDataComponentRaws: vector<bytes>;
+    var firstDataComponentIntegerValues: vector<int64>;
+    var firstDataNestedComponentIndex: uint64 = 0;
+    var firstDataNestedChoices: vector<uint64>;
+    var firstDataNestedRaws: vector<bytes>;
+    var firstDataNestedIntegerValues: vector<int64>;
     var targetScopes: vector<uint64>;
     var targetDomains: vector<string>;
     var targetNames: vector<string>;
     var valueChoices: vector<uint64>;
     var valueRaws: vector<bytes>;
+    var valueRawLengths: vector<uint64>;
+    var valueRawTruncated: vector<bool>;
     var valueIntegerValues: vector<int64>;
     var valueFloatingValues: vector<real>;
     var valueBooleanValues: vector<bool>;
@@ -2650,8 +2804,20 @@ public type WriteRequest = unit(length: uint64) {
         self.firstDataRaw = $$.firstRaw;
         self.firstDataIntegerValue = $$.firstIntegerValue;
         self.firstDataFloatingValue = $$.firstFloatingValue;
+        self.firstDataComponentChoices = $$.firstComponentChoices;
+        self.firstDataComponentRaws = $$.firstComponentRaws;
+        self.firstDataComponentIntegerValues =
+            $$.firstComponentIntegerValues;
+        self.firstDataNestedComponentIndex =
+            $$.firstNestedComponentIndex;
+        self.firstDataNestedChoices = $$.firstNestedChoices;
+        self.firstDataNestedRaws = $$.firstNestedRaws;
+        self.firstDataNestedIntegerValues =
+            $$.firstNestedIntegerValues;
         self.valueChoices = $$.choices;
         self.valueRaws = $$.raws;
+        self.valueRawLengths = $$.rawLengths;
+        self.valueRawTruncated = $$.rawTruncated;
         self.valueIntegerValues = $$.integerValues;
         self.valueFloatingValues = $$.floatingValues;
         self.valueBooleanValues = $$.booleanValues;
@@ -3191,6 +3357,13 @@ public type InformationReport = unit(length: uint64) {
     var firstResultFlagsRaw: bytes;
     var firstResultThirdRaw: bytes;
     var firstResultTimestampValue: int64 = 0;
+    var firstResultComponentChoices: vector<uint64>;
+    var firstResultComponentRaws: vector<bytes>;
+    var firstResultComponentIntegerValues: vector<int64>;
+    var firstResultNestedComponentIndex: uint64 = 0;
+    var firstResultNestedChoices: vector<uint64>;
+    var firstResultNestedRaws: vector<bytes>;
+    var firstResultNestedIntegerValues: vector<int64>;
     var resultChoices: vector<uint64>;
     var resultErrors: vector<int64>;
     var resultRaws: vector<bytes>;
@@ -3246,6 +3419,16 @@ public type InformationReport = unit(length: uint64) {
         self.firstResultFlagsRaw = $$.secondComponentRaw;
         self.firstResultThirdRaw = $$.thirdComponentRaw;
         self.firstResultTimestampValue = $$.thirdComponentIntegerValue;
+        self.firstResultComponentChoices = $$.firstComponentChoices;
+        self.firstResultComponentRaws = $$.firstComponentRaws;
+        self.firstResultComponentIntegerValues =
+            $$.firstComponentIntegerValues;
+        self.firstResultNestedComponentIndex =
+            $$.firstNestedComponentIndex;
+        self.firstResultNestedChoices = $$.firstNestedChoices;
+        self.firstResultNestedRaws = $$.firstNestedRaws;
+        self.firstResultNestedIntegerValues =
+            $$.firstNestedIntegerValues;
         self.resultChoices = $$.resultChoices;
         self.resultErrors = $$.resultErrors;
         self.resultRaws = $$.resultRaws;
@@ -4254,7 +4437,6 @@ public type MMSpdu = unit {
     var writeNestedComponentChoices: vector<uint64>;
     var writeNestedComponentRaws: vector<bytes>;
     var writeNestedComponentIntegerValues: vector<int64>;
-    var writeShapeState: DataState& = new DataState;
     var mmsDeletable: bool = False;
     var typeChoice: uint64 = 0;
     var typeDescriptionConstructed: bool = False;
@@ -4337,7 +4519,6 @@ public type MMSpdu = unit {
     var pointNestedChoices: vector<uint64>;
     var pointNestedRaws: vector<bytes>;
     var pointNestedIntegerValues: vector<int64>;
-    var pointShapeState: DataState& = new DataState;
     var reportResultChoices: vector<uint64>;
     var reportResultErrors: vector<int64>;
     var reportResultRaws: vector<bytes>;
@@ -4584,6 +4765,20 @@ public type MMSpdu = unit {
                 self.firstResultTimestampValue =
                     $$.firstResultTimestampValue;
             }
+            self.pointComponentChoices =
+                $$.firstResultComponentChoices;
+            self.pointComponentRaws =
+                $$.firstResultComponentRaws;
+            self.pointComponentIntegerValues =
+                $$.firstResultComponentIntegerValues;
+            self.pointNestedComponentIndex =
+                $$.firstResultNestedComponentIndex;
+            self.pointNestedChoices =
+                $$.firstResultNestedChoices;
+            self.pointNestedRaws =
+                $$.firstResultNestedRaws;
+            self.pointNestedIntegerValues =
+                $$.firstResultNestedIntegerValues;
             self.semanticDecoded = True;
         }
 
@@ -4637,6 +4832,16 @@ public type MMSpdu = unit {
             self.writeFirstDataRaw = $$.firstDataRaw;
             self.writeFirstDataIntegerValue = $$.firstDataIntegerValue;
             self.writeFirstDataFloatingValue = $$.firstDataFloatingValue;
+            self.writeComponentChoices = $$.firstDataComponentChoices;
+            self.writeComponentRaws = $$.firstDataComponentRaws;
+            self.writeComponentIntegerValues =
+                $$.firstDataComponentIntegerValues;
+            self.writeNestedComponentChoices =
+                $$.firstDataNestedChoices;
+            self.writeNestedComponentRaws =
+                $$.firstDataNestedRaws;
+            self.writeNestedComponentIntegerValues =
+                $$.firstDataNestedIntegerValues;
             self.semanticDecoded = True;
         }
 
@@ -4653,29 +4858,6 @@ public type MMSpdu = unit {
             self.writeResultErrors = $$.resultErrors;
             self.writeResultSuccesses = $$.resultSuccesses;
             self.semanticDecoded = True;
-        }
-
-    # Preserve the exact first structured Write value for standardized
-    # control types such as Tag_Value. This is parser evidence only; policy
-    # still requires exact object identity and correlated named-type state.
-    writeShape: DataChildren(
-        |self.writeFirstDataRaw|,
-        1,
-        self.writeShapeState
-    )
-        &parse-from=self.writeFirstDataRaw
-        if (
-            self.pduType ==
-                ICCP_MMS_TYPES::TopLevelPDU::CONFIRMED_REQUEST &&
-            self.serviceTag == 5 && self.writeFirstDataChoice == 2 &&
-            |self.writeFirstDataRaw| > 0
-        ) {
-            self.writeComponentChoices = $$.choices;
-            self.writeComponentRaws = $$.raws;
-            self.writeComponentIntegerValues = $$.integerValues;
-            self.writeNestedComponentChoices = $$.nestedChoices;
-            self.writeNestedComponentRaws = $$.nestedRaws;
-            self.writeNestedComponentIntegerValues = $$.nestedIntegerValues;
         }
 
     variableAttributesRequest: GetVariableAccessAttributesRequest(
@@ -4903,6 +5085,20 @@ public type MMSpdu = unit {
                 $$.firstResultTimestampValue;
             self.firstResultThirdRaw =
                 $$.firstResultThirdRaw;
+            self.pointComponentChoices =
+                $$.firstResultComponentChoices;
+            self.pointComponentRaws =
+                $$.firstResultComponentRaws;
+            self.pointComponentIntegerValues =
+                $$.firstResultComponentIntegerValues;
+            self.pointNestedComponentIndex =
+                $$.firstResultNestedComponentIndex;
+            self.pointNestedChoices =
+                $$.firstResultNestedChoices;
+            self.pointNestedRaws =
+                $$.firstResultNestedRaws;
+            self.pointNestedIntegerValues =
+                $$.firstResultNestedIntegerValues;
             self.reportResultChoices = $$.resultChoices;
             self.reportResultErrors = $$.resultErrors;
             self.reportResultRaws = $$.resultRaws;
@@ -4948,26 +5144,6 @@ public type MMSpdu = unit {
             # alternatives are decoded here, preserve the outer evidence but
             # do not treat an opaque nonempty TLV bag as semantically trusted.
             self.semanticDecoded = ! $$.haveActionResult;
-        }
-
-    # Re-parse only the first structured result into a compact shape vector.
-    # This evidence is additive to the stable MMS event and lets policy verify
-    # four-component COV values and nested TimeStampExtended values without
-    # decoding BER in Zeek or changing the legacy event signature.
-    pointShape: DataChildren(
-        |self.firstResultRaw|,
-        1,
-        self.pointShapeState
-    )
-        &parse-from=self.firstResultRaw
-        if (self.firstResultChoice == 2 && |self.firstResultRaw| > 0) {
-            self.pointComponentChoices = $$.choices;
-            self.pointComponentRaws = $$.raws;
-            self.pointComponentIntegerValues = $$.integerValues;
-            self.pointNestedComponentIndex = $$.nestedComponentIndex;
-            self.pointNestedChoices = $$.nestedChoices;
-            self.pointNestedRaws = $$.nestedRaws;
-            self.pointNestedIntegerValues = $$.nestedIntegerValues;
         }
 
     rejectPdu: Reject(self.bodyLength) &parse-from=self.body
