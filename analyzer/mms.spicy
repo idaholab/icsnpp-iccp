@@ -1504,9 +1504,32 @@ public type BoundedVariableAccessSpecification = unit(
 } &size=length;
 
 public type DataState = struct {
-    # Mutable traversal count shared by every root in one enclosing forest.
+    # Mutable resource accounting shared by every root in one enclosing
+    # forest. valueBytes counts every materialized Data value, including
+    # constructed parents and their children, so recursive &parse-from views
+    # cannot multiply a transport-sized payload without consuming a budget.
     elements: uint64;
+    valueBytes: uint64;
 };
+
+const MAX_DATA_NESTING_DEPTH: uint64 = 8;
+const MAX_DATA_VALUE_LENGTH: uint64 = 1024 * 1024;
+const MAX_DATA_VALUE_BYTES: uint64 = 4 * 1024 * 1024;
+
+function reserveDataValue(
+    length: uint64, depth: uint64, state: DataState&
+): void {
+    if (depth > MAX_DATA_NESTING_DEPTH)
+        throw "MMS Data exceeds configured nesting depth limit";
+
+    if (length > MAX_DATA_VALUE_LENGTH)
+        throw "MMS Data value exceeds configured length limit";
+
+    if (state.valueBytes > MAX_DATA_VALUE_BYTES - length)
+        throw "MMS Data forest exceeds configured value-byte limit";
+
+    state.valueBytes += length;
+}
 
 public type DataChildren = unit(
     length: uint64,
@@ -1730,8 +1753,6 @@ public type DataValue = unit(
     var nestedRaws: vector<bytes>;
     var nestedIntegerValues: vector<int64>;
 
-    : void &requires=depth <= ICCP_BER::MAX_NESTING_DEPTH;
-
     on %init {
         state.elements += 1;
         if (state.elements > ICCP_BER::MAX_ELEMENT_COUNT)
@@ -1747,7 +1768,9 @@ public type DataValue = unit(
             self.identifier.first.constructed
         )
     );
-    length: ICCP_BER::DefiniteLength;
+    length: ICCP_BER::DefiniteLength {
+        reserveDataValue(self.length.value, depth, state);
+    }
     value: bytes &size=self.length.value {
         self.choice = self.identifier.tagNumber;
         self.raw = $$;
@@ -1880,7 +1903,10 @@ public type AccessResult = unit(state: DataState& = new DataState) {
             )
         )
     );
-    length: ICCP_BER::DefiniteLength;
+    length: ICCP_BER::DefiniteLength {
+        if (self.identifier.tagNumber != 0)
+            reserveDataValue(self.length.value, 0, state);
+    }
 
     switch (self.identifier.tagNumber) {
         0 -> failure: ICCP_BER::IntegerValue(self.length.value) {
