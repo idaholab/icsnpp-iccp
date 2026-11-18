@@ -5701,6 +5701,531 @@ function capture_mms_processing_context(
     return context;
     }
 
+function add_mms_quality_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_component_count: count, result_first_choice: count,
+    result_second_choice: count, result_third_choice: count,
+    result_integer_value: int, result_floating_value: double,
+    result_flags_raw: string, result_timestamp_value: int,
+    shape_available: bool, first_component_length: count,
+    second_component_length: count, third_component_length: count,
+    point_shape: PointValueShapeEvidence): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         learned_point_type == "Data_StateQ" &&
+         first_result_type == 2 && shape_available &&
+         point_shape?$component_choices &&
+         point_shape?$component_raws &&
+         |point_shape$component_choices| == 2 &&
+         |point_shape$component_raws| == 2 &&
+         point_shape$component_choices[0] == 4 &&
+         exact_eight_bit_string(point_shape$component_raws[0]) &&
+         point_shape$component_choices[1] == 4 &&
+         exact_eight_bit_string(point_shape$component_raws[1]) )
+        {
+        local state_q = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[0], 2, 1));
+        local state_q_flags = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[1], 2, 1));
+        rec$point_type = "state_q";
+        rec$state_value = (state_q & 0xc0) / 64;
+        rec$validity = data_flags_validity(state_q_flags);
+        rec$value_source = data_flags_source(state_q_flags);
+        rec$normal_value = (state_q_flags & 0x02) != 0;
+        rec$timestamp_quality = (state_q_flags & 0x01) != 0;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type == "Data_StateSupplementalQ" &&
+              first_result_type == 2 && shape_available &&
+              point_shape?$component_choices &&
+              point_shape?$component_raws &&
+              |point_shape$component_choices| == 2 &&
+              |point_shape$component_raws| == 2 &&
+              point_shape$component_choices[0] == 4 &&
+              exact_eight_bit_string(
+                  point_shape$component_raws[0]) &&
+              point_shape$component_choices[1] == 4 &&
+              exact_eight_bit_string(
+                  point_shape$component_raws[1]) )
+        {
+        local supplemental_q = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[0], 2, 1));
+        local supplemental_q_flags = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[1], 2, 1));
+        rec$point_type = "state_supplemental_q";
+        rec$state_value = (supplemental_q & 0xc0) / 64;
+        rec$tag_value = (supplemental_q & 0x30) / 16;
+        rec$expected_state_value = (supplemental_q & 0x0c) / 4;
+        rec$supplemental_reserved = supplemental_q & 0x03;
+        rec$validity = data_flags_validity(supplemental_q_flags);
+        rec$value_source = data_flags_source(supplemental_q_flags);
+        rec$normal_value = (supplemental_q_flags & 0x02) != 0;
+        rec$timestamp_quality =
+            (supplemental_q_flags & 0x01) != 0;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              first_result_type == 2 &&
+              result_component_count == 2 &&
+              shape_available &&
+              ((learned_point_type == "Data_RealQ" &&
+                result_first_choice == 7 &&
+                first_component_length == 5) ||
+               (learned_point_type == "Data_DiscreteQ" &&
+                result_first_choice == 5 &&
+                first_component_length > 0 &&
+                first_component_length <= 4)) &&
+              result_second_choice == 4 &&
+              second_component_length == 2 &&
+              |result_flags_raw| == 2 &&
+              bytestring_to_count(
+                  sub_bytes(result_flags_raw, 1, 1)) == 0 )
+        {
+        local flags = bytestring_to_count(
+            sub_bytes(result_flags_raw, 2, 1));
+        rec$point_type = learned_point_type == "Data_RealQ" ?
+            "real_q" : "discrete_q";
+        if ( learned_point_type == "Data_RealQ" )
+            rec$floating_value = result_floating_value;
+        else
+            rec$integer_value = result_integer_value;
+        rec$validity = data_flags_validity(flags);
+        rec$value_source = data_flags_source(flags);
+        rec$normal_value = (flags & 0x02) != 0;
+        rec$timestamp_quality = (flags & 0x01) != 0;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              first_result_type == 2 &&
+              result_component_count == 3 &&
+              shape_available &&
+              ((learned_point_type == "Data_RealQTimeTag" &&
+                result_first_choice == 7 &&
+                first_component_length == 5) ||
+               (learned_point_type == "Data_DiscreteQTimeTag" &&
+                result_first_choice == 5 &&
+                first_component_length > 0 &&
+                first_component_length <= 4)) &&
+              result_second_choice == 5 &&
+              second_component_length > 0 &&
+              second_component_length <= 4 &&
+              result_third_choice == 4 &&
+              third_component_length == 2 &&
+              |result_flags_raw| == 2 &&
+              bytestring_to_count(
+                  sub_bytes(result_flags_raw, 1, 1)) == 0 &&
+              result_timestamp_value >= 0 )
+        {
+        local time_flags = bytestring_to_count(
+            sub_bytes(result_flags_raw, 2, 1));
+        rec$point_type =
+            learned_point_type == "Data_RealQTimeTag" ?
+                "real_q_time" : "discrete_q_time";
+        if ( learned_point_type == "Data_RealQTimeTag" )
+            rec$floating_value = result_floating_value;
+        else
+            rec$integer_value = result_integer_value;
+        rec$validity = data_flags_validity(time_flags);
+        rec$value_source = data_flags_source(time_flags);
+        rec$normal_value = (time_flags & 0x02) != 0;
+        rec$timestamp_quality = (time_flags & 0x01) != 0;
+        rec$timestamp_value = result_timestamp_value;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type == "Data_StateQTimeTag" &&
+              first_result_type == 2 && shape_available &&
+              point_shape?$component_choices &&
+              point_shape?$component_raws &&
+              point_shape?$component_integer_values &&
+              |point_shape$component_choices| == 2 &&
+              |point_shape$component_raws| == 2 &&
+              |point_shape$component_integer_values| == 2 &&
+              point_shape$component_choices[0] == 5 &&
+              |point_shape$component_raws[0]| > 0 &&
+              |point_shape$component_raws[0]| <= 4 &&
+              point_shape$component_integer_values[0] >= 0 &&
+              point_shape$component_choices[1] == 4 &&
+              exact_eight_bit_string(
+                  point_shape$component_raws[1]) )
+        {
+        local state_time_flags = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[1], 2, 1));
+        rec$point_type = "state_q_time";
+        rec$state_value = (state_time_flags & 0xc0) / 64;
+        rec$validity = data_flags_validity(state_time_flags);
+        rec$value_source = data_flags_source(state_time_flags);
+        rec$normal_value = (state_time_flags & 0x02) != 0;
+        rec$timestamp_quality = (state_time_flags & 0x01) != 0;
+        rec$timestamp_value =
+            point_shape$component_integer_values[0];
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type ==
+                  "Data_StateSupplementalQTimeTag" &&
+              first_result_type == 2 && shape_available &&
+              point_shape?$component_choices &&
+              point_shape?$component_raws &&
+              point_shape?$component_integer_values &&
+              |point_shape$component_choices| == 3 &&
+              |point_shape$component_raws| == 3 &&
+              |point_shape$component_integer_values| == 3 &&
+              point_shape$component_choices[0] == 4 &&
+              exact_eight_bit_string(
+                  point_shape$component_raws[0]) &&
+              point_shape$component_choices[1] == 5 &&
+              |point_shape$component_raws[1]| > 0 &&
+              |point_shape$component_raws[1]| <= 4 &&
+              point_shape$component_integer_values[1] >= 0 &&
+              point_shape$component_choices[2] == 4 &&
+              exact_eight_bit_string(
+                  point_shape$component_raws[2]) )
+        {
+        local supplemental_time = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[0], 2, 1));
+        local supplemental_time_flags = bytestring_to_count(
+            sub_bytes(point_shape$component_raws[2], 2, 1));
+        rec$point_type = "state_supplemental_q_time";
+        rec$state_value = (supplemental_time & 0xc0) / 64;
+        rec$tag_value = (supplemental_time & 0x30) / 16;
+        rec$expected_state_value =
+            (supplemental_time & 0x0c) / 4;
+        rec$supplemental_reserved = supplemental_time & 0x03;
+        rec$validity = data_flags_validity(
+            supplemental_time_flags);
+        rec$value_source = data_flags_source(
+            supplemental_time_flags);
+        rec$normal_value =
+            (supplemental_time_flags & 0x02) != 0;
+        rec$timestamp_quality =
+            (supplemental_time_flags & 0x01) != 0;
+        rec$timestamp_value =
+            point_shape$component_integer_values[1];
+        }
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_extended_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_integer_value: int, result_floating_value: double,
+    shape_available: bool, point_shape: PointValueShapeEvidence): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         first_result_type == 2 && shape_available &&
+         point_shape?$component_choices &&
+         point_shape?$component_raws &&
+         point_shape?$component_integer_values &&
+         |point_shape$component_raws| ==
+             |point_shape$component_choices| &&
+         |point_shape$component_integer_values| ==
+             |point_shape$component_choices| &&
+         ((learned_point_type == "Data_RealExtended" &&
+                |point_shape$component_choices| == 4 &&
+                point_shape$component_choices[0] == 7 &&
+                |point_shape$component_raws[0]| == 5) ||
+               (learned_point_type == "Data_DiscreteExtended" &&
+                |point_shape$component_choices| == 4 &&
+                point_shape$component_choices[0] == 5 &&
+                |point_shape$component_raws[0]| > 0 &&
+                |point_shape$component_raws[0]| <= 4) ||
+               (learned_point_type ==
+                    "Data_StateSupplementalExtended" &&
+                |point_shape$component_choices| == 4 &&
+                point_shape$component_choices[0] == 4 &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[0])) ||
+               (learned_point_type == "Data_StateExtended" &&
+                |point_shape$component_choices| == 3)) )
+        {
+        local extended_is_state =
+            learned_point_type == "Data_StateExtended";
+        local timestamp_index: count = extended_is_state ? 0 : 1;
+        local flags_index: count = extended_is_state ? 1 : 2;
+        local cov_index: count = extended_is_state ? 2 : 3;
+        local extended_valid =
+            |point_shape$component_raws| ==
+                |point_shape$component_choices| &&
+            |point_shape$component_integer_values| ==
+                |point_shape$component_choices| &&
+            point_shape$component_choices[timestamp_index] == 5 &&
+            |point_shape$component_raws[timestamp_index]| > 0 &&
+            |point_shape$component_raws[timestamp_index]| <= 4 &&
+            point_shape$component_integer_values[timestamp_index] >= 0 &&
+            point_shape$component_choices[flags_index] == 4 &&
+            exact_eight_bit_string(
+                point_shape$component_raws[flags_index]) &&
+            point_shape$component_choices[cov_index] == 6 &&
+            |point_shape$component_raws[cov_index]| > 0 &&
+            |point_shape$component_raws[cov_index]| <= 3 &&
+            point_shape$component_integer_values[cov_index] >= 0 &&
+            point_shape$component_integer_values[cov_index] <= 65535;
+        if ( extended_valid )
+            {
+            local extended_flags = bytestring_to_count(
+                sub_bytes(point_shape$component_raws[flags_index], 2, 1));
+            rec$point_type = learned_point_type == "Data_RealExtended" ?
+                "real_extended" :
+                learned_point_type == "Data_DiscreteExtended" ?
+                    "discrete_extended" :
+                learned_point_type ==
+                    "Data_StateSupplementalExtended" ?
+                    "state_supplemental_extended" :
+                    "state_extended";
+            if ( learned_point_type == "Data_RealExtended" )
+                rec$floating_value = result_floating_value;
+            else if ( learned_point_type == "Data_DiscreteExtended" )
+                rec$integer_value = result_integer_value;
+            else if ( learned_point_type ==
+                      "Data_StateSupplementalExtended" )
+                {
+                local supplemental_extended = bytestring_to_count(
+                    sub_bytes(point_shape$component_raws[0], 2, 1));
+                rec$state_value =
+                    (supplemental_extended & 0xc0) / 64;
+                rec$tag_value =
+                    (supplemental_extended & 0x30) / 16;
+                rec$expected_state_value =
+                    (supplemental_extended & 0x0c) / 4;
+                rec$supplemental_reserved =
+                    supplemental_extended & 0x03;
+                }
+            else
+                rec$state_value = (extended_flags & 0xc0) / 64;
+            rec$validity = data_flags_validity(extended_flags);
+            rec$value_source = data_flags_source(extended_flags);
+            rec$normal_value = (extended_flags & 0x02) != 0;
+            rec$timestamp_quality = (extended_flags & 0x01) != 0;
+            rec$timestamp_value =
+                point_shape$component_integer_values[timestamp_index];
+            rec$cov_value = int_to_count(
+                point_shape$component_integer_values[cov_index]);
+            }
+        else
+            rec$standardized_value =
+                bounded_information_report_result_raw(first_result_raw);
+        }
+    else if ( association_kind(c) == "tase2" &&
+              first_result_type == 2 && shape_available &&
+              point_shape?$component_choices &&
+              point_shape?$component_raws &&
+              point_shape?$component_integer_values &&
+              |point_shape$component_raws| ==
+                  |point_shape$component_choices| &&
+              |point_shape$component_integer_values| ==
+                  |point_shape$component_choices| &&
+              ((learned_point_type == "Data_RealQTimeTagExtended" &&
+                |point_shape$component_choices| == 3 &&
+                point_shape$component_choices[0] == 7 &&
+                |point_shape$component_raws[0]| == 5 &&
+                point_shape$component_choices[1] == 2 &&
+                point_shape$component_choices[2] == 4 &&
+                exact_extended_timestamp(point_shape, 2) &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[2])) ||
+               (learned_point_type == "Data_DiscreteQTimeTagExtended" &&
+                |point_shape$component_choices| == 3 &&
+                point_shape$component_choices[0] == 5 &&
+                |point_shape$component_raws[0]| > 0 &&
+                |point_shape$component_raws[0]| <= 4 &&
+                point_shape$component_choices[1] == 2 &&
+                point_shape$component_choices[2] == 4 &&
+                exact_extended_timestamp(point_shape, 2) &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[2])) ||
+               (learned_point_type == "Data_StateQTimeTagExtended" &&
+                |point_shape$component_choices| == 2 &&
+                point_shape$component_choices[0] == 2 &&
+                point_shape$component_choices[1] == 4 &&
+                exact_extended_timestamp(point_shape, 1) &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[1])) ||
+               (learned_point_type ==
+                    "Data_StateSupplementalQTimeTagExtended" &&
+                |point_shape$component_choices| == 3 &&
+                point_shape$component_choices[0] == 4 &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[0]) &&
+                point_shape$component_choices[1] == 2 &&
+                point_shape$component_choices[2] == 4 &&
+                exact_extended_timestamp(point_shape, 2) &&
+                exact_eight_bit_string(
+                    point_shape$component_raws[2]))) )
+        {
+        local extended_time_flags_index: count =
+            learned_point_type == "Data_StateQTimeTagExtended" ? 1 : 2;
+        local extended_time_flags = bytestring_to_count(
+            sub_bytes(
+                point_shape$component_raws[extended_time_flags_index],
+                2, 1));
+        rec$point_type =
+            learned_point_type == "Data_RealQTimeTagExtended" ?
+                "real_q_time_extended" :
+            learned_point_type == "Data_DiscreteQTimeTagExtended" ?
+                "discrete_q_time_extended" :
+            learned_point_type ==
+                "Data_StateSupplementalQTimeTagExtended" ?
+                "state_supplemental_q_time_extended" :
+                "state_q_time_extended";
+        if ( learned_point_type == "Data_RealQTimeTagExtended" )
+            rec$floating_value = result_floating_value;
+        else if ( learned_point_type ==
+                  "Data_DiscreteQTimeTagExtended" )
+            rec$integer_value = result_integer_value;
+        else if ( learned_point_type ==
+                  "Data_StateSupplementalQTimeTagExtended" )
+            {
+            local supplemental_time_extended = bytestring_to_count(
+                sub_bytes(point_shape$component_raws[0], 2, 1));
+            rec$state_value =
+                (supplemental_time_extended & 0xc0) / 64;
+            rec$tag_value =
+                (supplemental_time_extended & 0x30) / 16;
+            rec$expected_state_value =
+                (supplemental_time_extended & 0x0c) / 4;
+            rec$supplemental_reserved =
+                supplemental_time_extended & 0x03;
+            }
+        else
+            rec$state_value = (extended_time_flags & 0xc0) / 64;
+        rec$validity = data_flags_validity(extended_time_flags);
+        rec$value_source = data_flags_source(extended_time_flags);
+        rec$normal_value = (extended_time_flags & 0x02) != 0;
+        rec$timestamp_quality = (extended_time_flags & 0x01) != 0;
+        rec$timestamp_value =
+            point_shape$nested_integer_values[0] * 1000 +
+            point_shape$nested_integer_values[1];
+        }
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+
+function mms_special_result_applicable(
+    c: connection, transfer_object: PendingRead, first_result_type: count,
+    first_result_raw: string, result_integer_count: count): bool
+    {
+    return
+        (transfer_object$category == 1 && first_result_type == 4 &&
+         |first_result_raw| >= 2) ||
+        (transfer_object$category == 2 && first_result_type == 10) ||
+        (transfer_object$category == 5 && first_result_type == 2 &&
+         result_integer_count >= 2) ||
+        (association_kind(c) == "tase2" && first_result_type == 4 &&
+         |first_result_raw| == 2 &&
+         bytestring_to_count(sub_bytes(first_result_raw, 1, 1)) == 3 &&
+         transfer_object$scope == 1 &&
+         transfer_object$name == "DSConditions_Detected" &&
+         valid_tase2_object_identifier(
+             transfer_object$scope, transfer_object$domain,
+             transfer_object$name));
+    }
+
+function add_mms_special_result(
+    rec: Info, transfer_object: PendingRead, first_result_raw: string,
+    result_first_integer: int, result_second_integer: int): Info
+    {
+    if ( transfer_object$category == 1 )
+        {
+        rec$object_category = "supported_features";
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+        if ( supported_features_value_is_valid(first_result_raw) )
+            rec$conformance_blocks = fmt(
+                "unused=%d,bits=%s,enabled=%s",
+                bytestring_to_count(sub_bytes(first_result_raw, 1, 1)),
+                bytestring_to_hexstr(sub_bytes(
+                    first_result_raw, 2, |first_result_raw| - 1)),
+                decode_supported_features(first_result_raw));
+        else
+            rec$conformance_blocks = "invalid_bit_string";
+        }
+    else if ( transfer_object$category == 2 )
+        {
+        rec$object_category = "bilateral_table";
+        rec$standardized_value = bounded_detail(first_result_raw);
+        }
+    else if ( transfer_object$category == 5 )
+        {
+        rec$object_category = "tase2_version";
+        rec$standardized_value = fmt(
+            "%d.%02d", result_first_integer, result_second_integer);
+        }
+    else
+        {
+        local condition_bits = bytestring_to_count(
+            sub_bytes(first_result_raw, 2, 1));
+        rec$object_category = "transfer_support";
+        rec$point_type = "ds_conditions";
+        rec$standardized_value = bytestring_to_hexstr(first_result_raw);
+        rec$condition_mask = condition_bits / 8;
+        rec$conditions = decode_ds_conditions(condition_bits);
+        }
+    return rec;
+    }
+
+function add_mms_basic_point_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_integer_value: int, result_floating_value: double,
+    shape_available: bool, first_result_length: count): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         learned_point_type == "Data_Real" &&
+         first_result_type == 7 && shape_available &&
+         first_result_length == 5 )
+        {
+        rec$point_type = "real";
+        rec$floating_value = result_floating_value;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type == "Data_Discrete" &&
+              first_result_type == 5 && shape_available &&
+              first_result_length > 0 && first_result_length <= 4 )
+        {
+        rec$point_type = "discrete";
+        rec$integer_value = result_integer_value;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type == "Data_State" &&
+              first_result_type == 4 && shape_available &&
+              first_result_length == 2 && |first_result_raw| == 2 &&
+              bytestring_to_count(
+                  sub_bytes(first_result_raw, 1, 1)) == 0 )
+        {
+        local state_flags = bytestring_to_count(
+            sub_bytes(first_result_raw, 2, 1));
+        rec$point_type = "state";
+        rec$state_value = (state_flags & 0xc0) / 64;
+        rec$validity = data_flags_validity(state_flags);
+        rec$value_source = data_flags_source(state_flags);
+        rec$normal_value = (state_flags & 0x02) != 0;
+        rec$timestamp_quality = (state_flags & 0x01) != 0;
+        }
+    else if ( association_kind(c) == "tase2" &&
+              learned_point_type == "Data_StateSupplemental" &&
+              first_result_type == 4 && shape_available &&
+              first_result_length == 2 &&
+              exact_eight_bit_string(first_result_raw) )
+        {
+        local supplemental = bytestring_to_count(
+            sub_bytes(first_result_raw, 2, 1));
+        rec$point_type = "state_supplemental";
+        rec$state_value = (supplemental & 0xc0) / 64;
+        rec$tag_value = (supplemental & 0x30) / 16;
+        rec$expected_state_value = (supplemental & 0x0c) / 4;
+        rec$supplemental_reserved = supplemental & 0x03;
+        }
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+
 function process_mms_message(
     c: connection, is_orig: bool, recognized: bool, pdu_type: count,
     semantic_decoded: bool, body_length: count, invoke_id: int,
@@ -5917,482 +6442,55 @@ function process_mms_message(
                      transfer_object$scope, transfer_object$domain) )
                 learned_point_type = "";
 
-            if ( transfer_object$category == 1 && first_result_type == 4 &&
-                 |first_result_raw| >= 2 )
-                {
-                rec$object_category = "supported_features";
-                rec$standardized_value =
-                    bounded_information_report_result_raw(first_result_raw);
-                if ( supported_features_value_is_valid(first_result_raw) )
-                    rec$conformance_blocks = fmt(
-                        "unused=%d,bits=%s,enabled=%s",
-                        bytestring_to_count(sub_bytes(
-                            first_result_raw, 1, 1)),
-                        bytestring_to_hexstr(sub_bytes(
-                            first_result_raw, 2, |first_result_raw| - 1)),
-                        decode_supported_features(first_result_raw));
-                else
-                    rec$conformance_blocks = "invalid_bit_string";
-                }
-            else if ( transfer_object$category == 2 &&
-                      first_result_type == 10 )
-                {
-                rec$object_category = "bilateral_table";
-                rec$standardized_value =
-                    bounded_detail(first_result_raw);
-                }
-            else if ( transfer_object$category == 5 &&
-                      first_result_type == 2 &&
-                      result_integer_count >= 2 )
-                {
-                rec$object_category = "tase2_version";
-                rec$standardized_value = fmt(
-                    "%d.%02d",
-                    result_first_integer,
-                    result_second_integer);
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      first_result_type == 4 &&
-                      |first_result_raw| == 2 &&
-                      bytestring_to_count(
-                          sub_bytes(first_result_raw, 1, 1)) == 3 &&
-                      transfer_object$scope == 1 &&
-                      transfer_object$name == "DSConditions_Detected" &&
-                      valid_tase2_object_identifier(
-                          transfer_object$scope, transfer_object$domain,
-                          transfer_object$name) )
-                {
-                local condition_bits = bytestring_to_count(
-                    sub_bytes(first_result_raw, 2, 1));
-                rec$object_category = "transfer_support";
-                rec$point_type = "ds_conditions";
-                rec$standardized_value =
-                    bytestring_to_hexstr(first_result_raw);
-                rec$condition_mask = condition_bits / 8;
-                rec$conditions = decode_ds_conditions(condition_bits);
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_Real" &&
-                      first_result_type == 7 && shape_available &&
-                      first_result_length == 5 )
-                {
-                rec$point_type = "real";
-                rec$floating_value = result_floating_value;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_Discrete" &&
-                      first_result_type == 5 && shape_available &&
-                      first_result_length > 0 && first_result_length <= 4 )
-                {
-                rec$point_type = "discrete";
-                rec$integer_value = result_integer_value;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_State" &&
-                      first_result_type == 4 &&
-                      shape_available && first_result_length == 2 &&
-                      |first_result_raw| == 2 &&
-                      bytestring_to_count(
-                          sub_bytes(first_result_raw, 1, 1)) == 0 )
-                {
-                local state_flags = bytestring_to_count(
-                    sub_bytes(first_result_raw, 2, 1));
-                rec$point_type = "state";
-                rec$state_value = (state_flags & 0xc0) / 64;
-                rec$validity = data_flags_validity(state_flags);
-                rec$value_source = data_flags_source(state_flags);
-                rec$normal_value = (state_flags & 0x02) != 0;
-                rec$timestamp_quality = (state_flags & 0x01) != 0;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_StateSupplemental" &&
-                      first_result_type == 4 && shape_available &&
-                      first_result_length == 2 &&
-                      exact_eight_bit_string(first_result_raw) )
-                {
-                local supplemental = bytestring_to_count(
-                    sub_bytes(first_result_raw, 2, 1));
-                rec$point_type = "state_supplemental";
-                rec$state_value = (supplemental & 0xc0) / 64;
-                rec$tag_value = (supplemental & 0x30) / 16;
-                rec$expected_state_value = (supplemental & 0x0c) / 4;
-                rec$supplemental_reserved = supplemental & 0x03;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_StateQ" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      |point_shape$component_choices| == 2 &&
-                      |point_shape$component_raws| == 2 &&
-                      point_shape$component_choices[0] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[0]) &&
-                      point_shape$component_choices[1] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[1]) )
-                {
-                local state_q = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[0], 2, 1));
-                local state_q_flags = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[1], 2, 1));
-                rec$point_type = "state_q";
-                rec$state_value = (state_q & 0xc0) / 64;
-                rec$validity = data_flags_validity(state_q_flags);
-                rec$value_source = data_flags_source(state_q_flags);
-                rec$normal_value = (state_q_flags & 0x02) != 0;
-                rec$timestamp_quality = (state_q_flags & 0x01) != 0;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_StateSupplementalQ" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      |point_shape$component_choices| == 2 &&
-                      |point_shape$component_raws| == 2 &&
-                      point_shape$component_choices[0] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[0]) &&
-                      point_shape$component_choices[1] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[1]) )
-                {
-                local supplemental_q = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[0], 2, 1));
-                local supplemental_q_flags = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[1], 2, 1));
-                rec$point_type = "state_supplemental_q";
-                rec$state_value = (supplemental_q & 0xc0) / 64;
-                rec$tag_value = (supplemental_q & 0x30) / 16;
-                rec$expected_state_value = (supplemental_q & 0x0c) / 4;
-                rec$supplemental_reserved = supplemental_q & 0x03;
-                rec$validity = data_flags_validity(supplemental_q_flags);
-                rec$value_source = data_flags_source(supplemental_q_flags);
-                rec$normal_value = (supplemental_q_flags & 0x02) != 0;
-                rec$timestamp_quality =
-                    (supplemental_q_flags & 0x01) != 0;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      first_result_type == 2 &&
-                      result_component_count == 2 &&
-                      shape_available &&
-                      ((learned_point_type == "Data_RealQ" &&
-                        result_first_choice == 7 &&
-                        first_component_length == 5) ||
-                       (learned_point_type == "Data_DiscreteQ" &&
-                        result_first_choice == 5 &&
-                        first_component_length > 0 &&
-                        first_component_length <= 4)) &&
-                      result_second_choice == 4 &&
-                      second_component_length == 2 &&
-                      |result_flags_raw| == 2 &&
-                      bytestring_to_count(
-                          sub_bytes(result_flags_raw, 1, 1)) == 0 )
-                {
-                local flags = bytestring_to_count(
-                    sub_bytes(result_flags_raw, 2, 1));
-                rec$point_type = learned_point_type == "Data_RealQ" ?
-                    "real_q" : "discrete_q";
-                if ( learned_point_type == "Data_RealQ" )
-                    rec$floating_value = result_floating_value;
-                else
-                    rec$integer_value = result_integer_value;
-                rec$validity = data_flags_validity(flags);
-                rec$value_source = data_flags_source(flags);
-                rec$normal_value = (flags & 0x02) != 0;
-                rec$timestamp_quality = (flags & 0x01) != 0;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      first_result_type == 2 &&
-                      result_component_count == 3 &&
-                      shape_available &&
-                      ((learned_point_type == "Data_RealQTimeTag" &&
-                        result_first_choice == 7 &&
-                        first_component_length == 5) ||
-                       (learned_point_type == "Data_DiscreteQTimeTag" &&
-                        result_first_choice == 5 &&
-                        first_component_length > 0 &&
-                        first_component_length <= 4)) &&
-                      result_second_choice == 5 &&
-                      second_component_length > 0 &&
-                      second_component_length <= 4 &&
-                      result_third_choice == 4 &&
-                      third_component_length == 2 &&
-                      |result_flags_raw| == 2 &&
-                      bytestring_to_count(
-                          sub_bytes(result_flags_raw, 1, 1)) == 0 &&
-                      result_timestamp_value >= 0 )
-                {
-                local time_flags = bytestring_to_count(
-                    sub_bytes(result_flags_raw, 2, 1));
-                rec$point_type =
-                    learned_point_type == "Data_RealQTimeTag" ?
-                        "real_q_time" : "discrete_q_time";
-                if ( learned_point_type == "Data_RealQTimeTag" )
-                    rec$floating_value = result_floating_value;
-                else
-                    rec$integer_value = result_integer_value;
-                rec$validity = data_flags_validity(time_flags);
-                rec$value_source = data_flags_source(time_flags);
-                rec$normal_value = (time_flags & 0x02) != 0;
-                rec$timestamp_quality = (time_flags & 0x01) != 0;
-                rec$timestamp_value = result_timestamp_value;
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      learned_point_type == "Data_StateQTimeTag" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      point_shape?$component_integer_values &&
-                      |point_shape$component_choices| == 2 &&
-                      |point_shape$component_raws| == 2 &&
-                      |point_shape$component_integer_values| == 2 &&
-                      point_shape$component_choices[0] == 5 &&
-                      |point_shape$component_raws[0]| > 0 &&
-                      |point_shape$component_raws[0]| <= 4 &&
-                      point_shape$component_integer_values[0] >= 0 &&
-                      point_shape$component_choices[1] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[1]) )
-                {
-                local state_time_flags = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[1], 2, 1));
-                rec$point_type = "state_q_time";
-                rec$state_value = (state_time_flags & 0xc0) / 64;
-                rec$validity = data_flags_validity(state_time_flags);
-                rec$value_source = data_flags_source(state_time_flags);
-                rec$normal_value = (state_time_flags & 0x02) != 0;
-                rec$timestamp_quality = (state_time_flags & 0x01) != 0;
-                rec$timestamp_value =
-                    point_shape$component_integer_values[0];
-                }
-            else if ( association_kind(c) == "tase2" &&
+            if ( mms_special_result_applicable(
+                     c, transfer_object, first_result_type,
+                     first_result_raw, result_integer_count) )
+                rec = add_mms_special_result(
+                    rec, transfer_object, first_result_raw,
+                    result_first_integer, result_second_integer);
+            else if ( learned_point_type == "Data_Real" ||
+                      learned_point_type == "Data_Discrete" ||
+                      learned_point_type == "Data_State" ||
+                      learned_point_type == "Data_StateSupplemental" )
+                rec = add_mms_basic_point_result(
+                    c, rec, learned_point_type, first_result_type,
+                    first_result_raw, result_integer_value,
+                    result_floating_value, shape_available,
+                    first_result_length);
+            else if ( learned_point_type == "Data_StateQ" ||
+                 learned_point_type == "Data_StateSupplementalQ" ||
+                 learned_point_type == "Data_RealQ" ||
+                 learned_point_type == "Data_DiscreteQ" ||
+                 learned_point_type == "Data_RealQTimeTag" ||
+                 learned_point_type == "Data_DiscreteQTimeTag" ||
+                 learned_point_type == "Data_StateQTimeTag" ||
+                 learned_point_type == "Data_StateSupplementalQTimeTag" )
+                rec = add_mms_quality_result(
+                    c, rec, learned_point_type, first_result_type,
+                    first_result_raw, result_component_count,
+                    result_first_choice, result_second_choice,
+                    result_third_choice, result_integer_value,
+                    result_floating_value, result_flags_raw,
+                    result_timestamp_value, shape_available,
+                    first_component_length, second_component_length,
+                    third_component_length, point_shape);
+            else if ( learned_point_type == "Data_RealExtended" ||
+                      learned_point_type == "Data_DiscreteExtended" ||
+                      learned_point_type == "Data_StateExtended" ||
                       learned_point_type ==
-                          "Data_StateSupplementalQTimeTag" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      point_shape?$component_integer_values &&
-                      |point_shape$component_choices| == 3 &&
-                      |point_shape$component_raws| == 3 &&
-                      |point_shape$component_integer_values| == 3 &&
-                      point_shape$component_choices[0] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[0]) &&
-                      point_shape$component_choices[1] == 5 &&
-                      |point_shape$component_raws[1]| > 0 &&
-                      |point_shape$component_raws[1]| <= 4 &&
-                      point_shape$component_integer_values[1] >= 0 &&
-                      point_shape$component_choices[2] == 4 &&
-                      exact_eight_bit_string(
-                          point_shape$component_raws[2]) )
-                {
-                local supplemental_time = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[0], 2, 1));
-                local supplemental_time_flags = bytestring_to_count(
-                    sub_bytes(point_shape$component_raws[2], 2, 1));
-                rec$point_type = "state_supplemental_q_time";
-                rec$state_value = (supplemental_time & 0xc0) / 64;
-                rec$tag_value = (supplemental_time & 0x30) / 16;
-                rec$expected_state_value =
-                    (supplemental_time & 0x0c) / 4;
-                rec$supplemental_reserved = supplemental_time & 0x03;
-                rec$validity = data_flags_validity(
-                    supplemental_time_flags);
-                rec$value_source = data_flags_source(
-                    supplemental_time_flags);
-                rec$normal_value =
-                    (supplemental_time_flags & 0x02) != 0;
-                rec$timestamp_quality =
-                    (supplemental_time_flags & 0x01) != 0;
-                rec$timestamp_value =
-                    point_shape$component_integer_values[1];
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      point_shape?$component_integer_values &&
-                      |point_shape$component_raws| ==
-                          |point_shape$component_choices| &&
-                      |point_shape$component_integer_values| ==
-                          |point_shape$component_choices| &&
-                      ((learned_point_type == "Data_RealExtended" &&
-                        |point_shape$component_choices| == 4 &&
-                        point_shape$component_choices[0] == 7 &&
-                        |point_shape$component_raws[0]| == 5) ||
-                       (learned_point_type == "Data_DiscreteExtended" &&
-                        |point_shape$component_choices| == 4 &&
-                        point_shape$component_choices[0] == 5 &&
-                        |point_shape$component_raws[0]| > 0 &&
-                        |point_shape$component_raws[0]| <= 4) ||
-                       (learned_point_type ==
-                            "Data_StateSupplementalExtended" &&
-                        |point_shape$component_choices| == 4 &&
-                        point_shape$component_choices[0] == 4 &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[0])) ||
-                       (learned_point_type == "Data_StateExtended" &&
-                        |point_shape$component_choices| == 3)) )
-                {
-                local extended_is_state =
-                    learned_point_type == "Data_StateExtended";
-                local timestamp_index: count = extended_is_state ? 0 : 1;
-                local flags_index: count = extended_is_state ? 1 : 2;
-                local cov_index: count = extended_is_state ? 2 : 3;
-                local extended_valid =
-                    |point_shape$component_raws| ==
-                        |point_shape$component_choices| &&
-                    |point_shape$component_integer_values| ==
-                        |point_shape$component_choices| &&
-                    point_shape$component_choices[timestamp_index] == 5 &&
-                    |point_shape$component_raws[timestamp_index]| > 0 &&
-                    |point_shape$component_raws[timestamp_index]| <= 4 &&
-                    point_shape$component_integer_values[timestamp_index] >= 0 &&
-                    point_shape$component_choices[flags_index] == 4 &&
-                    exact_eight_bit_string(
-                        point_shape$component_raws[flags_index]) &&
-                    point_shape$component_choices[cov_index] == 6 &&
-                    |point_shape$component_raws[cov_index]| > 0 &&
-                    |point_shape$component_raws[cov_index]| <= 3 &&
-                    point_shape$component_integer_values[cov_index] >= 0 &&
-                    point_shape$component_integer_values[cov_index] <= 65535;
-                if ( extended_valid )
-                    {
-                    local extended_flags = bytestring_to_count(
-                        sub_bytes(point_shape$component_raws[flags_index], 2, 1));
-                    rec$point_type = learned_point_type == "Data_RealExtended" ?
-                        "real_extended" :
-                        learned_point_type == "Data_DiscreteExtended" ?
-                            "discrete_extended" :
-                        learned_point_type ==
-                            "Data_StateSupplementalExtended" ?
-                            "state_supplemental_extended" :
-                            "state_extended";
-                    if ( learned_point_type == "Data_RealExtended" )
-                        rec$floating_value = result_floating_value;
-                    else if ( learned_point_type == "Data_DiscreteExtended" )
-                        rec$integer_value = result_integer_value;
-                    else if ( learned_point_type ==
-                              "Data_StateSupplementalExtended" )
-                        {
-                        local supplemental_extended = bytestring_to_count(
-                            sub_bytes(point_shape$component_raws[0], 2, 1));
-                        rec$state_value =
-                            (supplemental_extended & 0xc0) / 64;
-                        rec$tag_value =
-                            (supplemental_extended & 0x30) / 16;
-                        rec$expected_state_value =
-                            (supplemental_extended & 0x0c) / 4;
-                        rec$supplemental_reserved =
-                            supplemental_extended & 0x03;
-                        }
-                    else
-                        rec$state_value = (extended_flags & 0xc0) / 64;
-                    rec$validity = data_flags_validity(extended_flags);
-                    rec$value_source = data_flags_source(extended_flags);
-                    rec$normal_value = (extended_flags & 0x02) != 0;
-                    rec$timestamp_quality = (extended_flags & 0x01) != 0;
-                    rec$timestamp_value =
-                        point_shape$component_integer_values[timestamp_index];
-                    rec$cov_value = int_to_count(
-                        point_shape$component_integer_values[cov_index]);
-                    }
-                else
-                    rec$standardized_value =
-                        bounded_information_report_result_raw(first_result_raw);
-                }
-            else if ( association_kind(c) == "tase2" &&
-                      first_result_type == 2 && shape_available &&
-                      point_shape?$component_choices &&
-                      point_shape?$component_raws &&
-                      point_shape?$component_integer_values &&
-                      |point_shape$component_raws| ==
-                          |point_shape$component_choices| &&
-                      |point_shape$component_integer_values| ==
-                          |point_shape$component_choices| &&
-                      ((learned_point_type == "Data_RealQTimeTagExtended" &&
-                        |point_shape$component_choices| == 3 &&
-                        point_shape$component_choices[0] == 7 &&
-                        |point_shape$component_raws[0]| == 5 &&
-                        point_shape$component_choices[1] == 2 &&
-                        point_shape$component_choices[2] == 4 &&
-                        exact_extended_timestamp(point_shape, 2) &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[2])) ||
-                       (learned_point_type == "Data_DiscreteQTimeTagExtended" &&
-                        |point_shape$component_choices| == 3 &&
-                        point_shape$component_choices[0] == 5 &&
-                        |point_shape$component_raws[0]| > 0 &&
-                        |point_shape$component_raws[0]| <= 4 &&
-                        point_shape$component_choices[1] == 2 &&
-                        point_shape$component_choices[2] == 4 &&
-                        exact_extended_timestamp(point_shape, 2) &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[2])) ||
-                       (learned_point_type == "Data_StateQTimeTagExtended" &&
-                        |point_shape$component_choices| == 2 &&
-                        point_shape$component_choices[0] == 2 &&
-                        point_shape$component_choices[1] == 4 &&
-                        exact_extended_timestamp(point_shape, 1) &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[1])) ||
-                       (learned_point_type ==
-                            "Data_StateSupplementalQTimeTagExtended" &&
-                        |point_shape$component_choices| == 3 &&
-                        point_shape$component_choices[0] == 4 &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[0]) &&
-                        point_shape$component_choices[1] == 2 &&
-                        point_shape$component_choices[2] == 4 &&
-                        exact_extended_timestamp(point_shape, 2) &&
-                        exact_eight_bit_string(
-                            point_shape$component_raws[2]))) )
-                {
-                local extended_time_flags_index: count =
-                    learned_point_type == "Data_StateQTimeTagExtended" ? 1 : 2;
-                local extended_time_flags = bytestring_to_count(
-                    sub_bytes(
-                        point_shape$component_raws[extended_time_flags_index],
-                        2, 1));
-                rec$point_type =
-                    learned_point_type == "Data_RealQTimeTagExtended" ?
-                        "real_q_time_extended" :
-                    learned_point_type == "Data_DiscreteQTimeTagExtended" ?
-                        "discrete_q_time_extended" :
-                    learned_point_type ==
-                        "Data_StateSupplementalQTimeTagExtended" ?
-                        "state_supplemental_q_time_extended" :
-                        "state_q_time_extended";
-                if ( learned_point_type == "Data_RealQTimeTagExtended" )
-                    rec$floating_value = result_floating_value;
-                else if ( learned_point_type ==
-                          "Data_DiscreteQTimeTagExtended" )
-                    rec$integer_value = result_integer_value;
-                else if ( learned_point_type ==
+                          "Data_StateSupplementalExtended" ||
+                      learned_point_type ==
+                          "Data_RealQTimeTagExtended" ||
+                      learned_point_type ==
+                          "Data_DiscreteQTimeTagExtended" ||
+                      learned_point_type ==
+                          "Data_StateQTimeTagExtended" ||
+                      learned_point_type ==
                           "Data_StateSupplementalQTimeTagExtended" )
-                    {
-                    local supplemental_time_extended = bytestring_to_count(
-                        sub_bytes(point_shape$component_raws[0], 2, 1));
-                    rec$state_value =
-                        (supplemental_time_extended & 0xc0) / 64;
-                    rec$tag_value =
-                        (supplemental_time_extended & 0x30) / 16;
-                    rec$expected_state_value =
-                        (supplemental_time_extended & 0x0c) / 4;
-                    rec$supplemental_reserved =
-                        supplemental_time_extended & 0x03;
-                    }
-                else
-                    rec$state_value = (extended_time_flags & 0xc0) / 64;
-                rec$validity = data_flags_validity(extended_time_flags);
-                rec$value_source = data_flags_source(extended_time_flags);
-                rec$normal_value = (extended_time_flags & 0x02) != 0;
-                rec$timestamp_quality = (extended_time_flags & 0x01) != 0;
-                rec$timestamp_value =
-                    point_shape$nested_integer_values[0] * 1000 +
-                    point_shape$nested_integer_values[1];
-                }
+                rec = add_mms_extended_result(
+                    c, rec, learned_point_type, first_result_type,
+                    first_result_raw, result_integer_value,
+                    result_floating_value, shape_available, point_shape);
             else
                 rec$standardized_value =
                     bounded_information_report_result_raw(first_result_raw);
