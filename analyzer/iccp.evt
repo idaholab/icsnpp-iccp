@@ -548,7 +548,7 @@ on ICCP_MMS::ProvenancedMMSpdu::%done if (
         cast<uint64>(self.pdu.pduType) == 0 ||
         cast<uint64>(self.pdu.pduType) == 1
     )
-) -> event ICCP::mms_write_evidence_v1(
+) -> event ICCP::mms_write_evidence_v2(
     $conn,
     $is_orig,
     cast<uint64>(self.pdu.pduType),
@@ -565,6 +565,8 @@ on ICCP_MMS::ProvenancedMMSpdu::%done if (
     self.pdu.writeTargetNames,
     self.pdu.writeValueChoices,
     self.pdu.writeValueRaws,
+    self.pdu.writeValueRawLengths,
+    self.pdu.writeValueRawTruncated,
     self.pdu.writeValueIntegerValues,
     self.pdu.writeValueFloatingValues,
     self.pdu.writeValueBooleanValues,
@@ -709,6 +711,24 @@ on ICCP_MMS::ProvenancedMMSpdu::%done if (
 );
 
 on ICCP_MMS::ProvenancedMMSpdu::%done if (
+    self.pdu.semanticDecoded &&
+    cast<uint64>(self.pdu.pduType) == 1 && self.pdu.serviceTag == 4
+) -> event ICCP::mms_first_result_evidence_v1(
+    $conn,
+    $is_orig,
+    cast<uint64>(self.pdu.pduType),
+    self.pdu.invokeId,
+    self.pdu.serviceTag,
+    self.pdu.firstResultChoice,
+    self.pdu.firstResultRaw,
+    self.pdu.firstResultRawLength,
+    self.pdu.firstResultRawTruncated,
+    self.pdu.firstResultIntegerValue,
+    self.pdu.firstResultFloatingValue,
+    self.provenanceCode
+);
+
+on ICCP_MMS::ProvenancedMMSpdu::%done if (
     self.pdu.semanticDecoded && self.pdu.serviceTag == 4 &&
     (cast<uint64>(self.pdu.pduType) == 0 ||
      cast<uint64>(self.pdu.pduType) == 1)
@@ -773,13 +793,15 @@ on ICCP_MMS::ProvenancedMMSpdu::%done if (
     self.pdu.semanticDecoded &&
     cast<uint64>(self.pdu.pduType) == 3 &&
     self.pdu.unconfirmedServiceTag == 0
-) -> event ICCP::mms_information_report_results_v2(
+) -> event ICCP::mms_information_report_results_v3(
     $conn, $is_orig, self.pdu.accessChoice, self.pdu.namedListScope,
     self.pdu.namedListDomain, self.pdu.namedListName,
     self.pdu.resultCount, self.pdu.failureCount,
     self.pdu.reportVariableScopes, self.pdu.reportVariableDomains,
     self.pdu.reportVariableNames, self.pdu.reportResultChoices,
     self.pdu.reportResultErrors, self.pdu.reportResultRaws,
+    self.pdu.reportResultRawLengths,
+    self.pdu.reportResultRawTruncated,
     self.pdu.reportResultIntegerValues,
     self.pdu.reportResultFloatingValues,
     self.pdu.reportResultBooleanValues,
@@ -831,7 +853,7 @@ on ICCP_MMS::ProvenancedMMSpdu::%done if (
     self.pdu.serviceTag,
     # These aggregate ObjectName fields are populated for an explicit Write
     # target, but remain empty for a NamedVariableList selector. The complete
-    # selector is retained by mms_write_evidence_v1 above.
+    # selector is retained by mms_write_evidence_v2 above.
     self.pdu.objectScope,
     self.pdu.objectDomain,
     self.pdu.firstIdentifier,

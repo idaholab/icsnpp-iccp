@@ -194,13 +194,9 @@ type InformationReportResultsEvidence: record {
     variable_scopes: vector of count;
     variable_domains: vector of string;
     variable_names: vector of string;
-    result_choices: vector of count;
-    result_errors: vector of int;
-    result_raws: vector of string;
-    result_integer_values: vector of int;
-    result_floating_values: vector of double;
-    result_boolean_values: vector of bool;
-    result_string_values: vector of string;
+    results: vector of MMSDataEvidence;
+    results_complete: bool;
+    exact_raw_metadata: bool;
 };
 
 type PointValueShapeEvidence: record {
@@ -233,6 +229,10 @@ function point_value_shape_available(
 
 global information_report_results_evidence:
     table[string, bool, count] of InformationReportResultsEvidence
+    &read_expire=association_state_timeout;
+
+global first_result_evidence:
+    table[string, bool, count, count] of MMSDataEvidence
     &read_expire=association_state_timeout;
 
 function information_report_results_available(
@@ -666,6 +666,70 @@ event ICCP::mms_identify_message_v2(
     ];
     }
 
+function store_information_report_results_evidence(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    exact_raw_metadata: bool)
+    {
+    local complete = result_count == |result_choices| &&
+        result_count == |result_errors| &&
+        result_count == |result_raws| &&
+        result_count == |result_raw_lengths| &&
+        result_count == |result_raw_truncated| &&
+        result_count == |result_integer_values| &&
+        result_count == |result_floating_values| &&
+        result_count == |result_boolean_values| &&
+        result_count == |result_string_values|;
+    local results: vector of MMSDataEvidence;
+    local index: count = 0;
+    while ( complete && index < result_count )
+        {
+        results[index] = [
+            $choice=result_choices[index], $error=result_errors[index],
+            $raw_prefix=result_raws[index],
+            $raw_length=result_raw_lengths[index],
+            $raw_truncated=result_raw_truncated[index],
+            $integer_value=result_integer_values[index],
+            $floating_value=result_floating_values[index],
+            $boolean_value=result_boolean_values[index],
+            $string_value=result_string_values[index]
+        ];
+        ++index;
+        }
+    local sequence = mms_parser_sequence(c, is_orig);
+    if ( ! exact_raw_metadata &&
+         [c$uid, is_orig, sequence] in
+            information_report_results_evidence &&
+         information_report_results_evidence[
+            c$uid, is_orig, sequence]$exact_raw_metadata )
+        return;
+    information_report_results_evidence[c$uid, is_orig, sequence] = [
+        $access_choice=access_choice,
+        $list_scope=list_scope, $list_domain=list_domain,
+        $list_name=list_name, $result_count=result_count,
+        $failure_count=failure_count,
+        $variable_scopes=variable_scopes,
+        $variable_domains=variable_domains,
+        $variable_names=variable_names,
+        $results=results, $results_complete=complete,
+        $exact_raw_metadata=exact_raw_metadata
+    ];
+    }
+
+## Deprecated compatibility adapter. Packet-derived reports use v3.
 event ICCP::mms_information_report_results_v2(
     c: connection, is_orig: bool, access_choice: count,
     list_scope: count, list_domain: string, list_name: string,
@@ -682,21 +746,67 @@ event ICCP::mms_information_report_results_v2(
     result_string_values: vector of string,
     provenance: count) &priority=20
     {
-    local sequence = mms_parser_sequence(c, is_orig);
-    information_report_results_evidence[c$uid, is_orig, sequence] = [
-        $access_choice=access_choice,
-        $list_scope=list_scope, $list_domain=list_domain,
-        $list_name=list_name, $result_count=result_count,
-        $failure_count=failure_count,
-        $variable_scopes=variable_scopes,
-        $variable_domains=variable_domains,
-        $variable_names=variable_names,
-        $result_choices=result_choices,
-        $result_errors=result_errors, $result_raws=result_raws,
-        $result_integer_values=result_integer_values,
-        $result_floating_values=result_floating_values,
-        $result_boolean_values=result_boolean_values,
-        $result_string_values=result_string_values
+    local raw_lengths: vector of count;
+    local raw_truncated: vector of bool;
+    local index: count = 0;
+    while ( index < |result_raws| )
+        {
+        raw_lengths[index] = |result_raws[index]|;
+        raw_truncated[index] =
+            |result_raws[index]| > max_logged_result_raw_bytes;
+        ++index;
+        }
+    store_information_report_results_evidence(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        raw_lengths, raw_truncated, result_integer_values,
+        result_floating_values, result_boolean_values,
+        result_string_values, F);
+    }
+
+event ICCP::mms_information_report_results_v3(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    provenance: count) &priority=20
+    {
+    store_information_report_results_evidence(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        result_raw_lengths, result_raw_truncated, result_integer_values,
+        result_floating_values, result_boolean_values,
+        result_string_values, T);
+    }
+
+event ICCP::mms_first_result_evidence_v1(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    service_tag: count, choice: count, raw_prefix: string,
+    raw_length: count, raw_truncated: bool, integer_value: int,
+    floating_value: double, provenance: count) &priority=20
+    {
+    if ( pdu_type != 1 || service_tag != 4 || invoke_id < 0 ) return;
+    first_result_evidence[
+        c$uid, is_orig, mms_parser_sequence(c, is_orig),
+        int_to_count(invoke_id)
+    ] = [
+        $choice=choice, $error=-1, $raw_prefix=raw_prefix,
+        $raw_length=raw_length, $raw_truncated=raw_truncated,
+        $integer_value=integer_value, $floating_value=floating_value,
+        $boolean_value=F, $string_value=""
     ];
     }
 
@@ -2849,28 +2959,27 @@ function block_data_special_value_valid(
     evidence: InformationReportResultsEvidence, index: count,
     name: string): bool
     {
-    if ( index >= |evidence$result_choices| ||
-         index >= |evidence$result_raws| ||
-         index >= |evidence$result_integer_values| )
-        return F;
+    if ( index >= |evidence$results| ) return F;
 
-    local choice = evidence$result_choices[index];
-    local raw = evidence$result_raws[index];
-    local value = evidence$result_integer_values[index];
+    local result = evidence$results[index];
+    local choice = result$choice;
+    local raw = result$raw_prefix;
+    local value = result$integer_value;
     if ( name == "Transfer_Set_Name" )
         # Per-result nested structure is not available in this bounded event;
         # require the exact outer MMS Structure shape and retain an explicitly
         # unverified-content result below.
-        return choice == 2 && |raw| > 0;
+        return choice == 2 && result$raw_length > 0;
     if ( name == "DSConditions_Detected" )
-        return choice == 4 && |raw| == 2 &&
+        return choice == 4 && result$raw_length == 2 &&
             bytestring_to_count(sub_bytes(raw, 1, 1)) == 3 &&
             (bytestring_to_count(sub_bytes(raw, 2, 1)) & 0x07) == 0;
     if ( name == "Event_Code_Detected" )
-        return choice == 5 && |raw| >= 1 && |raw| <= 2 &&
+        return choice == 5 && result$raw_length >= 1 &&
+            result$raw_length <= 2 &&
             value >= -32768 && value <= 32767;
     if ( name == "Transfer_Set_Time_Stamp" )
-        return choice == 5 && |raw| == 4 && value >= 0;
+        return choice == 5 && result$raw_length == 4 && value >= 0;
     return F;
     }
 
@@ -2911,8 +3020,8 @@ function assess_block_data_report(
     local index: count = 0;
     while ( index < evidence$result_count )
         {
-        if ( evidence$result_choices[index] == 0 ||
-             evidence$result_errors[index] >= 0 )
+        if ( evidence$results[index]$choice == 0 ||
+             evidence$results[index]$error >= 0 )
             return block_data_deviation("failed_result");
         local scope = evidence$variable_scopes[index];
         local domain = evidence$variable_domains[index];
@@ -2940,10 +3049,11 @@ function assess_block_data_report(
         return block_data_deviation("missing_payload");
     if ( payload_count != 1 )
         return block_data_deviation("multiple_payloads");
-    if ( evidence$result_choices[payload_index] != 9 )
+    if ( evidence$results[payload_index]$choice != 9 )
         return block_data_deviation("payload_not_octet_string");
-    local payload = evidence$result_raws[payload_index];
-    if ( |payload| == 0 )
+    local payload_result = evidence$results[payload_index];
+    local payload = payload_result$raw_prefix;
+    if ( payload_result$raw_length == 0 )
         return block_data_deviation("empty_payload");
     local rule = bytestring_to_count(sub_bytes(payload, 1, 1));
     if ( rule > 2 )
@@ -3234,6 +3344,32 @@ event ICCP::mms_information_report_results_v2(
         selected_name] = selected;
     }
 
+event ICCP::mms_information_report_results_v3(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    provenance: count) &priority=5
+    {
+    event ICCP::mms_information_report_results_v2(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        result_integer_values, result_floating_values,
+        result_boolean_values, result_string_values, provenance);
+    }
+
 function pending_transfer_support_count(uid: string): count
     {
     local total: count = 0;
@@ -3330,13 +3466,8 @@ function information_report_pairing_status(
     c: connection, server_is_orig: bool,
     evidence: InformationReportResultsEvidence): string
     {
-    if ( evidence$result_count != |evidence$result_choices| ||
-         evidence$result_count != |evidence$result_errors| ||
-         evidence$result_count != |evidence$result_raws| ||
-         evidence$result_count != |evidence$result_integer_values| ||
-         evidence$result_count != |evidence$result_floating_values| ||
-         evidence$result_count != |evidence$result_boolean_values| ||
-         evidence$result_count != |evidence$result_string_values| )
+    if ( ! evidence$results_complete ||
+         evidence$result_count != |evidence$results| )
         return "count_mismatch";
 
     if ( evidence$access_choice == 0 )
@@ -3386,7 +3517,7 @@ function information_report_loggable_result_count(
     local logged: count = 0;
     local index: count = 0;
     local limit = information_report_result_limit();
-    while ( index < |evidence$result_choices| && logged < limit )
+    while ( index < |evidence$results| && logged < limit )
         {
         if ( information_report_result_identity(
                  c, server_is_orig, evidence, index)$known )
@@ -3444,8 +3575,8 @@ function write_information_message_observation(
         c, is_orig, evidence, 1);
     local capacity = information_buffer_capacity(buffer$name);
     local header_valid = evidence$failure_count == 0 &&
-        |evidence$result_choices| == 2 &&
-        evidence$result_choices[0] == 2 &&
+        |evidence$results| == 2 &&
+        evidence$results[0]$choice == 2 &&
         shape?$component_choices && shape?$component_raws &&
         shape?$component_integer_values &&
         |shape$component_choices| == 4 &&
@@ -3462,10 +3593,9 @@ function write_information_message_observation(
         }
 
     local buffer_valid = evidence$failure_count == 0 &&
-        |evidence$result_choices| == 2 &&
-        |evidence$result_raws| == 2 &&
-        evidence$result_choices[1] == 9 &&
-        |evidence$result_raws[1]| == capacity;
+        |evidence$results| == 2 &&
+        evidence$results[1]$choice == 9 &&
+        evidence$results[1]$raw_length == capacity;
     local size_valid = header_valid &&
         shape$component_integer_values[3] >= 0 &&
         int_to_count(shape$component_integer_values[3]) <= capacity;
@@ -3483,8 +3613,8 @@ function write_information_message_observation(
         $pairing_status=information_report_pairing_status(
             c, is_orig, evidence),
         $buffer_capacity=capacity,
-        $buffer_length=|evidence$result_raws| > 1 ?
-            |evidence$result_raws[1]| : 0
+        $buffer_length=|evidence$results| > 1 ?
+            evidence$results[1]$raw_length : 0
     ];
     if ( header$domain != "" ) rec$first_variable_domain = header$domain;
     if ( evidence$access_choice == 1 )
@@ -3520,40 +3650,28 @@ function add_information_report_result_to_info(
     {
     rec$result_index = index;
     rec$result_count = evidence$result_count;
-    if ( index < |evidence$result_choices| )
-        rec$result_type = evidence$result_choices[index];
-    if ( index < |evidence$result_errors| &&
-         evidence$result_errors[index] >= 0 )
-        rec$result_error = evidence$result_errors[index];
-    if ( index < |evidence$result_raws| &&
-         evidence$result_raws[index] != "" )
+    if ( index >= |evidence$results| ) return rec;
+    local result = evidence$results[index];
+    rec$result_type = result$choice;
+    if ( result$error >= 0 ) rec$result_error = result$error;
+    if ( result$raw_prefix != "" )
         {
         rec$result_raw = bounded_information_report_result_raw(
-            evidence$result_raws[index]);
-        rec$result_raw_truncated =
-            |evidence$result_raws[index]| > max_logged_result_raw_bytes;
+            result$raw_prefix);
+        rec$result_raw_truncated = result$raw_truncated ||
+            |result$raw_prefix| > max_logged_result_raw_bytes;
         }
-    if ( index < |evidence$result_choices| )
-        {
-        local choice = evidence$result_choices[index];
-        if ( (choice == 5 || choice == 6 || choice == 13 || choice == 17) &&
-             index < |evidence$result_integer_values| )
-            rec$integer_value = evidence$result_integer_values[index];
-        else if ( choice == 7 &&
-                  index < |evidence$result_floating_values| )
-            rec$floating_value = evidence$result_floating_values[index];
-        else if ( choice == 3 &&
-                  index < |evidence$result_boolean_values| )
-            rec$boolean_value = evidence$result_boolean_values[index];
-        else if ( (choice == 10 || choice == 16) &&
-                  index < |evidence$result_string_values| )
-            rec$string_value = bounded_detail(
-                evidence$result_string_values[index]);
-        else if ( choice == 15 &&
-                  index < |evidence$result_string_values| )
-            rec$object_identifier_value = bounded_detail(
-                evidence$result_string_values[index]);
-        }
+    if ( result$choice == 5 || result$choice == 6 ||
+         result$choice == 13 || result$choice == 17 )
+        rec$integer_value = result$integer_value;
+    else if ( result$choice == 7 )
+        rec$floating_value = result$floating_value;
+    else if ( result$choice == 3 )
+        rec$boolean_value = result$boolean_value;
+    else if ( result$choice == 10 || result$choice == 16 )
+        rec$string_value = bounded_detail(result$string_value);
+    else if ( result$choice == 15 )
+        rec$object_identifier_value = bounded_detail(result$string_value);
     return rec;
     }
 
@@ -3569,7 +3687,7 @@ function write_additional_information_report_results(
         c, is_orig, evidence);
     local standardized_information_message =
         information_message_candidate(c, is_orig, evidence);
-    while ( index < |evidence$result_choices| && emitted < limit )
+    while ( index < |evidence$results| && emitted < limit )
         {
         local identity = information_report_result_identity(
             c, is_orig, evidence, index);
@@ -3603,48 +3721,40 @@ function write_additional_information_report_results(
                     $result_count=evidence$result_count,
                     $result_pairing_status=pairing_status,
                     $result_index=index,
-                    $result_type=evidence$result_choices[index],
+                    $result_type=evidence$results[index]$choice,
                     $provenance=provenance,
                     $stream_completeness=output_completeness(c, is_orig)
                 ];
                 if ( identity$domain != "" )
                     result$object_domain = identity$domain;
-                if ( index < |evidence$result_errors| &&
-                     evidence$result_errors[index] >= 0 )
-                    result$result_error = evidence$result_errors[index];
-                if ( index < |evidence$result_raws| &&
-                     evidence$result_raws[index] != "" &&
+                local value_evidence = evidence$results[index];
+                if ( value_evidence$error >= 0 )
+                    result$result_error = value_evidence$error;
+                if ( value_evidence$raw_prefix != "" &&
                      information_buffer_capacity(identity$name) == 0 )
                     {
                     result$result_raw =
                         bounded_information_report_result_raw(
-                            evidence$result_raws[index]);
+                            value_evidence$raw_prefix);
                     result$result_raw_truncated =
-                        |evidence$result_raws[index]| >
+                        value_evidence$raw_truncated ||
+                        |value_evidence$raw_prefix| >
                             max_logged_result_raw_bytes;
                     }
-                local choice = evidence$result_choices[index];
-                if ( (choice == 5 || choice == 6 || choice == 13 ||
-                      choice == 17) &&
-                     index < |evidence$result_integer_values| )
-                    result$integer_value =
-                        evidence$result_integer_values[index];
-                else if ( choice == 7 &&
-                          index < |evidence$result_floating_values| )
-                    result$floating_value =
-                        evidence$result_floating_values[index];
-                else if ( choice == 3 &&
-                          index < |evidence$result_boolean_values| )
-                    result$boolean_value =
-                        evidence$result_boolean_values[index];
-                else if ( (choice == 10 || choice == 16) &&
-                          index < |evidence$result_string_values| )
+                local choice = value_evidence$choice;
+                if ( choice == 5 || choice == 6 || choice == 13 ||
+                     choice == 17 )
+                    result$integer_value = value_evidence$integer_value;
+                else if ( choice == 7 )
+                    result$floating_value = value_evidence$floating_value;
+                else if ( choice == 3 )
+                    result$boolean_value = value_evidence$boolean_value;
+                else if ( choice == 10 || choice == 16 )
                     result$string_value = bounded_detail(
-                        evidence$result_string_values[index]);
-                else if ( choice == 15 &&
-                          index < |evidence$result_string_values| )
+                        value_evidence$string_value);
+                else if ( choice == 15 )
                     result$object_identifier_value = bounded_detail(
-                        evidence$result_string_values[index]);
+                        value_evidence$string_value);
                 write_iccp_object_record(c, result);
                 }
             ++emitted;
@@ -4072,6 +4182,20 @@ event ICCP::mms_transfer_support_value_message(
         return;
         }
     if ( pdu_type != 1 ) return;
+    local first_result_length = |first_result_raw|;
+    local first_result_truncated =
+        |first_result_raw| > max_logged_result_raw_bytes;
+    local first_result_sequence = mms_parser_sequence(c, is_orig);
+    if ( [c$uid, is_orig, first_result_sequence, key] in
+         first_result_evidence )
+        {
+        local exact_first_result = first_result_evidence[
+            c$uid, is_orig, first_result_sequence, key];
+        first_result_length = exact_first_result$raw_length;
+        first_result_truncated = exact_first_result$raw_truncated ||
+            |exact_first_result$raw_prefix| >
+                max_logged_result_raw_bytes;
+        }
     local request_is_orig = ! is_orig;
     if ( [c$uid, request_is_orig, key] !in pending_transfer_support )
         {
@@ -4102,10 +4226,10 @@ event ICCP::mms_transfer_support_value_message(
     local is_event_code = prior$name == "Event_Code_Detected";
     if ( is_timestamp )
         decoded = decoded && first_result_choice == 5 &&
-            |first_result_raw| == 4 && first_integer_value >= 0;
+            first_result_length == 4 && first_integer_value >= 0;
     else if ( is_event_code )
         decoded = decoded && first_result_choice == 5 &&
-            |first_result_raw| >= 1 && |first_result_raw| <= 2 &&
+            first_result_length >= 1 && first_result_length <= 2 &&
             first_integer_value >= -32768 && first_integer_value <= 32767;
     else
         decoded = decoded && first_result_choice == 2 &&
@@ -4140,10 +4264,11 @@ event ICCP::mms_transfer_support_value_message(
         {
         rec$result_raw = bounded_information_report_result_raw(
             first_result_raw);
-        rec$result_raw_truncated =
-            |first_result_raw| > max_logged_result_raw_bytes;
+        rec$result_raw_truncated = first_result_truncated;
         }
     write_transfer_record(c, is_orig, rec);
+    delete first_result_evidence[
+        c$uid, is_orig, first_result_sequence, key];
     }
 
 event ICCP::mms_ds_transfer_set_message_v1(
@@ -5052,6 +5177,14 @@ function process_transfer_set_message(
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
          access_choice == 1 && list_name != "" )
         {
+        local report_sequence = mms_parser_sequence(c, is_orig);
+        local rich_results_available =
+            information_report_results_available(
+                c, is_orig, report_sequence);
+        local rich_results: vector of MMSDataEvidence;
+        if ( rich_results_available )
+            rich_results = information_report_results_evidence[
+                c$uid, is_orig, report_sequence]$results;
         local report: TransferInfo = [
             $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
             $action="report", $outcome=failure_count == 0 ?
@@ -5102,8 +5235,22 @@ function process_transfer_set_message(
                 paired$first_variable_name = membership$names[index];
                 if ( index < |result_errors| && result_errors[index] >= 0 )
                     paired$result_error = result_errors[index];
-                if ( index < |result_raws| && result_raws[index] != "" &&
-                     information_buffer_capacity(membership$names[index]) == 0 )
+                if ( index < |rich_results| &&
+                     rich_results[index]$raw_prefix != "" &&
+                     information_buffer_capacity(
+                        membership$names[index]) == 0 )
+                    {
+                    paired$result_raw = bounded_information_report_result_raw(
+                        rich_results[index]$raw_prefix);
+                    paired$result_raw_truncated =
+                        rich_results[index]$raw_truncated ||
+                        |rich_results[index]$raw_prefix| >
+                            max_logged_result_raw_bytes;
+                    }
+                else if ( index < |result_raws| &&
+                          result_raws[index] != "" &&
+                          information_buffer_capacity(
+                            membership$names[index]) == 0 )
                     {
                     paired$result_raw = bounded_information_report_result_raw(
                         result_raws[index]);
@@ -6472,7 +6619,7 @@ function process_mms_message(
         rec$result_pairing_status = information_report_pairing_status(
             c, is_orig, report_evidence);
 
-        if ( |report_evidence$result_choices| > 0 )
+        if ( |report_evidence$results| > 0 )
             {
             local first_identity = information_report_result_identity(
                 c, is_orig, report_evidence, 0);
@@ -6667,7 +6814,7 @@ function process_mms_message(
             information_report_result_identity(
                 c, is_orig, remaining_report_evidence, 0);
         local skip_first_result =
-            |remaining_report_evidence$result_choices| > 0 &&
+            |remaining_report_evidence$results| > 0 &&
             first_remaining_identity$known;
         write_additional_information_report_results(
             c, is_orig, remaining_report_evidence, skip_first_result,
@@ -6934,6 +7081,25 @@ function clear_mms_deferred_evidence(uid_to_clear: string)
         delete control_read_value_shape_evidence[
             uid_to_clear, read_directions[read_index],
             read_sequences[read_index], read_invokes[read_index]];
+
+    local first_result_directions: vector of bool;
+    local first_result_sequences: vector of count;
+    local first_result_invokes: vector of count;
+    for ( [result_uid, result_is_orig, result_sequence, result_invoke] in
+          first_result_evidence )
+        if ( result_uid == uid_to_clear )
+            {
+            first_result_directions[|first_result_directions|] =
+                result_is_orig;
+            first_result_sequences[|first_result_sequences|] =
+                result_sequence;
+            first_result_invokes[|first_result_invokes|] = result_invoke;
+            }
+    for ( result_index in first_result_sequences )
+        delete first_result_evidence[
+            uid_to_clear, first_result_directions[result_index],
+            first_result_sequences[result_index],
+            first_result_invokes[result_index]];
     clear_control_value_shapes(uid_to_clear, T);
     clear_control_value_shapes(uid_to_clear, F);
     }

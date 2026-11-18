@@ -1515,16 +1515,12 @@ const MAX_DATA_NESTING_DEPTH: uint64 = 8;
 const MAX_DATA_VALUE_LENGTH: uint64 = 1024 * 1024;
 const MAX_DATA_VALUE_BYTES: uint64 = 4 * 1024 * 1024;
 const MAX_DATA_RAW_PREFIX_LENGTH: uint64 = 256;
-const MAX_DATA_RAW_COMPAT_LENGTH: uint64 = 257;
 
 function dataRawPrefix(value: bytes): bytes {
-    # Keep one bounded sentinel byte beyond the logged prefix so existing
-    # Zeek policy continues to identify truncation until Phase 3 transports
-    # rawLength and rawTruncated directly.
-    if (|value| <= MAX_DATA_RAW_COMPAT_LENGTH)
+    if (|value| <= MAX_DATA_RAW_PREFIX_LENGTH)
         return value;
 
-    return value.sub(0, MAX_DATA_RAW_COMPAT_LENGTH);
+    return value.sub(0, MAX_DATA_RAW_PREFIX_LENGTH);
 }
 
 function reserveDataValue(
@@ -2446,6 +2442,8 @@ public type AccessResultList = unit(length: uint64) {
     var failureCount: uint64 = 0;
     var firstChoice: uint64 = 0;
     var firstRaw: bytes;
+    var firstRawLength: uint64 = 0;
+    var firstRawTruncated: bool = False;
     var firstComponentIntegerCount: uint64 = 0;
     var firstComponentInteger: int64 = 0;
     var secondComponentInteger: int64 = 0;
@@ -2492,6 +2490,8 @@ public type AccessResultList = unit(length: uint64) {
         if (self.count == 1 && $$.success) {
             self.firstChoice = $$.choice;
             self.firstRaw = $$.raw;
+            self.firstRawLength = $$.rawLength;
+            self.firstRawTruncated = $$.rawTruncated;
             self.firstComponentIntegerCount =
                 $$.componentIntegerCount;
             self.firstComponentInteger =
@@ -2542,6 +2542,8 @@ public type ReadResponse = unit(length: uint64) {
     var failureCount: uint64 = 0;
     var firstResultChoice: uint64 = 0;
     var firstResultRaw: bytes;
+    var firstResultRawLength: uint64 = 0;
+    var firstResultRawTruncated: bool = False;
     var firstResultComponentIntegerCount: uint64 = 0;
     var firstResultFirstInteger: int64 = 0;
     var firstResultSecondInteger: int64 = 0;
@@ -2602,6 +2604,8 @@ public type ReadResponse = unit(length: uint64) {
             self.failureCount = $$.failureCount;
             self.firstResultChoice = $$.firstChoice;
             self.firstResultRaw = $$.firstRaw;
+            self.firstResultRawLength = $$.firstRawLength;
+            self.firstResultRawTruncated = $$.firstRawTruncated;
             self.firstResultComponentIntegerCount =
                 $$.firstComponentIntegerCount;
             self.firstResultFirstInteger =
@@ -3342,6 +3346,8 @@ public type InformationReport = unit(length: uint64) {
     var firstVariableName: string;
     var firstResultChoice: uint64 = 0;
     var firstResultRaw: bytes;
+    var firstResultRawLength: uint64 = 0;
+    var firstResultRawTruncated: bool = False;
     var firstResultComponentIntegerCount: uint64 = 0;
     var firstResultFirstInteger: int64 = 0;
     var firstResultSecondInteger: int64 = 0;
@@ -3367,6 +3373,8 @@ public type InformationReport = unit(length: uint64) {
     var resultChoices: vector<uint64>;
     var resultErrors: vector<int64>;
     var resultRaws: vector<bytes>;
+    var resultRawLengths: vector<uint64>;
+    var resultRawTruncated: vector<bool>;
     var variableScopes: vector<uint64>;
     var variableDomains: vector<string>;
     var variableNames: vector<string>;
@@ -3402,6 +3410,8 @@ public type InformationReport = unit(length: uint64) {
         self.failureCount = $$.failureCount;
         self.firstResultChoice = $$.firstChoice;
         self.firstResultRaw = $$.firstRaw;
+        self.firstResultRawLength = $$.firstRawLength;
+        self.firstResultRawTruncated = $$.firstRawTruncated;
         self.firstResultComponentIntegerCount =
             $$.firstComponentIntegerCount;
         self.firstResultFirstInteger = $$.firstComponentInteger;
@@ -3432,6 +3442,8 @@ public type InformationReport = unit(length: uint64) {
         self.resultChoices = $$.resultChoices;
         self.resultErrors = $$.resultErrors;
         self.resultRaws = $$.resultRaws;
+        self.resultRawLengths = $$.resultRawLengths;
+        self.resultRawTruncated = $$.resultRawTruncated;
         self.resultIntegerValues = $$.resultIntegerValues;
         self.resultFloatingValues = $$.resultFloatingValues;
         self.resultBooleanValues = $$.resultBooleanValues;
@@ -4416,6 +4428,8 @@ public type MMSpdu = unit {
     var writeTargetNames: vector<string>;
     var writeValueChoices: vector<uint64>;
     var writeValueRaws: vector<bytes>;
+    var writeValueRawLengths: vector<uint64>;
+    var writeValueRawTruncated: vector<bool>;
     var writeValueIntegerValues: vector<int64>;
     var writeValueFloatingValues: vector<real>;
     var writeValueBooleanValues: vector<bool>;
@@ -4498,6 +4512,8 @@ public type MMSpdu = unit {
     var firstVariableName: string;
     var firstResultChoice: uint64 = 0;
     var firstResultRaw: bytes;
+    var firstResultRawLength: uint64 = 0;
+    var firstResultRawTruncated: bool = False;
     var firstResultComponentIntegerCount: uint64 = 0;
     var firstResultFirstInteger: int64 = 0;
     var firstResultSecondInteger: int64 = 0;
@@ -4522,6 +4538,8 @@ public type MMSpdu = unit {
     var reportResultChoices: vector<uint64>;
     var reportResultErrors: vector<int64>;
     var reportResultRaws: vector<bytes>;
+    var reportResultRawLengths: vector<uint64>;
+    var reportResultRawTruncated: vector<bool>;
     var reportVariableScopes: vector<uint64>;
     var reportVariableDomains: vector<string>;
     var reportVariableNames: vector<string>;
@@ -4727,6 +4745,8 @@ public type MMSpdu = unit {
                 self.resultCount - self.failureCount;
             self.firstResultChoice = $$.firstResultChoice;
             self.firstResultRaw = $$.firstResultRaw;
+            self.firstResultRawLength = $$.firstResultRawLength;
+            self.firstResultRawTruncated = $$.firstResultRawTruncated;
             self.firstResultComponentIntegerCount =
                 $$.firstResultComponentIntegerCount;
             self.firstResultFirstInteger =
@@ -4816,6 +4836,8 @@ public type MMSpdu = unit {
             self.writeTargetNames = $$.targetNames;
             self.writeValueChoices = $$.valueChoices;
             self.writeValueRaws = $$.valueRaws;
+            self.writeValueRawLengths = $$.valueRawLengths;
+            self.writeValueRawTruncated = $$.valueRawTruncated;
             self.writeValueIntegerValues = $$.valueIntegerValues;
             self.writeValueFloatingValues = $$.valueFloatingValues;
             self.writeValueBooleanValues = $$.valueBooleanValues;
@@ -5057,6 +5079,8 @@ public type MMSpdu = unit {
             }
             self.firstResultChoice = $$.firstResultChoice;
             self.firstResultRaw = $$.firstResultRaw;
+            self.firstResultRawLength = $$.firstResultRawLength;
+            self.firstResultRawTruncated = $$.firstResultRawTruncated;
             self.firstResultComponentIntegerCount =
                 $$.firstResultComponentIntegerCount;
             self.firstResultFirstInteger =
@@ -5102,6 +5126,8 @@ public type MMSpdu = unit {
             self.reportResultChoices = $$.resultChoices;
             self.reportResultErrors = $$.resultErrors;
             self.reportResultRaws = $$.resultRaws;
+            self.reportResultRawLengths = $$.resultRawLengths;
+            self.reportResultRawTruncated = $$.resultRawTruncated;
             self.reportVariableScopes = $$.variableScopes;
             self.reportVariableDomains = $$.variableDomains;
             self.reportVariableNames = $$.variableNames;

@@ -42,13 +42,7 @@ type PendingWriteEvidence: record {
     target_scopes: vector of count;
     target_domains: vector of string;
     target_names: vector of string;
-    value_choices: vector of count;
-    value_raws: vector of string;
-    value_raw_truncated: vector of bool;
-    value_integer_values: vector of int;
-    value_floating_values: vector of double;
-    value_boolean_values: vector of bool;
-    value_string_values: vector of string;
+    values: vector of MMSDataEvidence;
 };
 
 global pending_write_evidence:
@@ -334,28 +328,26 @@ function add_write_value(
     rec: ControlInfo, pending: PendingWriteEvidence,
     index: count): ControlInfo
     {
-    if ( index >= |pending$value_choices| ) return rec;
-    local choice = pending$value_choices[index];
-    rec$value_type = choice;
-    if ( index < |pending$value_raws| )
-        rec$value_raw = evidence_bounded_raw(pending$value_raws[index]);
-    if ( index < |pending$value_raw_truncated| )
-        rec$value_raw_truncated = pending$value_raw_truncated[index];
-    if ( (choice == 5 || choice == 6 || choice == 13 || choice == 17) &&
-         index < |pending$value_integer_values| )
-        rec$integer_value = pending$value_integer_values[index];
-    else if ( choice == 7 && index < |pending$value_floating_values| )
-        rec$floating_value = pending$value_floating_values[index];
-    else if ( choice == 3 && index < |pending$value_boolean_values| )
-        rec$boolean_value = pending$value_boolean_values[index];
-    else if ( (choice == 10 || choice == 16) &&
-              index < |pending$value_string_values| )
-        rec$string_value = evidence_bounded_text(
-            pending$value_string_values[index]);
+    if ( index >= |pending$values| ) return rec;
+    local value = pending$values[index];
+    rec$value_type = value$choice;
+    if ( value$raw_prefix != "" )
+        rec$value_raw = evidence_bounded_raw(value$raw_prefix);
+    rec$value_raw_truncated = value$raw_truncated ||
+        |value$raw_prefix| > max_logged_result_raw_bytes;
+    if ( value$choice == 5 || value$choice == 6 || value$choice == 13 ||
+         value$choice == 17 )
+        rec$integer_value = value$integer_value;
+    else if ( value$choice == 7 )
+        rec$floating_value = value$floating_value;
+    else if ( value$choice == 3 )
+        rec$boolean_value = value$boolean_value;
+    else if ( value$choice == 10 || value$choice == 16 )
+        rec$string_value = evidence_bounded_text(value$string_value);
     return rec;
     }
 
-event ICCP::mms_write_evidence_v1(
+event ICCP::mms_write_evidence_v2(
     c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
     access_choice: count, selector_scope: count,
     selector_domain: string, selector_name: string,
@@ -365,6 +357,8 @@ event ICCP::mms_write_evidence_v1(
     target_names: vector of string,
     value_choices: vector of count,
     value_raws: vector of string,
+    value_raw_lengths: vector of count,
+    value_raw_truncated: vector of bool,
     value_integer_values: vector of int,
     value_floating_values: vector of double,
     value_boolean_values: vector of bool,
@@ -382,6 +376,8 @@ event ICCP::mms_write_evidence_v1(
         local values_complete =
             value_count == |value_choices| &&
             value_count == |value_raws| &&
+            value_count == |value_raw_lengths| &&
+            value_count == |value_raw_truncated| &&
             value_count == |value_integer_values| &&
             value_count == |value_floating_values| &&
             value_count == |value_boolean_values| &&
@@ -409,13 +405,7 @@ event ICCP::mms_write_evidence_v1(
         local retained_target_scopes: vector of count;
         local retained_target_domains: vector of string;
         local retained_target_names: vector of string;
-        local retained_choices: vector of count;
-        local retained_raws: vector of string;
-        local retained_raw_truncated: vector of bool;
-        local retained_integers: vector of int;
-        local retained_floats: vector of double;
-        local retained_booleans: vector of bool;
-        local retained_strings: vector of string;
+        local retained_values: vector of MMSDataEvidence;
         local index: count = 0;
         while ( index < request_logged_count )
             {
@@ -425,15 +415,17 @@ event ICCP::mms_write_evidence_v1(
                 retained_target_domains[index] = target_domains[index];
             if ( index < |target_names| )
                 retained_target_names[index] = target_names[index];
-            retained_choices[index] = value_choices[index];
-            retained_raws[index] = evidence_raw_prefix(value_raws[index]);
-            retained_raw_truncated[index] =
-                |value_raws[index]| > max_logged_result_raw_bytes;
-            retained_integers[index] = value_integer_values[index];
-            retained_floats[index] = value_floating_values[index];
-            retained_booleans[index] = value_boolean_values[index];
-            retained_strings[index] = evidence_bounded_text(
-                value_string_values[index]);
+            retained_values[index] = [
+                $choice=value_choices[index], $error=-1,
+                $raw_prefix=evidence_raw_prefix(value_raws[index]),
+                $raw_length=value_raw_lengths[index],
+                $raw_truncated=value_raw_truncated[index],
+                $integer_value=value_integer_values[index],
+                $floating_value=value_floating_values[index],
+                $boolean_value=value_boolean_values[index],
+                $string_value=evidence_bounded_text(
+                    value_string_values[index])
+            ];
             ++index;
             }
 
@@ -447,13 +439,7 @@ event ICCP::mms_write_evidence_v1(
             $target_scopes=retained_target_scopes,
             $target_domains=retained_target_domains,
             $target_names=retained_target_names,
-            $value_choices=retained_choices,
-            $value_raws=retained_raws,
-            $value_raw_truncated=retained_raw_truncated,
-            $value_integer_values=retained_integers,
-            $value_floating_values=retained_floats,
-            $value_boolean_values=retained_booleans,
-            $value_string_values=retained_strings
+            $values=retained_values
         ];
 
         local request_outcome = request_pairing == "evidence_mismatch" ?
@@ -637,6 +623,47 @@ event ICCP::mms_write_evidence_v1(
         delete invalid_write_evidence_invokes[
             c$uid, request_is_orig, key];
         }
+    }
+
+## Deprecated compatibility adapter. Packet-derived writes use v2 so exact
+## parser length/truncation metadata is preserved.
+event ICCP::mms_write_evidence_v1(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    access_choice: count, selector_scope: count,
+    selector_domain: string, selector_name: string,
+    target_count_known: bool, target_count: count, value_count: count,
+    target_scopes: vector of count,
+    target_domains: vector of string,
+    target_names: vector of string,
+    value_choices: vector of count,
+    value_raws: vector of string,
+    value_integer_values: vector of int,
+    value_floating_values: vector of double,
+    value_boolean_values: vector of bool,
+    value_string_values: vector of string,
+    result_count: count,
+    result_successes: vector of bool,
+    result_errors: vector of int,
+    provenance: count)
+    {
+    local raw_lengths: vector of count;
+    local raw_truncated: vector of bool;
+    local index: count = 0;
+    while ( index < |value_raws| )
+        {
+        raw_lengths[index] = |value_raws[index]|;
+        raw_truncated[index] =
+            |value_raws[index]| > max_logged_result_raw_bytes;
+        ++index;
+        }
+    event ICCP::mms_write_evidence_v2(
+        c, is_orig, pdu_type, invoke_id, access_choice, selector_scope,
+        selector_domain, selector_name, target_count_known, target_count,
+        value_count, target_scopes, target_domains, target_names,
+        value_choices, value_raws, raw_lengths, raw_truncated,
+        value_integer_values, value_floating_values, value_boolean_values,
+        value_string_values, result_count, result_successes, result_errors,
+        provenance);
     }
 
 event ICCP::mms_type_description_evidence_v1(

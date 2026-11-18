@@ -908,10 +908,10 @@ runFileCaseInvalid "${dataParser}" \
     "MMS Data value exceeds configured length limit"
 runFileCaseValid "${dataParser}" \
     "${testBuildDir}/data-value-at-limit.bin" \
-    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=257"
+    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=256"
 runFileCaseValid "${dataEvidenceParser}" \
     "${testBuildDir}/data-value-at-limit.bin" \
-    "choice=32 retained=257 original=1048576 truncated=true"
+    "choice=32 retained=256 original=1048576 truncated=true"
 runCaseValid "${dataEvidenceParser}" "a1068301ff8501fe" \
     "choice=1 retained=0 original=6 truncated=true"
 runCaseValid "${dataEvidenceParser}" "850101" \
