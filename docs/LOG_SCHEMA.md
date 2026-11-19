@@ -7,15 +7,18 @@ records the public field names, types, optionality, and compatibility rules.
 The latest completed release-candidate schema gate matched all 277 documented
 fields to their owning declarations across the five public ICCP log records.
 
-The log path is `iccp`. One record is emitted for the completed analyzer stream
-and for each completed Presentation, ACSE, or MMS value delivered through the
-parser event interface. A direction that observes a TCP gap, parser recovery,
-or a plausible capture-boundary-incomplete record after at least one valid
-record also emits a terminal `direction_summary` record. For partial/no-FIN
-captures, packet-start/completion state plus connection-removal fallback
-provides this verdict even when suspended Spicy completion hooks do not run. A
-dash in Zeek's ASCII output represents an unset optional field, not an empty
-value observed on the wire.
+The log path is `iccp`. Once a connection qualifies as TASE.2, one record is
+emitted for the completed analyzer stream and for each completed Presentation,
+ACSE, or MMS value delivered through the parser event interface. Up to
+`ICCP::max_pending_iccp_log_records` general records are retained before
+qualification and flushed if later traffic supplies the required evidence;
+otherwise they are discarded. A direction that observes a TCP gap, parser
+recovery, or a plausible capture-boundary-incomplete record after at least one
+valid record also emits a terminal `direction_summary` record. For
+partial/no-FIN captures, packet-start/completion state plus connection-removal
+fallback provides this verdict even when suspended Spicy completion hooks do
+not run. A dash in Zeek's ASCII output represents an unset optional field, not
+an empty value observed on the wire.
 
 ## Connection and parser fields
 

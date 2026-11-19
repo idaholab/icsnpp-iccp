@@ -18,6 +18,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 global inspect_deferred_cleanup: event(c: connection);
 global lifecycle_begin: event(c: connection);
 global lifecycle_after_not_finished: event(c: connection);

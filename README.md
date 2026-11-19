@@ -84,7 +84,10 @@ Spicy-generated C++ files can require significant memory while compiling. Use
 ## Protocol Detection and Custom Ports
 
 The ICCP analyzer uses port-based registration. The default server port is
-`102/tcp`.
+`102/tcp`. Registration only attaches the parser; the port, TPKT, COTP,
+Session, and generic MMS layers do not by themselves confirm ICCP. The
+analyzer confirms the protocol only after a semantically valid MMS request
+contains an exact standardized TASE.2 object identity.
 
 To retain the default and add another ICCP server port, extend
 `ICCP::iccp_ports` in a Zeek site policy loaded after this package:
@@ -101,10 +104,15 @@ Port configuration is read when Zeek starts. Restart or redeploy the affected
 Zeek processes after changing the set. This package does not provide a payload
 signature for discovering ICCP on otherwise unregistered ports.
 
+This qualification prevents S7comm and non-TASE.2 MMS protocols such as IEC
+61850 from adding `iccp_tcp` to `conn.log` or producing ICCP-family logs merely
+because they use `102/tcp` or share lower protocol layers.
+
 ## Logging Capabilities
 
 All five logs are enabled by default and can be disabled independently without
-disabling protocol parsing or state tracking.
+disabling protocol parsing or state tracking. Enabled logs emit records only
+after the connection has qualified as TASE.2.
 
 | Log | Configuration | Description |
 | --- | --- | --- |
@@ -114,9 +122,16 @@ disabling protocol parsing or state tracking.
 | `iccp_controls.log` | `ICCP::enable_iccp_controls_log` | Control candidates and supported classified Write, Select, Tag, Operate, and device-action activity. |
 | `iccp_errors.log` | `ICCP::enable_iccp_errors_log` | Correlated MMS confirmed-service errors and diagnostics. |
 
-The parser keeps uncertain or incomplete evidence explicit. A well-formed MMS
-operation may be logged without being classified as ICCP when the required
-association, object, type, direction, or transaction evidence is unavailable.
+Before qualification, the parser retains at most
+`ICCP::max_pending_iccp_log_records` general records per connection (64 by
+default). It flushes them if later traffic supplies TASE.2 evidence and
+discards them otherwise. Uncertain evidence within a qualified connection
+remains explicit instead of receiving a guessed classification.
+
+`ICCP::require_tase2_output_qualification` defaults to `T`. Setting it to `F`
+restores generic MMS diagnostic output for specialized troubleshooting, but
+can produce ICCP-family logs for other protocols sharing the registered port
+and is not recommended for normal deployment.
 
 See [`docs/LOG_SCHEMA.md`](docs/LOG_SCHEMA.md) for all fields, types,
 optionality, limits, and compatibility rules.

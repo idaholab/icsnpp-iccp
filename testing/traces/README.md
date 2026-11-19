@@ -12,4 +12,6 @@ production traffic.
 
 The `non-iccp` directory contains traffic for other protocols that share
 ICCP's registered ports. It verifies that upper-layer protocol qualification
-prevents those connections from producing ICCP logs.
+prevents those connections from producing ICCP logs. This includes both
+S7comm traffic and a valid IEC 61850 MMS Identify exchange that does not carry
+TASE.2 evidence.

@@ -4,6 +4,8 @@
 # @TEST-EXEC: zeek-cut layer message_type status context_id application_context payload_length authentication_present authentication_length is_opaque association_kind endpoint_role operation invoke_id service_tag detail < iccp.log > output
 # @TEST-EXEC: btest-diff output
 
+redef ICCP::require_tase2_output_qualification = F;
+
 event zeek_init() &priority=-5
     {
     local c: connection = [

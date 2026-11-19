@@ -9,6 +9,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 function notify(c: connection, condition: string, condition_scope: count,
                 severity: int, have_state: bool, state: int,
                 lost: bool, action_result: bool)

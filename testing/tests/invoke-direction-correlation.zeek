@@ -11,6 +11,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 global inspect_pending: event(c: connection, invoke_id: int);
 global seed_specialized_pending: event(c: connection, invoke_id: int);
 global inspect_specialized_pending: event(c: connection, invoke_id: int);

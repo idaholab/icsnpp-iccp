@@ -15,6 +15,7 @@
 # @TEST-EXEC: btest-diff types
 
 redef ICCP::legacy_gva_direct_event_compatibility = T;
+redef ICCP::require_tase2_output_qualification = F;
 
 event zeek_init() &priority=-5
     {

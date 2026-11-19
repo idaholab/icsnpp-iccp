@@ -11,3 +11,4 @@
 
 redef ICCP::max_logged_information_report_results = 2;
 redef ICCP::max_logged_result_raw_bytes = 0;
+redef ICCP::require_tase2_output_qualification = F;

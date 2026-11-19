@@ -15,6 +15,7 @@
 module ICCP;
 
 export {
+    const require_tase2_output_qualification = T &redef;
     const max_pending_iccp_log_records = 64 &redef;
     const max_pending_confirmed = 128 &redef;
     const max_pending_controls = 128 &redef;
@@ -44,6 +45,12 @@ global pending_iccp_log_record_counts: table[string] of count;
 
 function write_iccp_record(c: connection, rec: Info)
     {
+    if ( ! require_tase2_output_qualification )
+        {
+        Log::write(ICCP::LOG, rec);
+        return;
+        }
+
     if ( c$uid in iccp_logging_eligible )
         {
         Log::write(ICCP::LOG, rec);
@@ -84,6 +91,37 @@ function enable_iccp_logging(c: connection)
         }
 
     delete pending_iccp_log_record_counts[c$uid];
+    }
+
+function iccp_output_is_qualified(c: connection): bool
+    {
+    return ! require_tase2_output_qualification ||
+           c$uid in iccp_logging_eligible ||
+           association_kind(c) == "tase2";
+    }
+
+function write_iccp_object_record(c: connection, rec: ObjectInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::OBJECT_LOG, rec);
+    }
+
+function write_iccp_control_record(c: connection, rec: ControlInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::CONTROL_LOG, rec);
+    }
+
+function write_iccp_transfer_record(c: connection, rec: TransferInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::TRANSFER_LOG, rec);
+    }
+
+function write_iccp_error_record(c: connection, rec: ErrorInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::ERROR_LOG, rec);
     }
 
 event ICCP::stream_connection_cleanup_v1(uid: string) &priority=-50
@@ -460,7 +498,7 @@ function write_control_record_with_provenance(
     {
     rec$provenance = provenance;
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::CONTROL_LOG, rec);
+    write_iccp_control_record(c, rec);
     }
 
 function write_control_record(c: connection, is_orig: bool, rec: ControlInfo)
@@ -474,7 +512,7 @@ function write_transfer_record_with_provenance(
     {
     rec$provenance = provenance;
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::TRANSFER_LOG, rec);
+    write_iccp_transfer_record(c, rec);
     }
 
 function write_transfer_record(c: connection, is_orig: bool,
@@ -488,7 +526,7 @@ function write_error_record(c: connection, is_orig: bool, rec: ErrorInfo)
     {
     rec$provenance = mms_provenance(c, is_orig);
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::ERROR_LOG, rec);
+    write_iccp_error_record(c, rec);
     }
 
 function event_action_classification(condition_name: string): string
@@ -3607,7 +3645,7 @@ function write_additional_information_report_results(
                           index < |evidence$result_string_values| )
                     result$object_identifier_value = bounded_detail(
                         evidence$result_string_values[index]);
-                Log::write(ICCP::OBJECT_LOG, result);
+                write_iccp_object_record(c, result);
                 }
             ++emitted;
             }
@@ -5530,6 +5568,11 @@ function write_object_observation(rec: Info)
     if ( ! rec?$object_name || ! rec?$object_scope )
         return;
 
+    if ( require_tase2_output_qualification &&
+         rec$uid !in iccp_logging_eligible &&
+         rec$association_kind != "tase2" )
+        return;
+
     local object_rec: ObjectInfo = [
         $ts=rec$ts, $uid=rec$uid, $id=rec$id, $is_orig=rec$is_orig,
         $association_kind=rec$association_kind,
@@ -5614,12 +5657,6 @@ event ICCP::presentation_message_v2(
     dispatch_acse: bool, dispatch_mms: bool, inferred_mms: bool,
     payload_length: count)
     {
-    # TPKT/COTP are shared with S7comm on 102/tcp. A structurally recognized
-    # Presentation value is the first upper-layer evidence that this stream is
-    # eligible for ICCP diagnostics, including rejected and truncated MMS.
-    if ( recognized )
-        enable_iccp_logging(c);
-
     local status = "decoded";
     local detail = "";
 
@@ -6672,7 +6709,10 @@ event ICCP::mms_message(
     result_integer_value: int, result_floating_value: double,
     result_flags_raw: string, result_timestamp_value: int)
     {
-    if ( recognized && semantic_decoded )
+    if ( ! require_tase2_output_qualification ||
+         association_kind(c) == "tase2" ||
+         (recognized && semantic_decoded && pdu_type == 0 &&
+          invoke_id >= 0 && tase2_object_evidence) )
         enable_iccp_logging(c);
 
     local parser_delivery = consume_mms_parser_marker(c, is_orig);
