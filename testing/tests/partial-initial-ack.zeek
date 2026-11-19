@@ -23,3 +23,5 @@
 # @TEST-EXEC: if test -e initial-run/iccp.log; then zeek-cut layer < initial-run/iccp.log | awk 'BEGIN { n = 0 } $1 == "mms" { ++n } END { print "initial_mms", n }' > output; else printf 'initial_mms\t0\n' > output; fi
 # @TEST-EXEC: zeek-cut is_orig layer message_type status invoke_id operation provenance stream_completeness < released-run/iccp.log | awk 'BEGIN { OFS="\t" } { print "released", $0 }' >> output
 # @TEST-EXEC: btest-diff output
+
+redef ICCP::require_tase2_output_qualification = F;

@@ -60,6 +60,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 # Seed unmistakable state after ordinary connection-removal handlers but
 # before completeness publishes its terminal verdict. The deferred UID-only
 # cleanup must leave this state visible to stream_finished, then remove all of

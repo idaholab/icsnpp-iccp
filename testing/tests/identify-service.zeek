@@ -8,10 +8,12 @@
 # @TEST-EXEC: bash ${SCRIPTS}/generate-synthetic-pcap mismatch.pcap identify-direction-mismatch > /dev/null
 # @TEST-EXEC: cmp matched.pcap matched-copy.pcap
 # @TEST-EXEC: mkdir matched-run unmatched-run mismatch-run
-# @TEST-EXEC: cd matched-run && zeek -Cr ../matched.pcap ${PACKAGE}/__load__.zeek
-# @TEST-EXEC: cd unmatched-run && zeek -Cr ../unmatched.pcap ${PACKAGE}/__load__.zeek
-# @TEST-EXEC: cd mismatch-run && zeek -Cr ../mismatch.pcap ${PACKAGE}/__load__.zeek
+# @TEST-EXEC: cd matched-run && zeek -Cr ../matched.pcap ${PACKAGE}/__load__.zeek %INPUT
+# @TEST-EXEC: cd unmatched-run && zeek -Cr ../unmatched.pcap ${PACKAGE}/__load__.zeek %INPUT
+# @TEST-EXEC: cd mismatch-run && zeek -Cr ../mismatch.pcap ${PACKAGE}/__load__.zeek %INPUT
 # @TEST-EXEC: zeek-cut is_orig operation invoke_id identify_outcome vendor_name model_name revision abstract_syntax_count first_abstract_syntax provenance < matched-run/iccp.log | awk '$2 == "identify"' > output
 # @TEST-EXEC: zeek-cut is_orig operation invoke_id identify_outcome vendor_name model_name revision abstract_syntax_count first_abstract_syntax provenance < unmatched-run/iccp.log | awk '$2 == "identify"' >> output
 # @TEST-EXEC: zeek-cut is_orig operation invoke_id identify_outcome vendor_name model_name revision abstract_syntax_count first_abstract_syntax provenance < mismatch-run/iccp.log | awk '$2 == "identify"' >> output
 # @TEST-EXEC: btest-diff output
+
+redef ICCP::require_tase2_output_qualification = F;

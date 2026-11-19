@@ -29,6 +29,8 @@
 # @TEST-EXEC: btest-diff legacy-unmatched
 # @TEST-EXEC: btest-diff legacy-midstream
 
+redef ICCP::require_tase2_output_qualification = F;
+
 global legacy_presentation_events: count = 0;
 
 event ICCP::presentation_message(
