@@ -71,7 +71,8 @@ assert_count 1 '7="2.2.1.0.1"'
 (
     cd "${comparison_dir}"
     ZEEK_PLUGIN_PATH="${build_dir}" zeek -Cr "${pcap}" \
-        "${project_dir}/scripts/__load__.zeek"
+        "${project_dir}/scripts/__load__.zeek" \
+        -e 'redef ICCP::require_tase2_output_qualification = F;'
 )
 
 # CP and CPA carry their AARQ/AARE PDVs on negotiated ACSE context 1. The MMS

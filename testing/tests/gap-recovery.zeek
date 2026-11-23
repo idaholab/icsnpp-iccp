@@ -44,6 +44,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 # These assertions intentionally produce no output on success. The new PCAP
 # has four originator TPKTs begun but only three completed: CR, association CP,
 # an Identify request, and then the incomplete replacement CR. This identifies

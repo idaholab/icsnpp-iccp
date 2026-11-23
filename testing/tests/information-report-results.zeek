@@ -32,3 +32,5 @@
 # @TEST-EXEC: test "$(zeek-cut result_count < mismatch-run/iccp.log | grep -cv '^-$' || true)" -eq 0
 # @TEST-EXEC: test ! -e incomplete-run/iccp_objects.log
 # @TEST-EXEC: test ! -e untracked-run/iccp_objects.log
+
+redef ICCP::require_tase2_output_qualification = F;

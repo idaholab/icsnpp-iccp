@@ -15,6 +15,8 @@
 module ICCP;
 
 export {
+    const require_tase2_output_qualification = T &redef;
+    const max_pending_iccp_log_records = 64 &redef;
     const max_pending_confirmed = 128 &redef;
     const max_pending_controls = 128 &redef;
     const max_pending_transfer_sets = 128 &redef;
@@ -36,6 +38,108 @@ export {
     ## directly. Packet-driven production learning always uses mms_gva_message_v3.
     option legacy_gva_direct_event_compatibility = F;
 }
+
+global iccp_logging_eligible: set[string];
+global pending_iccp_log_records: table[string, count] of Info;
+global pending_iccp_log_record_counts: table[string] of count;
+
+function write_iccp_record(c: connection, rec: Info)
+    {
+    if ( ! require_tase2_output_qualification )
+        {
+        Log::write(ICCP::LOG, rec);
+        return;
+        }
+
+    if ( c$uid in iccp_logging_eligible )
+        {
+        Log::write(ICCP::LOG, rec);
+        return;
+        }
+
+    local record_count: count = 0;
+    if ( c$uid in pending_iccp_log_record_counts )
+        record_count = pending_iccp_log_record_counts[c$uid];
+
+    if ( record_count >= max_pending_iccp_log_records )
+        return;
+
+    pending_iccp_log_records[c$uid, record_count] = rec;
+    pending_iccp_log_record_counts[c$uid] = record_count + 1;
+    }
+
+function enable_iccp_logging(c: connection)
+    {
+    if ( c$uid in iccp_logging_eligible )
+        return;
+
+    iccp_logging_eligible += { c$uid };
+
+    if ( c$uid !in pending_iccp_log_record_counts )
+        return;
+
+    local record_count = pending_iccp_log_record_counts[c$uid];
+    local index: count = 0;
+    while ( index < record_count )
+        {
+        if ( [c$uid, index] in pending_iccp_log_records )
+            {
+            Log::write(ICCP::LOG, pending_iccp_log_records[c$uid, index]);
+            delete pending_iccp_log_records[c$uid, index];
+            }
+        ++index;
+        }
+
+    delete pending_iccp_log_record_counts[c$uid];
+    }
+
+function iccp_output_is_qualified(c: connection): bool
+    {
+    return ! require_tase2_output_qualification ||
+           c$uid in iccp_logging_eligible ||
+           association_kind(c) == "tase2";
+    }
+
+function write_iccp_object_record(c: connection, rec: ObjectInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::OBJECT_LOG, rec);
+    }
+
+function write_iccp_control_record(c: connection, rec: ControlInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::CONTROL_LOG, rec);
+    }
+
+function write_iccp_transfer_record(c: connection, rec: TransferInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::TRANSFER_LOG, rec);
+    }
+
+function write_iccp_error_record(c: connection, rec: ErrorInfo)
+    {
+    if ( iccp_output_is_qualified(c) )
+        Log::write(ICCP::ERROR_LOG, rec);
+    }
+
+event ICCP::stream_connection_cleanup_v1(uid: string) &priority=-50
+    {
+    if ( uid in pending_iccp_log_record_counts )
+        {
+        local record_count = pending_iccp_log_record_counts[uid];
+        local index: count = 0;
+        while ( index < record_count )
+            {
+            delete pending_iccp_log_records[uid, index];
+            ++index;
+            }
+        delete pending_iccp_log_record_counts[uid];
+        }
+
+    iccp_logging_eligible -= { uid };
+    }
 
 type PendingConfirmed: record {
     service_tag: count;
@@ -394,7 +498,7 @@ function write_control_record_with_provenance(
     {
     rec$provenance = provenance;
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::CONTROL_LOG, rec);
+    write_iccp_control_record(c, rec);
     }
 
 function write_control_record(c: connection, is_orig: bool, rec: ControlInfo)
@@ -408,7 +512,7 @@ function write_transfer_record_with_provenance(
     {
     rec$provenance = provenance;
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::TRANSFER_LOG, rec);
+    write_iccp_transfer_record(c, rec);
     }
 
 function write_transfer_record(c: connection, is_orig: bool,
@@ -422,7 +526,7 @@ function write_error_record(c: connection, is_orig: bool, rec: ErrorInfo)
     {
     rec$provenance = mms_provenance(c, is_orig);
     rec$stream_completeness = output_completeness(c, is_orig);
-    Log::write(ICCP::ERROR_LOG, rec);
+    write_iccp_error_record(c, rec);
     }
 
 function event_action_classification(condition_name: string): string
@@ -3541,7 +3645,7 @@ function write_additional_information_report_results(
                           index < |evidence$result_string_values| )
                     result$object_identifier_value = bounded_detail(
                         evidence$result_string_values[index]);
-                Log::write(ICCP::OBJECT_LOG, result);
+                write_iccp_object_record(c, result);
                 }
             ++emitted;
             }
@@ -5464,6 +5568,11 @@ function write_object_observation(rec: Info)
     if ( ! rec?$object_name || ! rec?$object_scope )
         return;
 
+    if ( require_tase2_output_qualification &&
+         rec$uid !in iccp_logging_eligible &&
+         rec$association_kind != "tase2" )
+        return;
+
     local object_rec: ObjectInfo = [
         $ts=rec$ts, $uid=rec$uid, $id=rec$id, $is_orig=rec$is_orig,
         $association_kind=rec$association_kind,
@@ -5526,7 +5635,7 @@ function write_object_observation(rec: Info)
 event ICCP::connection_message(c: connection, is_orig: bool)
     {
     local rec = base_record(c, is_orig, "stream", "complete", "parsed", 0);
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 event ICCP::stream_finished(
@@ -5539,7 +5648,7 @@ event ICCP::stream_finished(
     rec$detail = status == "non_exhaustive" ?
         "capture gaps, parser recovery, or an incomplete record prevent an exhaustive direction-level output claim" :
         "direction-level observation verdict";
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 event ICCP::presentation_message_v2(
@@ -5581,7 +5690,7 @@ event ICCP::presentation_message_v2(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 # Preserve the established parser-to-Zeek event for downstream consumers while
@@ -5639,7 +5748,7 @@ event ICCP::acse_message(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     }
 
 function capture_mms_processing_context(
@@ -6545,7 +6654,7 @@ function process_mms_message(
     if ( detail != "" )
         rec$detail = bounded_detail(detail);
 
-    Log::write(ICCP::LOG, rec);
+    write_iccp_record(c, rec);
     write_object_observation(rec);
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
          information_report_results_available(
@@ -6600,6 +6709,12 @@ event ICCP::mms_message(
     result_integer_value: int, result_floating_value: double,
     result_flags_raw: string, result_timestamp_value: int)
     {
+    if ( ! require_tase2_output_qualification ||
+         association_kind(c) == "tase2" ||
+         (recognized && semantic_decoded && pdu_type == 0 &&
+          invoke_id >= 0 && tase2_object_evidence) )
+        enable_iccp_logging(c);
+
     local parser_delivery = consume_mms_parser_marker(c, is_orig);
     if ( parser_delivery && recognized && semantic_decoded &&
          pdu_type == 0 && service_tag == 4 && invoke_id >= 0 )

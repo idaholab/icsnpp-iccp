@@ -17,25 +17,30 @@ module Zeek_ICCP;
 import spicy;
 import zeek;
 import ICCP;
+import ICCP_TYPES;
 import ICCP_MMS;
 
-# RFC 1006/COTP/Session are shared by protocols other than ICCP. Confirm only
-# after a complete MMS PDU has passed both structural and service-level
-# semantic validation, including the direct-transfer recovery path. This still
-# confirms long-lived streams before the enclosing TCP direction reaches %done
-# without labeling an arbitrary context-specific BER value as ICCP.
+# RFC 1006/COTP/Session/MMS are shared by protocols other than ICCP. Confirm
+# only after a semantically valid MMS request carries an exact standardized
+# TASE.2 object identity. Policy performs the stronger correlated-response
+# promotion separately, but a parser hook cannot confirm retrospectively after
+# that Zeek-side correlation completes.
 on ICCP_MMS::ProvenancedMMSpdu::%done {
     if (
         ICCP_MMS::protocolConfirmationIsValid(
             self.pdu.recognized,
             self.pdu.semanticDecoded
+        ) &&
+        ICCP_TYPES::isTase2ObjectEvidenceForMms(
+            self.pdu.pduType,
+            self.pdu.serviceTag,
+            self.pdu.objectScope,
+            self.pdu.firstIdentifier,
+            self.pdu.firstVariableScope,
+            self.pdu.firstVariableName
         )
     )
         zeek::confirm_protocol();
-}
-
-on ICCP::ICCP_Connection::%done {
-    spicy::accept_input();
 }
 
 on ICCP::ICCP_Connection::%error(msg: string) {

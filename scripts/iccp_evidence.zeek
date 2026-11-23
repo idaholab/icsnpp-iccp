@@ -219,7 +219,7 @@ event ICCP::mms_get_name_list_evidence_v1(
             c, is_orig, invoke_id, "name_list_request", provenance);
         request_log = add_name_list_request(request_log, name_request_state);
         request_log$result_pairing_status = outcome;
-        Log::write(ICCP::OBJECT_LOG, request_log);
+        write_iccp_object_record(c, request_log);
         return;
         }
 
@@ -258,7 +258,7 @@ event ICCP::mms_get_name_list_evidence_v1(
     summary$omitted_result_count = omitted;
     summary$more_follows = more_follows;
     summary$result_pairing_status = response_status;
-    Log::write(ICCP::OBJECT_LOG, summary);
+    write_iccp_object_record(c, summary);
 
     local index: count = 0;
     while ( index < logged )
@@ -272,7 +272,7 @@ event ICCP::mms_get_name_list_evidence_v1(
         item$result_index = index;
         item$more_follows = more_follows;
         item$result_pairing_status = response_status;
-        Log::write(ICCP::OBJECT_LOG, item);
+        write_iccp_object_record(c, item);
         ++index;
         }
 
@@ -505,7 +505,7 @@ event ICCP::mms_write_evidence_v1(
         request_summary$omitted_item_count =
             value_count >= request_logged_count ?
                 value_count - request_logged_count : 0;
-        Log::write(ICCP::CONTROL_LOG, request_summary);
+        write_iccp_control_record(c, request_summary);
 
         index = 0;
         while ( index < request_logged_count )
@@ -518,7 +518,7 @@ event ICCP::mms_write_evidence_v1(
                 request_item, request_evidence, index);
             request_item = add_write_value(
                 request_item, request_evidence, index);
-            Log::write(ICCP::CONTROL_LOG, request_item);
+            write_iccp_control_record(c, request_item);
             ++index;
             }
         return;
@@ -602,7 +602,7 @@ event ICCP::mms_write_evidence_v1(
     if ( have_request )
         summary = add_write_identity(summary, matched_write, 0);
     summary$pairing_status = pairing;
-    Log::write(ICCP::CONTROL_LOG, summary);
+    write_iccp_control_record(c, summary);
 
     result_index = 0;
     while ( result_index < retained_count )
@@ -627,7 +627,7 @@ event ICCP::mms_write_evidence_v1(
             item = add_write_value(item, matched_write, result_index);
             item$pairing_status = pairing;
             }
-        Log::write(ICCP::CONTROL_LOG, item);
+        write_iccp_control_record(c, item);
         ++result_index;
         }
 
@@ -684,7 +684,7 @@ event ICCP::mms_type_description_evidence_v1(
     # This event carries its own provenance.  Do not route through the legacy
     # helper, which intentionally derives provenance from aggregate-event
     # state for unversioned hooks.
-    Log::write(ICCP::TRANSFER_LOG, rec);
+    write_iccp_transfer_record(c, rec);
     }
 
 event ICCP::mms_error_message(

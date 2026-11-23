@@ -5,6 +5,8 @@
 # @TEST-EXEC: zeek-cut classification outcome invoke_id object_scope object_domain object_name variable_count data_count data_node_count result_count success_count failure_count error_class error_class_code error_code provenance < iccp_controls.log > output
 # @TEST-EXEC: btest-diff output
 
+redef ICCP::require_tase2_output_qualification = F;
+
 event zeek_init() &priority=-5
     {
     local c: connection = [

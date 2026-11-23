@@ -16,6 +16,8 @@
 
 module ICCP;
 
+redef require_tase2_output_qualification = F;
+
 global lifecycle_probe: event(c: connection, label: string);
 global lifecycle_after_connect: event(c: connection);
 global lifecycle_after_abort: event(c: connection);

@@ -9,13 +9,15 @@
 # @TEST-EXEC: cmp release.pcap release-copy.pcap
 # @TEST-EXEC: cmp abort.pcap abort-copy.pcap
 # @TEST-EXEC: mkdir release-run abort-run
-# @TEST-EXEC: cd release-run && zeek -Cr ../release.pcap ${PACKAGE}/__load__.zeek
-# @TEST-EXEC: cd abort-run && zeek -Cr ../abort.pcap ${PACKAGE}/__load__.zeek
+# @TEST-EXEC: cd release-run && zeek -Cr ../release.pcap ${PACKAGE}/__load__.zeek %INPUT
+# @TEST-EXEC: cd abort-run && zeek -Cr ../abort.pcap ${PACKAGE}/__load__.zeek %INPUT
 # @TEST-EXEC: zeek-cut layer message_type status association_phase reason diagnostic_code < release-run/iccp.log > output
 # @TEST-EXEC: zeek-cut layer message_type status association_phase reason diagnostic_code < abort-run/iccp.log >> output
 # @TEST-EXEC: btest-diff output
 
 module ICCP;
+
+redef require_tase2_output_qualification = F;
 
 # This assertion intentionally runs before the production ACSE handlers.  It
 # catches a lifecycle marker emitted by a competing APDU %done hook: that

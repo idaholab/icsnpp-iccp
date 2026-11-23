@@ -42,8 +42,11 @@ the boundary of any release claim are recorded in
 
 ## Classification and trust behavior
 
-A well-formed MMS operation can be logged without being classified as ICCP.
-The association values are:
+By default, a well-formed generic MMS operation is not sufficient to produce
+ICCP-family logs. Output requires exact standardized TASE.2 object evidence or
+an association already established as TASE.2. General prequalification records
+are retained in a bounded per-connection buffer and emitted only if later
+traffic qualifies the connection. The association values are:
 
 | Value | Meaning |
 | --- | --- |
@@ -53,6 +56,8 @@ The association values are:
 
 Port numbers, familiar object spelling, isolated service tags, and plausible
 value shapes do not independently establish a more specific classification.
+The parser protocol confirmation uses exact standardized TASE.2 object
+identity rather than the shared TPKT, COTP, Session, or generic MMS layers.
 Depending on the operation, semantic classification can require confirmed
 association context, object namespace, configured bilateral type evidence,
 transaction identity, direction, value compatibility, or previously confirmed
@@ -69,6 +74,11 @@ cannot activate the configured alias. Some standardized aliases
 share the same wire shape, so wire shape alone cannot choose between them. The
 matcher compares recursive type choices, widths, packing, and child counts; it
 does not use optional structure-component names as type identity.
+
+`ICCP::require_tase2_output_qualification` can be redefined to `F` for generic
+MMS decoder diagnostics. That compatibility mode does not relax analyzer
+protocol confirmation, but it can emit ICCP-family records for non-TASE.2 MMS
+traffic and is not the production default.
 
 Correlation state is connection-scoped, bounded, and cleared at lifecycle
 boundaries and reported TCP gaps. Contradictory or ambiguous evidence remains

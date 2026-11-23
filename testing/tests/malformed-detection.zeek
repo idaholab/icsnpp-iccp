@@ -10,6 +10,8 @@
 # @TEST-EXEC: zeek -Cr valid.pcap ${PACKAGE}/__load__.zeek %INPUT >> output
 # @TEST-EXEC: btest-diff output
 
+redef ICCP::require_tase2_output_qualification = F;
+
 event ICCP::malformed_structure_v2(
     c: connection, reason: string, provenance: string)
     {

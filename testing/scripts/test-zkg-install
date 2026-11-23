@@ -278,7 +278,8 @@ bash "${scriptDir}/generate-synthetic-pcap" "${traceFile}"
     cd "${runDir}"
     ZEEKPATH="${testZeekPath}" \
     ZEEK_PLUGIN_PATH="${testPluginPath}" \
-        zeek -Cr "${traceFile}" packages
+        zeek -Cr "${traceFile}" packages \
+            -e 'redef ICCP::require_tase2_output_qualification = F;'
     zeek-cut layer message_type < iccp.log > installed-output
     grep -qx $'mms\t8' installed-output
     grep -qx $'mms\t9' installed-output
