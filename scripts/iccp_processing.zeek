@@ -7055,6 +7055,282 @@ function add_mms_basic_point_result(
     }
 
 
+type MMSMessageDisposition: record {
+    status: string;
+    detail: string;
+};
+
+function mms_message_disposition(
+    recognized: bool, semantic_decoded: bool, request_invoke_reused: bool,
+    response_correlation: string): MMSMessageDisposition
+    {
+    if ( ! recognized )
+        return [
+            $status="unsupported",
+            $detail="unrecognized MMS top-level PDU preserved"
+        ];
+
+    if ( ! semantic_decoded )
+        return [
+            $status="raw",
+            $detail="recognized MMS top-level PDU body preserved for semantic decoding"
+        ];
+
+    if ( request_invoke_reused )
+        return [
+            $status="invoke_reused",
+            $detail="caller reused an outstanding confirmed-request invoke ID"
+        ];
+
+    if ( response_correlation == "ambiguous_response" ||
+         response_correlation == "direction_mismatch" ||
+         response_correlation == "service_mismatch" )
+        return [
+            $status=response_correlation,
+            $detail=response_correlation == "ambiguous_response" ?
+                "response cannot be attributed after invoke-ID reuse" :
+                response_correlation == "direction_mismatch" ?
+                    "response direction does not match the pending caller" :
+                    "response service does not match the pending request"
+        ];
+
+    return [$status="decoded", $detail=""];
+    }
+
+function add_mms_identify_fields(
+    rec: Info, identity: IdentifyEvidence, pdu_type: count,
+    request_invoke_reused: bool, request_state_full: bool,
+    response_correlation: string): Info
+    {
+    if ( pdu_type == 0 )
+        rec$identify_outcome = request_invoke_reused ? "invoke_reused" :
+            request_state_full ? "state_limit" : "requested";
+    else
+        rec$identify_outcome = response_correlation;
+
+    if ( identity$vendor_name != "" )
+        rec$vendor_name = bounded_detail(identity$vendor_name);
+    if ( identity$model_name != "" )
+        rec$model_name = bounded_detail(identity$model_name);
+    if ( identity$revision != "" )
+        rec$revision = bounded_detail(identity$revision);
+    rec$abstract_syntax_count = identity$abstract_syntax_count;
+    if ( identity$first_abstract_syntax != "" )
+        rec$first_abstract_syntax = identity$first_abstract_syntax;
+
+    return rec;
+    }
+
+function add_mms_information_report_fields(
+    c: connection, is_orig: bool, rec: Info,
+    report_evidence: InformationReportResultsEvidence): Info
+    {
+    local logged_results = information_report_loggable_result_count(
+        c, is_orig, report_evidence);
+    rec$result_count = report_evidence$result_count;
+    rec$failure_count = report_evidence$failure_count;
+    rec$logged_result_count = logged_results;
+    rec$omitted_result_count =
+        report_evidence$result_count > logged_results ?
+            report_evidence$result_count - logged_results : 0;
+    rec$result_pairing_status = information_report_pairing_status(
+        c, is_orig, report_evidence);
+
+    if ( |report_evidence$results| == 0 )
+        return rec;
+
+    local first_identity = information_report_result_identity(
+        c, is_orig, report_evidence, 0);
+    if ( ! first_identity$known )
+        return rec;
+
+    # Preserve the established first-result label. Additional ordered result
+    # rows use information_report_result.
+    rec$transfer_kind = "information_report";
+    rec$object_scope = transfer_scope_name(first_identity$scope);
+    rec$object_name = first_identity$name;
+    if ( first_identity$domain != "" )
+        rec$object_domain = first_identity$domain;
+    rec$name_model = object_name_model(
+        c, is_orig, first_identity$scope, first_identity$domain,
+        first_identity$name, 0);
+    if ( information_message_candidate(c, is_orig, report_evidence) )
+        rec$name_model = "standardized";
+    rec$domain_kind = object_domain_kind(
+        c, is_orig, first_identity$scope, first_identity$domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, is_orig, first_identity$domain);
+    rec = add_information_report_result_to_info(rec, report_evidence, 0);
+    rec$result_pairing_status = information_report_pairing_status(
+        c, is_orig, report_evidence);
+
+    return rec;
+    }
+
+function add_mms_point_result_fields(
+    c: connection, is_orig: bool, rec: Info, pdu_type: count,
+    service_tag: count, unconfirmed_service_tag: count, invoke_id: int,
+    object_scope: count, object_domain: string, object_name: string,
+    object_category: count, first_result_type: count,
+    first_result_raw: string, result_integer_count: count,
+    result_first_integer: int, result_second_integer: int,
+    result_component_count: count, result_first_choice: count,
+    result_second_choice: count, result_third_choice: count,
+    result_integer_value: int, result_floating_value: double,
+    result_flags_raw: string, result_timestamp_value: int,
+    shape_available: bool, first_result_length: count,
+    first_component_length: count, second_component_length: count,
+    third_component_length: count, point_shape: PointValueShapeEvidence,
+    context: MMSProcessingContext): Info
+    {
+    if ( first_result_type == 0 ||
+         ! ((pdu_type == 1 && service_tag == 4 && invoke_id >= 0) ||
+            (pdu_type == 3 && unconfirmed_service_tag == 0 &&
+             object_name != "" && association_kind(c) == "tase2")) )
+        return rec;
+
+    local transfer_object: PendingRead;
+    if ( pdu_type == 3 )
+        {
+        transfer_object = [$scope=object_scope, $domain=object_domain,
+                           $name=object_name, $category=object_category];
+        rec$transfer_kind = "information_report";
+        }
+    else
+        {
+        transfer_object = [
+            $scope=context$read_scope, $domain=context$read_domain,
+            $name=context$read_name, $category=context$read_category
+        ];
+        rec$transfer_kind = "read_response";
+        }
+
+    if ( transfer_object$name == "" )
+        return rec;
+
+    rec$object_scope = transfer_object$scope == 0 ? "vcc" :
+                       transfer_object$scope == 1 ? "icc" : "aa";
+    rec$object_name = transfer_object$name;
+    if ( transfer_object$domain != "" )
+        rec$object_domain = transfer_object$domain;
+    rec$value_type = first_result_type;
+    local learned_point_type = learned_variable_type_name(
+        c, is_orig, transfer_object$scope, transfer_object$domain,
+        transfer_object$name);
+    # 802 IndicationPoint values are never AA-specific. Keep a configured
+    # AA-specific Data_* variable observable as generic MMS data instead of
+    # promoting it to an exact TASE.2 point.
+    if ( /^Data_/ in learned_point_type &&
+         ! standardized_point_control_scope(
+             transfer_object$scope, transfer_object$domain) )
+        learned_point_type = "";
+
+    if ( mms_special_result_applicable(
+             c, transfer_object, first_result_type,
+             first_result_raw, result_integer_count) )
+        rec = add_mms_special_result(
+            rec, transfer_object, first_result_raw,
+            result_first_integer, result_second_integer);
+    else if ( learned_point_type == "Data_Real" ||
+              learned_point_type == "Data_Discrete" ||
+              learned_point_type == "Data_State" ||
+              learned_point_type == "Data_StateSupplemental" )
+        rec = add_mms_basic_point_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_integer_value,
+            result_floating_value, shape_available, first_result_length);
+    else if ( learned_point_type == "Data_StateQ" ||
+              learned_point_type == "Data_StateSupplementalQ" ||
+              learned_point_type == "Data_RealQ" ||
+              learned_point_type == "Data_DiscreteQ" ||
+              learned_point_type == "Data_RealQTimeTag" ||
+              learned_point_type == "Data_DiscreteQTimeTag" ||
+              learned_point_type == "Data_StateQTimeTag" ||
+              learned_point_type == "Data_StateSupplementalQTimeTag" )
+        rec = add_mms_quality_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_component_count,
+            result_first_choice, result_second_choice,
+            result_third_choice, result_integer_value,
+            result_floating_value, result_flags_raw,
+            result_timestamp_value, shape_available,
+            first_component_length, second_component_length,
+            third_component_length, point_shape);
+    else if ( learned_point_type == "Data_RealExtended" ||
+              learned_point_type == "Data_DiscreteExtended" ||
+              learned_point_type == "Data_StateExtended" ||
+              learned_point_type == "Data_StateSupplementalExtended" ||
+              learned_point_type == "Data_RealQTimeTagExtended" ||
+              learned_point_type == "Data_DiscreteQTimeTagExtended" ||
+              learned_point_type == "Data_StateQTimeTagExtended" ||
+              learned_point_type ==
+                  "Data_StateSupplementalQTimeTagExtended" )
+        rec = add_mms_extended_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_integer_value,
+            result_floating_value, shape_available, point_shape);
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+
+    rec$name_model = object_name_model(
+        c, is_orig, transfer_object$scope, transfer_object$domain,
+        transfer_object$name, transfer_object$category);
+    rec$domain_kind = object_domain_kind(
+        c, is_orig, transfer_object$scope, transfer_object$domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, is_orig, transfer_object$domain);
+
+    return rec;
+    }
+
+function add_mms_object_metadata(
+    c: connection, is_orig: bool, rec: Info, pdu_type: count,
+    object_scope: count, object_domain: string, object_name: string,
+    object_category: count): Info
+    {
+    if ( object_name == "" )
+        return rec;
+
+    rec$object_scope = object_scope == 0 ? "vcc" :
+                       object_scope == 1 ? "icc" : "aa";
+    rec$object_name = object_name;
+    if ( object_domain != "" )
+        rec$object_domain = object_domain;
+
+    switch ( object_category )
+        {
+        case 1: rec$object_category = "supported_features"; break;
+        case 2: rec$object_category = "bilateral_table"; break;
+        case 3: rec$object_category = "transfer_support"; break;
+        case 4: rec$object_category = "information_message"; break;
+        case 5: rec$object_category = "tase2_version"; break;
+        default: rec$object_category = "unknown"; break;
+        }
+    if ( object_category == 0 && object_scope == 1 &&
+         object_name == "Event_Code_Detected" &&
+         valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        rec$object_category = "transfer_support";
+    if ( object_category == 0 &&
+         (object_scope == 0 || object_scope == 1) &&
+         information_buffer_capacity(object_name) > 0 &&
+         valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        rec$object_category = "information_message";
+    local object_server_is_orig = pdu_type == 0 ? ! is_orig : is_orig;
+    rec$name_model = object_name_model(
+        c, object_server_is_orig, object_scope, object_domain,
+        object_name, object_category);
+    rec$domain_kind = object_domain_kind(
+        c, object_server_is_orig, object_scope, object_domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, object_server_is_orig, object_domain);
+
+    return rec;
+    }
+
+
 function process_mms_message(
     c: connection, is_orig: bool, recognized: bool, pdu_type: count,
     semantic_decoded: bool, body_length: count, invoke_id: int,
@@ -7106,38 +7382,12 @@ function process_mms_message(
     local request_state_full = context$request_state_full;
     local response_correlation = context$response_correlation;
 
-    local status = "decoded";
-    local detail = "";
-
-    if ( ! recognized )
-        {
-        status = "unsupported";
-        detail = "unrecognized MMS top-level PDU preserved";
-        }
-    else if ( ! semantic_decoded )
-        {
-        status = "raw";
-        detail = "recognized MMS top-level PDU body preserved for semantic decoding";
-        }
-    else if ( request_invoke_reused )
-        {
-        status = "invoke_reused";
-        detail = "caller reused an outstanding confirmed-request invoke ID";
-        }
-    else if ( response_correlation == "ambiguous_response" ||
-              response_correlation == "direction_mismatch" ||
-              response_correlation == "service_mismatch" )
-        {
-        status = response_correlation;
-        detail = response_correlation == "ambiguous_response" ?
-            "response cannot be attributed after invoke-ID reuse" :
-            response_correlation == "direction_mismatch" ?
-                "response direction does not match the pending caller" :
-                "response service does not match the pending request";
-        }
+    local disposition = mms_message_disposition(
+        recognized, semantic_decoded, request_invoke_reused,
+        response_correlation);
 
     local rec = base_record(c, is_orig, "mms", fmt("%d", pdu_type),
-                            status, body_length);
+                            disposition$status, body_length);
     rec$provenance = context$provenance;
     if ( invoke_id >= 0 )
         rec$invoke_id = invoke_id;
@@ -7157,21 +7407,9 @@ function process_mms_message(
         local identity = identify_evidence[
             c$uid, is_orig, context$parser_sequence, pdu_type,
             identify_key];
-        if ( pdu_type == 0 )
-            rec$identify_outcome = request_invoke_reused ? "invoke_reused" :
-                request_state_full ? "state_limit" : "requested";
-        else
-            rec$identify_outcome = response_correlation;
-
-        if ( identity$vendor_name != "" )
-            rec$vendor_name = bounded_detail(identity$vendor_name);
-        if ( identity$model_name != "" )
-            rec$model_name = bounded_detail(identity$model_name);
-        if ( identity$revision != "" )
-            rec$revision = bounded_detail(identity$revision);
-        rec$abstract_syntax_count = identity$abstract_syntax_count;
-        if ( identity$first_abstract_syntax != "" )
-            rec$first_abstract_syntax = identity$first_abstract_syntax;
+        rec = add_mms_identify_fields(
+            rec, identity, pdu_type, request_invoke_reused,
+            request_state_full, response_correlation);
         delete identify_evidence[
             c$uid, is_orig, context$parser_sequence, pdu_type,
             identify_key];
@@ -7187,198 +7425,28 @@ function process_mms_message(
         local report_evidence =
             information_report_results_evidence[
                 c$uid, is_orig, context$parser_sequence];
-        local logged_results = information_report_loggable_result_count(
-            c, is_orig, report_evidence);
-        rec$result_count = report_evidence$result_count;
-        rec$failure_count = report_evidence$failure_count;
-        rec$logged_result_count = logged_results;
-        rec$omitted_result_count =
-            report_evidence$result_count > logged_results ?
-                report_evidence$result_count - logged_results : 0;
-        rec$result_pairing_status = information_report_pairing_status(
-            c, is_orig, report_evidence);
-
-        if ( |report_evidence$results| > 0 )
-            {
-            local first_identity = information_report_result_identity(
-                c, is_orig, report_evidence, 0);
-            if ( first_identity$known )
-                {
-                # Preserve the established first-result label. Additional
-                # ordered result rows use information_report_result.
-                rec$transfer_kind = "information_report";
-                rec$object_scope = transfer_scope_name(first_identity$scope);
-                rec$object_name = first_identity$name;
-                if ( first_identity$domain != "" )
-                    rec$object_domain = first_identity$domain;
-                rec$name_model = object_name_model(
-                    c, is_orig, first_identity$scope, first_identity$domain,
-                    first_identity$name, 0);
-                if ( information_message_candidate(
-                         c, is_orig, report_evidence) )
-                    rec$name_model = "standardized";
-                rec$domain_kind = object_domain_kind(
-                    c, is_orig, first_identity$scope,
-                    first_identity$domain);
-                rec$bilateral_domain = is_bilateral_domain_for_server(
-                    c, is_orig, first_identity$domain);
-                rec = add_information_report_result_to_info(
-                    rec, report_evidence, 0);
-                rec$result_pairing_status =
-                    information_report_pairing_status(
-                        c, is_orig, report_evidence);
-                }
-            }
+        rec = add_mms_information_report_fields(
+            c, is_orig, rec, report_evidence);
         write_information_message_observation(
             c, is_orig, report_evidence, point_shape,
             context$provenance);
         }
 
-    if ( first_result_type > 0 &&
-         ((pdu_type == 1 && service_tag == 4 && invoke_id >= 0) ||
-          (pdu_type == 3 && unconfirmed_service_tag == 0 &&
-           object_name != "" && association_kind(c) == "tase2")) )
-        {
-        local transfer_object: PendingRead;
-        if ( pdu_type == 3 )
-            {
-            transfer_object = [$scope=object_scope,
-                               $domain=object_domain,
-                               $name=object_name,
-                               $category=object_category];
-            rec$transfer_kind = "information_report";
-            }
-        else
-            {
-            transfer_object = [
-                $scope=context$read_scope, $domain=context$read_domain,
-                $name=context$read_name, $category=context$read_category
-            ];
-            rec$transfer_kind = "read_response";
-            }
-
-        if ( transfer_object$name != "" )
-            {
-            rec$object_scope = transfer_object$scope == 0 ? "vcc" :
-                               transfer_object$scope == 1 ? "icc" : "aa";
-            rec$object_name = transfer_object$name;
-            if ( transfer_object$domain != "" )
-                rec$object_domain = transfer_object$domain;
-            rec$value_type = first_result_type;
-            local learned_point_type = learned_variable_type_name(
-                c, is_orig,
-                transfer_object$scope, transfer_object$domain,
-                transfer_object$name);
-            # 802 IndicationPoint values are never AA-specific.  Keep a
-            # configured AA-specific Data_* variable observable as generic MMS
-            # data instead of promoting it to an exact TASE.2 point.
-            if ( /^Data_/ in learned_point_type &&
-                 ! standardized_point_control_scope(
-                     transfer_object$scope, transfer_object$domain) )
-                learned_point_type = "";
-
-            if ( mms_special_result_applicable(
-                     c, transfer_object, first_result_type,
-                     first_result_raw, result_integer_count) )
-                rec = add_mms_special_result(
-                    rec, transfer_object, first_result_raw,
-                    result_first_integer, result_second_integer);
-            else if ( learned_point_type == "Data_Real" ||
-                      learned_point_type == "Data_Discrete" ||
-                      learned_point_type == "Data_State" ||
-                      learned_point_type == "Data_StateSupplemental" )
-                rec = add_mms_basic_point_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_integer_value,
-                    result_floating_value, shape_available,
-                    first_result_length);
-            else if ( learned_point_type == "Data_StateQ" ||
-                 learned_point_type == "Data_StateSupplementalQ" ||
-                 learned_point_type == "Data_RealQ" ||
-                 learned_point_type == "Data_DiscreteQ" ||
-                 learned_point_type == "Data_RealQTimeTag" ||
-                 learned_point_type == "Data_DiscreteQTimeTag" ||
-                 learned_point_type == "Data_StateQTimeTag" ||
-                 learned_point_type == "Data_StateSupplementalQTimeTag" )
-                rec = add_mms_quality_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_component_count,
-                    result_first_choice, result_second_choice,
-                    result_third_choice, result_integer_value,
-                    result_floating_value, result_flags_raw,
-                    result_timestamp_value, shape_available,
-                    first_component_length, second_component_length,
-                    third_component_length, point_shape);
-            else if ( learned_point_type == "Data_RealExtended" ||
-                      learned_point_type == "Data_DiscreteExtended" ||
-                      learned_point_type == "Data_StateExtended" ||
-                      learned_point_type ==
-                          "Data_StateSupplementalExtended" ||
-                      learned_point_type ==
-                          "Data_RealQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_DiscreteQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_StateQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_StateSupplementalQTimeTagExtended" )
-                rec = add_mms_extended_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_integer_value,
-                    result_floating_value, shape_available, point_shape);
-            else
-                rec$standardized_value =
-                    bounded_information_report_result_raw(first_result_raw);
-
-            rec$name_model = object_name_model(
-                c, is_orig, transfer_object$scope, transfer_object$domain,
-                transfer_object$name, transfer_object$category);
-            rec$domain_kind = object_domain_kind(
-                c, is_orig, transfer_object$scope, transfer_object$domain);
-            rec$bilateral_domain =
-                is_bilateral_domain_for_server(
-                    c, is_orig, transfer_object$domain);
-            }
-        }
-    if ( object_name != "" )
-        {
-        rec$object_scope = object_scope == 0 ? "vcc" :
-                           object_scope == 1 ? "icc" : "aa";
-        rec$object_name = object_name;
-        if ( object_domain != "" )
-            rec$object_domain = object_domain;
-
-        switch ( object_category )
-            {
-            case 1: rec$object_category = "supported_features"; break;
-            case 2: rec$object_category = "bilateral_table"; break;
-            case 3: rec$object_category = "transfer_support"; break;
-            case 4: rec$object_category = "information_message"; break;
-            case 5: rec$object_category = "tase2_version"; break;
-            default: rec$object_category = "unknown"; break;
-            }
-        if ( object_category == 0 && object_scope == 1 &&
-             object_name == "Event_Code_Detected" &&
-             valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) )
-            rec$object_category = "transfer_support";
-        if ( object_category == 0 &&
-             (object_scope == 0 || object_scope == 1) &&
-             information_buffer_capacity(object_name) > 0 &&
-             valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) )
-            rec$object_category = "information_message";
-        local object_server_is_orig = pdu_type == 0 ? ! is_orig : is_orig;
-        rec$name_model = object_name_model(
-            c, object_server_is_orig, object_scope, object_domain,
-            object_name, object_category);
-        rec$domain_kind = object_domain_kind(
-            c, object_server_is_orig, object_scope, object_domain);
-        rec$bilateral_domain = is_bilateral_domain_for_server(
-            c, object_server_is_orig, object_domain);
-        }
-    if ( detail != "" )
-        rec$detail = bounded_detail(detail);
+    rec = add_mms_point_result_fields(
+        c, is_orig, rec, pdu_type, service_tag, unconfirmed_service_tag,
+        invoke_id, object_scope, object_domain, object_name, object_category,
+        first_result_type, first_result_raw, result_integer_count,
+        result_first_integer, result_second_integer, result_component_count,
+        result_first_choice, result_second_choice, result_third_choice,
+        result_integer_value, result_floating_value, result_flags_raw,
+        result_timestamp_value, shape_available, first_result_length,
+        first_component_length, second_component_length,
+        third_component_length, point_shape, context);
+    rec = add_mms_object_metadata(
+        c, is_orig, rec, pdu_type, object_scope, object_domain,
+        object_name, object_category);
+    if ( disposition$detail != "" )
+        rec$detail = bounded_detail(disposition$detail);
 
     write_iccp_record(c, rec);
     write_object_observation(rec);
