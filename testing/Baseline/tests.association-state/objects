@@ -3,7 +3,7 @@ reference	mms	get_variable_access_attributes	8	vcc	-	Supported_Features	supporte
 reference	mms	get_variable_access_attributes	9	icc	CONTROL_CENTER_B	Bilateral_Table_ID	bilateral_table	standardized	icc	F	-	-	-	-	-	-	-	-	-	-	-	-	-
 read_response	tase2	read	10	vcc	-	Supported_Features	supported_features	standardized	vcc	F	4	04a0	unused=4,bits=a0,enabled=block1,reserved-bit-2	-	-	-	-	-	-	-	-	-	-
 read_response	tase2	read	11	vcc	-	TASE.2_Version	tase2_version	standardized	vcc	F	2	2000.08	-	-	-	-	-	-	-	-	-	-	-
-read_response	tase2	read	12	icc	CONTROL_CENTER_B	MW_FLOW	-	agreement_defined	bilateral	T	2	-	-	real_q_time	-	-	10.0	suspect	entered	T	F	1700000000	-
+read_response	tase2	read	12	icc	CONTROL_CENTER_B	MW_FLOW	-	agreement_defined	bilateral	T	2	-	-	real_q_time	-	-	10.0	suspect	entered	T	F	1700000000.000000	-
 read_response	tase2	read	13	icc	CONTROL_CENTER_B	MW_WRONG_ORDER	-	agreement_defined	bilateral	T	2	870508412000008402002a85046553f100	-	-	-	-	-	-	-	-	-	-	-
 read_response	tase2	read	15	icc	CONTROL_CENTER_B	MW_WIDE_REAL	-	agreement_defined	bilateral	T	2	87090b40240000000000008402002a	-	-	-	-	-	-	-	-	-	-	-
 read_response	tase2	read	14	icc	CONTROL_CENTER_B	BREAKER_STATE	-	agreement_defined	bilateral	T	4	-	-	state	2	-	-	suspect	entered	T	F	-	-

@@ -73,7 +73,7 @@ export {
         value_source: string &log &optional;
         normal_value: bool &log &optional;
         timestamp_quality: bool &log &optional;
-        timestamp_value: int &log &optional;
+        timestamp_value: time &log &optional;
         cov_value: count &log &optional;
         result_count: count &log &optional;
         failure_count: count &log &optional;
@@ -155,7 +155,7 @@ export {
         result_raw: string &log &optional;
         result_raw_truncated: bool &log &optional;
         pairing_status: string &log &optional;
-        timestamp_value: int &log &optional;
+        timestamp_value: time &log &optional;
         info_reference: int &log &optional;
         local_reference: int &log &optional;
         message_id: int &log &optional;
@@ -239,7 +239,7 @@ export {
         value_source: string &log &optional;
         normal_value: bool &log &optional;
         timestamp_quality: bool &log &optional;
-        timestamp_value: int &log &optional;
+        timestamp_value: time &log &optional;
         cov_value: count &log &optional;
         result_count: count &log &optional;
         result_pairing_status: string &log &optional;

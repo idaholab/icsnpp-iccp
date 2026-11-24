@@ -4127,7 +4127,7 @@ event ICCP::mms_transfer_support_value_message(
         $result_count=result_count, $failure_count=failure_count
     ];
     if ( decoded && is_timestamp )
-        rec$timestamp_value = first_integer_value;
+        rec$timestamp_value = double_to_time(first_integer_value);
     else if ( decoded && is_event_code )
         rec$event_code_detected = first_integer_value;
     else if ( decoded )
@@ -5937,7 +5937,7 @@ function add_mms_quality_result(
         rec$value_source = data_flags_source(time_flags);
         rec$normal_value = (time_flags & 0x02) != 0;
         rec$timestamp_quality = (time_flags & 0x01) != 0;
-        rec$timestamp_value = result_timestamp_value;
+        rec$timestamp_value = double_to_time(result_timestamp_value);
         }
     else if ( association_kind(c) == "tase2" &&
               learned_point_type == "Data_StateQTimeTag" &&
@@ -5964,8 +5964,8 @@ function add_mms_quality_result(
         rec$value_source = data_flags_source(state_time_flags);
         rec$normal_value = (state_time_flags & 0x02) != 0;
         rec$timestamp_quality = (state_time_flags & 0x01) != 0;
-        rec$timestamp_value =
-            point_shape$component_integer_values[0];
+        rec$timestamp_value = double_to_time(
+            point_shape$component_integer_values[0]);
         }
     else if ( association_kind(c) == "tase2" &&
               learned_point_type ==
@@ -6006,8 +6006,8 @@ function add_mms_quality_result(
             (supplemental_time_flags & 0x02) != 0;
         rec$timestamp_quality =
             (supplemental_time_flags & 0x01) != 0;
-        rec$timestamp_value =
-            point_shape$component_integer_values[1];
+        rec$timestamp_value = double_to_time(
+            point_shape$component_integer_values[1]);
         }
     else
         rec$standardized_value =
@@ -6106,8 +6106,8 @@ function add_mms_extended_result(
             rec$value_source = data_flags_source(extended_flags);
             rec$normal_value = (extended_flags & 0x02) != 0;
             rec$timestamp_quality = (extended_flags & 0x01) != 0;
-            rec$timestamp_value =
-                point_shape$component_integer_values[timestamp_index];
+            rec$timestamp_value = double_to_time(
+                point_shape$component_integer_values[timestamp_index]);
             rec$cov_value = int_to_count(
                 point_shape$component_integer_values[cov_index]);
             }
@@ -6202,9 +6202,9 @@ function add_mms_extended_result(
         rec$value_source = data_flags_source(extended_time_flags);
         rec$normal_value = (extended_time_flags & 0x02) != 0;
         rec$timestamp_quality = (extended_time_flags & 0x01) != 0;
-        rec$timestamp_value =
-            point_shape$nested_integer_values[0] * 1000 +
-            point_shape$nested_integer_values[1];
+        rec$timestamp_value = double_to_time(
+            point_shape$nested_integer_values[0] +
+            point_shape$nested_integer_values[1] / 1000.0);
         }
     else
         rec$standardized_value =
