@@ -188,7 +188,7 @@ gap, then parse recovery, then incomplete record.
 | `value_source` | `string` | no | Quality source: `telemetered`, `calculated`, `entered`, or `estimated`. |
 | `normal_value` | `bool` | no | Decoded normal-value quality flag. |
 | `timestamp_quality` | `bool` | no | Decoded timestamp-quality flag. |
-| `timestamp_value` | `int` | no | Basic GMT-based point timestamp in epoch seconds. It is not a Zeek `time`. |
+| `timestamp_value` | `time` | no | GMT-based point timestamp as fractional epoch seconds. Extended timestamps preserve milliseconds in the fractional part. |
 | `cov_value` | `count` | no | Exact unsigned16 COV counter from a correlated core Extended point form. |
 
 ## Bounds and sensitive data
@@ -267,7 +267,7 @@ conservative interpretation in `iccp.log` for compatibility.
 | `value_source` | `string` | no | Quality source: `telemetered`, `calculated`, `entered`, or `estimated`. |
 | `normal_value` | `bool` | no | Decoded normal-value quality flag. |
 | `timestamp_quality` | `bool` | no | Decoded timestamp-quality flag. |
-| `timestamp_value` | `int` | no | Basic GMT-based point timestamp in epoch seconds. |
+| `timestamp_value` | `time` | no | GMT-based point timestamp as fractional epoch seconds. Extended timestamps preserve milliseconds in the fractional part. |
 | `cov_value` | `count` | no | Exact unsigned16 COV counter from a correlated core Extended point form. |
 | `provenance` | `string` | yes | Provenance of the MMS PDU producing this object observation. |
 | `stream_completeness` | `string` | yes | Direction-scoped capture/recovery status at this observation. |
@@ -310,7 +310,7 @@ separate records. Reports produce one summary record followed by at most one
 | `result_raw` | `string` | no | Lowercase hexadecimal encoding of the raw result, capped by `max_logged_result_raw_bytes`. |
 | `result_raw_truncated` | `bool` | no | Whether `result_raw` omitted source bytes because the configured byte cap was reached. |
 | `pairing_status` | `string` | no | Report/member correlation result: `complete`, `count_mismatch`, or `untracked_list`. |
-| `timestamp_value` | `int` | no | `Transfer_Set_Time_Stamp` value as GMT-based epoch seconds. It is not a Zeek `time`. |
+| `timestamp_value` | `time` | no | `Transfer_Set_Time_Stamp` value as a Zeek timestamp in epoch seconds. |
 | `info_reference` | `int` | no | Information Message reference from a validated header. |
 | `local_reference` | `int` | no | Information Message local reference from a validated header. |
 | `message_id` | `int` | no | Information Message identifier from a validated header. |

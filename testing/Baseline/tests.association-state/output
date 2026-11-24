@@ -12,7 +12,7 @@ mms	tase2	responder	read	read_response	10	4	vcc	-	Supported_Features	supported_f
 mms	tase2	originator	read	-	11	4	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-
 mms	tase2	responder	read	read_response	11	4	vcc	-	TASE.2_Version	tase2_version	standardized	vcc	F	2	2000.08	-	-	-	-	-	-	-	-	-	-	-
 mms	tase2	originator	read	-	12	4	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-
-mms	tase2	responder	read	read_response	12	4	icc	CONTROL_CENTER_B	MW_FLOW	-	agreement_defined	bilateral	T	2	-	-	real_q_time	-	-	10.0	suspect	entered	T	F	1700000000	-
+mms	tase2	responder	read	read_response	12	4	icc	CONTROL_CENTER_B	MW_FLOW	-	agreement_defined	bilateral	T	2	-	-	real_q_time	-	-	10.0	suspect	entered	T	F	1700000000.000000	-
 mms	tase2	originator	read	-	13	4	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-
 mms	tase2	responder	read	read_response	13	4	icc	CONTROL_CENTER_B	MW_WRONG_ORDER	-	agreement_defined	bilateral	T	2	870508412000008402002a85046553f100	-	-	-	-	-	-	-	-	-	-	-
 mms	tase2	originator	read	-	15	4	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-
