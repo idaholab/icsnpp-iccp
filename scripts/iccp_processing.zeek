@@ -5506,6 +5506,169 @@ function process_transfer_set_request(
     write_transfer_record(c, is_orig, request);
     }
 
+function transfer_set_service_action(service_tag: count): string
+    {
+    return service_tag == 11 ? "define" :
+           service_tag == 12 ? "inspect" : "delete";
+    }
+
+function new_transfer_set_response_record(
+    c: connection, is_orig: bool, invoke_id: int, action: string,
+    outcome: string): TransferInfo
+    {
+    return [
+        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
+        $action=action, $outcome=outcome, $invoke_id=invoke_id
+    ];
+    }
+
+function add_pending_transfer_identity(
+    response: TransferInfo, prior: PendingTransferSet): TransferInfo
+    {
+    if ( prior$name == "" )
+        return response;
+
+    response$list_scope = transfer_scope_name(prior$scope);
+    response$list_name = prior$name;
+    if ( prior$domain != "" )
+        response$list_domain = prior$domain;
+    return response;
+    }
+
+function add_define_transfer_set_response(
+    c: connection, is_orig: bool, invoke_id: int,
+    response: TransferInfo, prior: PendingTransferSet): TransferInfo
+    {
+    # Re-check at response time as well as using the request snapshot: two
+    # outstanding definitions for one previously unknown name can confirm out
+    # of order.
+    local existing_definition = prior$prior_known ||
+        (prior$name != "" &&
+         [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+             known_transfer_sets);
+    response$variable_count = prior$variable_count;
+    if ( prior$first_variable_name != "" )
+        {
+        response$first_variable_scope =
+            transfer_scope_name(prior$first_variable_scope);
+        response$first_variable_name = prior$first_variable_name;
+        if ( prior$first_variable_domain != "" )
+            response$first_variable_domain = prior$first_variable_domain;
+        }
+
+    # A successful duplicate definition is a peer deviation, not a valid
+    # update operation. Preserve the membership learned from the original
+    # confirmed definition.
+    if ( prior$profile_valid && ! existing_definition && prior$name != "" &&
+         known_transfer_count(c$uid) < max_known_transfer_sets )
+        {
+        known_transfer_sets[
+            c$uid, is_orig, prior$scope, prior$domain, prior$name] = [
+                $scopes=prior$member_scopes,
+                $domains=prior$member_domains,
+                $names=prior$member_names
+            ];
+        update_object_processing_state(
+            c$uid, is_orig, prior$scope, prior$domain, prior$name,
+            PROCESSING_KNOWN_TRANSFER_SET, T);
+        }
+    if ( existing_definition )
+        {
+        response$conformance = "standards_deviation";
+        response$conformance_reasons = add_transfer_profile_reason(
+            response?$conformance_reasons ?
+                response$conformance_reasons : "",
+            "define_existing_name_confirmed");
+        }
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    response$outcome = existing_definition ?
+        "confirmed_existing_name" :
+        ! prior$profile_valid ? "confirmed_profile_deviation" :
+            response$known_list ? "confirmed" : "state_limit";
+    if ( prior$profile_valid && ! existing_definition && prior$name != "" &&
+         ! response$known_list )
+        event ICCP::resource_limit_exceeded(
+            c, is_orig, "known_transfer_sets", max_known_transfer_sets,
+            known_transfer_count(c$uid), invoke_id);
+
+    return response;
+    }
+
+function add_inspect_transfer_set_response(
+    c: connection, is_orig: bool, response: TransferInfo,
+    prior: PendingTransferSet, variable_count: count,
+    deletable: bool): TransferInfo
+    {
+    response$variable_count = variable_count;
+    response$deletable = deletable;
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    return response;
+    }
+
+function add_delete_transfer_set_response(
+    c: connection, is_orig: bool, response: TransferInfo,
+    prior: PendingTransferSet, number_matched: int,
+    number_deleted: int): TransferInfo
+    {
+    response$number_matched = number_matched;
+    response$number_deleted = number_deleted;
+    if ( ! prior$profile_valid )
+        response$outcome = "confirmed_profile_deviation";
+    else
+        {
+        # The TASE.2 Delete Data Set profile requires a positive response only
+        # after every specifically named Data Set was found and deleted. Keep
+        # aggregate wire counts observable without treating a partial result
+        # as a conforming confirmation.
+        local delete_count_reasons = "";
+        if ( number_matched != prior$name_count )
+            delete_count_reasons = add_transfer_profile_reason(
+                delete_count_reasons,
+                "matched_count_differs_requested_names");
+        if ( number_deleted != prior$name_count )
+            delete_count_reasons = add_transfer_profile_reason(
+                delete_count_reasons,
+                "deleted_count_differs_requested_names");
+        if ( delete_count_reasons != "" )
+            {
+            response$outcome = "confirmed_count_deviation";
+            response$conformance = "standards_deviation";
+            response$conformance_reasons = delete_count_reasons;
+            }
+
+        if ( number_deleted > 0 )
+            {
+            # DeleteNamedVariableList returns only aggregate counts. A
+            # positive partial result cannot identify which requested names
+            # were deleted, so invalidate every requested identity.
+            local delete_index: count = 0;
+            while ( delete_index < |prior$member_names| )
+                {
+                delete known_transfer_sets[
+                    c$uid, is_orig,
+                    prior$member_scopes[delete_index],
+                    prior$member_domains[delete_index],
+                    prior$member_names[delete_index]];
+                update_object_processing_state(
+                    c$uid, is_orig,
+                    prior$member_scopes[delete_index],
+                    prior$member_domains[delete_index],
+                    prior$member_names[delete_index],
+                    PROCESSING_KNOWN_TRANSFER_SET, F);
+                ++delete_index;
+                }
+            }
+        }
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    return response;
+    }
+
 function process_transfer_set_response(
     c: connection, is_orig: bool, invoke_id: int, service_tag: count,
     variable_count: count, deletable: bool,
@@ -5523,13 +5686,10 @@ function process_transfer_set_response(
     if ( [c$uid, response_request_is_orig, response_pending_key] !in
          pending_transfer_sets )
         {
-        local unexpected: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id,
-            $is_orig=is_orig,
-            $action=service_tag == 11 ? "define" :
-                service_tag == 12 ? "inspect" : "delete",
-            $outcome="unexpected_response", $invoke_id=invoke_id
-        ];
+        local unexpected = new_transfer_set_response_record(
+            c, is_orig, invoke_id,
+            transfer_set_service_action(service_tag),
+            "unexpected_response");
         write_transfer_record(c, is_orig, unexpected);
         return;
         }
@@ -5537,175 +5697,40 @@ function process_transfer_set_response(
         c$uid, response_request_is_orig, response_pending_key];
     if ( ! response_direction_valid )
         {
-        local wrong_direction: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id,
-            $is_orig=is_orig, $action=prior$action,
-            $outcome="direction_mismatch", $invoke_id=invoke_id
-        ];
+        local wrong_direction = new_transfer_set_response_record(
+            c, is_orig, invoke_id, prior$action, "direction_mismatch");
         write_transfer_record(c, is_orig, wrong_direction);
         return;
         }
-    local response_action = service_tag == 11 ? "define" :
-                            service_tag == 12 ? "inspect" : "delete";
+    local response_action = transfer_set_service_action(service_tag);
     if ( prior$action != response_action )
         {
         # Define/Get/DeleteNamedVariableList share one pending family, but
         # a response from a different service must never mutate the prior
         # list lifecycle.  Leave the request available for a valid reply.
-        local wrong_service: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id,
-            $is_orig=is_orig, $action=prior$action,
-            $outcome="service_mismatch", $invoke_id=invoke_id
-        ];
-        if ( prior$name != "" )
-            {
-            wrong_service$list_scope = transfer_scope_name(prior$scope);
-            wrong_service$list_name = prior$name;
-            if ( prior$domain != "" )
-                wrong_service$list_domain = prior$domain;
-            }
+        local wrong_service = new_transfer_set_response_record(
+            c, is_orig, invoke_id, prior$action, "service_mismatch");
+        wrong_service = add_pending_transfer_identity(wrong_service, prior);
         write_transfer_record(c, is_orig, wrong_service);
         return;
         }
-    local response: TransferInfo = [
-        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
-        $action=prior$action, $outcome="confirmed", $invoke_id=invoke_id
-    ];
-    if ( prior$name != "" )
-        {
-        response$list_scope = transfer_scope_name(prior$scope);
-        response$list_name = prior$name;
-        if ( prior$domain != "" ) response$list_domain = prior$domain;
-        }
+    local response = new_transfer_set_response_record(
+        c, is_orig, invoke_id, prior$action, "confirmed");
+    response = add_pending_transfer_identity(response, prior);
     if ( prior$action != "inspect" && ! prior$profile_valid )
         {
         response$conformance = "standards_deviation";
         response$conformance_reasons = prior$profile_reasons;
         }
     if ( service_tag == 11 )
-        {
-        # Re-check at response time as well as using the request snapshot:
-        # two outstanding definitions for one previously unknown name can
-        # confirm out of order.
-        local existing_definition = prior$prior_known ||
-            (prior$name != "" &&
-             [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                 known_transfer_sets);
-        response$variable_count = prior$variable_count;
-        if ( prior$first_variable_name != "" )
-            {
-            response$first_variable_scope =
-                transfer_scope_name(prior$first_variable_scope);
-            response$first_variable_name = prior$first_variable_name;
-            if ( prior$first_variable_domain != "" )
-                response$first_variable_domain =
-                    prior$first_variable_domain;
-            }
-        # A successful duplicate definition is a peer deviation, not a
-        # valid update operation.  Preserve the membership learned from
-        # the original confirmed definition.
-        if ( prior$profile_valid && ! existing_definition &&
-             prior$name != "" &&
-             known_transfer_count(c$uid) < max_known_transfer_sets )
-            {
-            known_transfer_sets[c$uid, is_orig, prior$scope,
-                                prior$domain, prior$name] = [
-                $scopes=prior$member_scopes,
-                $domains=prior$member_domains,
-                $names=prior$member_names
-            ];
-            update_object_processing_state(
-                c$uid, is_orig, prior$scope, prior$domain, prior$name,
-                PROCESSING_KNOWN_TRANSFER_SET, T);
-            }
-        if ( existing_definition )
-            {
-            response$conformance = "standards_deviation";
-            response$conformance_reasons = add_transfer_profile_reason(
-                response?$conformance_reasons ?
-                    response$conformance_reasons : "",
-                "define_existing_name_confirmed");
-            }
-        response$known_list = prior$name != "" &&
-            [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-            known_transfer_sets;
-        response$outcome = existing_definition ?
-            "confirmed_existing_name" :
-            ! prior$profile_valid ? "confirmed_profile_deviation" :
-                response$known_list ? "confirmed" : "state_limit";
-        if ( prior$profile_valid && ! existing_definition &&
-             prior$name != "" &&
-             ! response$known_list )
-            event ICCP::resource_limit_exceeded(
-                c, is_orig, "known_transfer_sets",
-                max_known_transfer_sets, known_transfer_count(c$uid),
-                invoke_id);
-        }
+        response = add_define_transfer_set_response(
+            c, is_orig, invoke_id, response, prior);
     else if ( service_tag == 12 )
-        {
-        response$variable_count = variable_count;
-        response$deletable = deletable;
-        response$known_list = prior$name != "" &&
-            [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-            known_transfer_sets;
-        }
+        response = add_inspect_transfer_set_response(
+            c, is_orig, response, prior, variable_count, deletable);
     else
-        {
-        response$number_matched = number_matched;
-        response$number_deleted = number_deleted;
-        if ( ! prior$profile_valid )
-            response$outcome = "confirmed_profile_deviation";
-        else
-            {
-            # The TASE.2 Delete Data Set profile requires a positive
-            # response only after every specifically named Data Set was
-            # found and deleted.  Keep the wire-level aggregate counts
-            # observable, but do not treat a partial positive result as a
-            # conforming confirmation.
-            local delete_count_reasons = "";
-            if ( number_matched != prior$name_count )
-                delete_count_reasons = add_transfer_profile_reason(
-                    delete_count_reasons,
-                    "matched_count_differs_requested_names");
-            if ( number_deleted != prior$name_count )
-                delete_count_reasons = add_transfer_profile_reason(
-                    delete_count_reasons,
-                    "deleted_count_differs_requested_names");
-            if ( delete_count_reasons != "" )
-                {
-                response$outcome = "confirmed_count_deviation";
-                response$conformance = "standards_deviation";
-                response$conformance_reasons = delete_count_reasons;
-                }
-
-            if ( number_deleted > 0 )
-                {
-                # DeleteNamedVariableList returns only aggregate counts. A
-                # positive partial result cannot identify which requested
-                # names were deleted, so invalidate every requested
-                # identity.
-                local delete_index: count = 0;
-                while ( delete_index < |prior$member_names| )
-                    {
-                    delete known_transfer_sets[
-                        c$uid, is_orig,
-                        prior$member_scopes[delete_index],
-                        prior$member_domains[delete_index],
-                        prior$member_names[delete_index]];
-                    update_object_processing_state(
-                        c$uid, is_orig,
-                        prior$member_scopes[delete_index],
-                        prior$member_domains[delete_index],
-                        prior$member_names[delete_index],
-                        PROCESSING_KNOWN_TRANSFER_SET, F);
-                    ++delete_index;
-                    }
-                }
-            }
-        response$known_list = prior$name != "" &&
-            [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                known_transfer_sets;
-        }
+        response = add_delete_transfer_set_response(
+            c, is_orig, response, prior, number_matched, number_deleted);
     delete pending_transfer_sets[
         c$uid, response_request_is_orig, response_pending_key];
     update_directional_processing_state(
