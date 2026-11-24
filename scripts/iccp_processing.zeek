@@ -2547,6 +2547,12 @@ type DSTransferParameters: record {
     conformance_reasons: string &optional;
 };
 
+type DSTransferParameterValidation: record {
+    parameters: DSTransferParameters;
+    deviation: bool;
+    reasons: string;
+};
+
 type PendingTransferControl: record {
     action: string;
     request_is_orig: bool;
@@ -4646,6 +4652,295 @@ event ICCP::mms_transfer_support_value_message(
         PROCESSING_FIRST_RESULT_EVIDENCE, F);
     }
 
+function add_ds_transfer_validation_reason(
+    validation: DSTransferParameterValidation,
+    reason: string): DSTransferParameterValidation
+    {
+    validation$deviation = T;
+    validation$reasons = append_feature(validation$reasons, reason);
+    return validation;
+    }
+
+function validate_ds_transfer_root(
+    validation: DSTransferParameterValidation,
+    access_choice: count, object_scope: count,
+    object_domain: string, object_name: string,
+    variable_count: count, data_count: count,
+    first_data_choice: count): DSTransferParameterValidation
+    {
+    if ( access_choice != 0 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_access_selection");
+
+    # IEC 60870-6-503 maps Transfer Set named variables to the MMS Domain for
+    # the client control centre.  The transfer variable itself is therefore
+    # Domain-specific even though its embedded DataSetName may be either VMD-
+    # or Domain-specific.
+    if ( object_scope != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_scope");
+    if ( object_scope == 1 &&
+         ! valid_tase2_identifier(object_domain) )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_domain");
+    if ( ! valid_tase2_identifier(object_name) )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_name");
+    if ( variable_count != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_variable_count");
+    if ( data_count != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_count");
+    if ( first_data_choice != 2 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_value_choice");
+    return validation;
+    }
+
+function decode_ds_transfer_data_set_name(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    data_set_component_choices: vector of count,
+    data_set_component_raws: vector of string,
+    data_set_component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local data_set_evidence = component_choices[0] == 2 &&
+        |data_set_component_choices| == 3 &&
+        |data_set_component_raws| == 3 &&
+        |data_set_component_integer_values| == 3;
+    if ( ! data_set_evidence )
+        return add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_name_structure");
+
+    if ( data_set_component_choices[0] == 6 &&
+         |data_set_component_raws[0]| == 1 &&
+         (data_set_component_integer_values[0] == 0 ||
+          data_set_component_integer_values[0] == 1) )
+        validation$parameters$data_set_scope = int_to_count(
+            data_set_component_integer_values[0]);
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_scope");
+
+    if ( data_set_component_choices[1] == 10 &&
+         |data_set_component_raws[1]| >= 1 &&
+         |data_set_component_raws[1]| <= 32 &&
+         valid_tase2_visible_identifier(data_set_component_raws[1]) )
+        validation$parameters$data_set_domain = data_set_component_raws[1];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_domain");
+
+    if ( data_set_component_choices[2] == 10 &&
+         |data_set_component_raws[2]| >= 1 &&
+         |data_set_component_raws[2]| <= 32 &&
+         valid_tase2_visible_identifier(data_set_component_raws[2]) )
+        validation$parameters$data_set_name = data_set_component_raws[2];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_name");
+
+    return validation;
+    }
+
+function decode_ds_transfer_timing_parameters(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    if ( component_choices[1] == 5 &&
+         |component_raws[1]| >= 1 && |component_raws[1]| <= 4 &&
+         component_integer_values[1] >= 0 &&
+         component_integer_values[1] <= 2147483647 )
+        validation$parameters$start_time = component_integer_values[1];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_start_time");
+
+    if ( component_choices[2] == 5 &&
+         |component_raws[2]| >= 1 && |component_raws[2]| <= 4 &&
+         component_integer_values[2] >= 0 &&
+         component_integer_values[2] <= 2147483647 )
+        validation$parameters$transfer_interval = component_integer_values[2];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_interval");
+
+    if ( component_choices[3] == 5 &&
+         |component_raws[3]| >= 1 && |component_raws[3]| <= 4 &&
+         component_integer_values[3] >= 0 &&
+         component_integer_values[3] <= 2147483647 )
+        validation$parameters$tle = component_integer_values[3];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_tle");
+
+    if ( component_choices[4] == 5 &&
+         |component_raws[4]| >= 1 && |component_raws[4]| <= 4 &&
+         component_integer_values[4] >= 0 &&
+         component_integer_values[4] <= 2147483647 )
+        validation$parameters$buffer_time = component_integer_values[4];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_buffer_time");
+
+    if ( component_choices[5] == 5 &&
+         |component_raws[5]| >= 1 && |component_raws[5]| <= 4 &&
+         component_integer_values[5] >= 0 &&
+         component_integer_values[5] <= 2147483647 )
+        validation$parameters$integrity_check = component_integer_values[5];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_integrity_check");
+
+    return validation;
+    }
+
+function decode_ds_transfer_flags(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local conditions_valid = T;
+    if ( component_choices[6] != 4 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_choice");
+        }
+    else if ( |component_raws[6]| != 2 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_width");
+        }
+    else if ( bytestring_to_count(
+                  sub_bytes(component_raws[6], 1, 1)) != 3 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_unused_bits");
+        }
+    else if ( (bytestring_to_count(
+                   sub_bytes(component_raws[6], 2, 1)) & 0x07) != 0 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_reserved_bits");
+        }
+
+    local condition_flags: count = 0;
+    if ( conditions_valid )
+        {
+        condition_flags = bytestring_to_count(
+            sub_bytes(component_raws[6], 2, 1));
+        validation$parameters$conditions =
+            decode_ds_conditions(condition_flags);
+        validation$parameters$condition_mask = condition_flags / 8;
+        }
+
+    if ( component_choices[7] == 3 && |component_raws[7]| == 1 )
+        validation$parameters$block_data =
+            bytestring_to_count(component_raws[7]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_block_data");
+
+    if ( component_choices[8] == 3 && |component_raws[8]| == 1 )
+        validation$parameters$critical =
+            bytestring_to_count(component_raws[8]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_critical");
+
+    if ( component_choices[9] == 3 && |component_raws[9]| == 1 )
+        validation$parameters$report_by_exception =
+            bytestring_to_count(component_raws[9]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_rbe");
+
+    if ( component_choices[10] == 3 && |component_raws[10]| == 1 )
+        validation$parameters$all_changes_reported =
+            bytestring_to_count(component_raws[10]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_all_changes_reported");
+
+    if ( component_choices[11] == 3 && |component_raws[11]| == 1 )
+        validation$parameters$enabled =
+            bytestring_to_count(component_raws[11]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_status");
+
+    local event_code_valid = component_choices[12] == 5 &&
+        |component_raws[12]| >= 1 && |component_raws[12]| <= 2 &&
+        component_integer_values[12] >= -32768 &&
+        component_integer_values[12] <= 32767;
+    if ( ! event_code_valid )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_event_code");
+    else if ( conditions_valid && (condition_flags & 0x08) != 0 )
+        validation$parameters$event_code_requested =
+            component_integer_values[12];
+
+    return validation;
+    }
+
+function decode_ds_transfer_parameters(
+    access_choice: count, object_scope: count,
+    object_domain: string, object_name: string,
+    variable_count: count, data_count: count,
+    first_data_choice: count,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int,
+    data_set_component_choices: vector of count,
+    data_set_component_raws: vector of string,
+    data_set_component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local validation: DSTransferParameterValidation = [
+        $parameters=[$conformance="parameters_conformant"],
+        $deviation=F, $reasons=""
+    ];
+    validation = validate_ds_transfer_root(
+        validation, access_choice, object_scope, object_domain, object_name,
+        variable_count, data_count, first_data_choice);
+
+    local component_evidence = |component_choices| == 13 &&
+        |component_raws| == 13 && |component_integer_values| == 13;
+    if ( ! component_evidence )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_component_count");
+    else
+        {
+        validation = decode_ds_transfer_data_set_name(
+            validation, component_choices,
+            data_set_component_choices, data_set_component_raws,
+            data_set_component_integer_values);
+        validation = decode_ds_transfer_timing_parameters(
+            validation, component_choices, component_raws,
+            component_integer_values);
+        validation = decode_ds_transfer_flags(
+            validation, component_choices, component_raws,
+            component_integer_values);
+        }
+
+    if ( validation$deviation )
+        validation$parameters$conformance = "standards_deviation";
+    if ( validation$reasons != "" )
+        validation$parameters$conformance_reasons = validation$reasons;
+    return validation;
+    }
+
 event ICCP::mms_ds_transfer_set_message_v1(
     c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
     service_tag: count, access_choice: count, object_scope: count,
@@ -4671,261 +4966,15 @@ event ICCP::mms_ds_transfer_set_message_v1(
     if ( ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
         return;
 
-    local deviation = F;
-    local reasons = "";
-    local parameters: DSTransferParameters = [
-        $conformance="parameters_conformant"
-    ];
-
-    if ( access_choice != 0 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_access_selection");
-        }
-    # IEC 60870-6-503 maps Transfer Set named variables to the MMS Domain for
-    # the client control centre.  The transfer variable itself is therefore
-    # Domain-specific even though its embedded DataSetName may be either VMD-
-    # or Domain-specific.
-    if ( object_scope != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_scope");
-        }
-    if ( object_scope == 1 &&
-         ! valid_tase2_identifier(object_domain) )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_domain");
-        }
-    if ( ! valid_tase2_identifier(object_name) )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_name");
-        }
-    if ( variable_count != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_variable_count");
-        }
-    if ( data_count != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_data_count");
-        }
-    if ( first_data_choice != 2 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_value_choice");
-        }
-
-    local component_evidence = |component_choices| == 13 &&
-        |component_raws| == 13 && |component_integer_values| == 13;
-    if ( ! component_evidence )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_component_count");
-        }
-
-    if ( component_evidence )
-        {
-        local data_set_evidence = component_choices[0] == 2 &&
-            |data_set_component_choices| == 3 &&
-            |data_set_component_raws| == 3 &&
-            |data_set_component_integer_values| == 3;
-        if ( ! data_set_evidence )
-            {
-            deviation = T;
-            reasons = append_feature(
-                reasons, "invalid_data_set_name_structure");
-            }
-        else
-            {
-            if ( data_set_component_choices[0] == 6 &&
-                 |data_set_component_raws[0]| == 1 &&
-                 (data_set_component_integer_values[0] == 0 ||
-                  data_set_component_integer_values[0] == 1) )
-                parameters$data_set_scope = int_to_count(
-                    data_set_component_integer_values[0]);
-            else
-                {
-                deviation = T;
-                reasons = append_feature(
-                    reasons, "invalid_data_set_scope");
-                }
-
-            if ( data_set_component_choices[1] == 10 &&
-                 |data_set_component_raws[1]| >= 1 &&
-                 |data_set_component_raws[1]| <= 32 &&
-                 valid_tase2_visible_identifier(
-                     data_set_component_raws[1]) )
-                parameters$data_set_domain = data_set_component_raws[1];
-            else
-                {
-                deviation = T;
-                reasons = append_feature(
-                    reasons, "invalid_data_set_domain");
-                }
-
-            if ( data_set_component_choices[2] == 10 &&
-                 |data_set_component_raws[2]| >= 1 &&
-                 |data_set_component_raws[2]| <= 32 &&
-                 valid_tase2_visible_identifier(
-                     data_set_component_raws[2]) )
-                parameters$data_set_name = data_set_component_raws[2];
-            else
-                {
-                deviation = T;
-                reasons = append_feature(reasons, "invalid_data_set_name");
-                }
-
-            }
-
-        if ( component_choices[1] == 5 &&
-             |component_raws[1]| >= 1 && |component_raws[1]| <= 4 &&
-             component_integer_values[1] >= 0 &&
-             component_integer_values[1] <= 2147483647 )
-            parameters$start_time = component_integer_values[1];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_start_time");
-            }
-        if ( component_choices[2] == 5 &&
-             |component_raws[2]| >= 1 && |component_raws[2]| <= 4 &&
-             component_integer_values[2] >= 0 &&
-             component_integer_values[2] <= 2147483647 )
-            parameters$transfer_interval = component_integer_values[2];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_transfer_interval");
-            }
-        if ( component_choices[3] == 5 &&
-             |component_raws[3]| >= 1 && |component_raws[3]| <= 4 &&
-             component_integer_values[3] >= 0 &&
-             component_integer_values[3] <= 2147483647 )
-            parameters$tle = component_integer_values[3];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_tle");
-            }
-        if ( component_choices[4] == 5 &&
-             |component_raws[4]| >= 1 && |component_raws[4]| <= 4 &&
-             component_integer_values[4] >= 0 &&
-             component_integer_values[4] <= 2147483647 )
-            parameters$buffer_time = component_integer_values[4];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_buffer_time");
-            }
-        if ( component_choices[5] == 5 &&
-             |component_raws[5]| >= 1 && |component_raws[5]| <= 4 &&
-             component_integer_values[5] >= 0 &&
-             component_integer_values[5] <= 2147483647 )
-            parameters$integrity_check = component_integer_values[5];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_integrity_check");
-            }
-
-        local conditions_valid = T;
-        if ( component_choices[6] != 4 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_choice");
-            }
-        else if ( |component_raws[6]| != 2 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_width");
-            }
-        else if ( bytestring_to_count(
-                      sub_bytes(component_raws[6], 1, 1)) != 3 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_unused_bits");
-            }
-        else if ( (bytestring_to_count(
-                       sub_bytes(component_raws[6], 2, 1)) & 0x07) != 0 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_reserved_bits");
-            }
-        local condition_flags: count = 0;
-        if ( conditions_valid )
-            {
-            condition_flags = bytestring_to_count(
-                sub_bytes(component_raws[6], 2, 1));
-            parameters$conditions = decode_ds_conditions(condition_flags);
-            parameters$condition_mask = condition_flags / 8;
-            }
-        else
-            {
-            deviation = T;
-            }
-
-        if ( component_choices[7] == 3 && |component_raws[7]| == 1 )
-            parameters$block_data =
-                bytestring_to_count(component_raws[7]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_block_data");
-            }
-        if ( component_choices[8] == 3 && |component_raws[8]| == 1 )
-            parameters$critical = bytestring_to_count(component_raws[8]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_critical");
-            }
-        if ( component_choices[9] == 3 && |component_raws[9]| == 1 )
-            parameters$report_by_exception =
-                bytestring_to_count(component_raws[9]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_rbe");
-            }
-        if ( component_choices[10] == 3 && |component_raws[10]| == 1 )
-            parameters$all_changes_reported =
-                bytestring_to_count(component_raws[10]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_all_changes_reported");
-            }
-        if ( component_choices[11] == 3 && |component_raws[11]| == 1 )
-            parameters$enabled = bytestring_to_count(component_raws[11]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_status");
-            }
-
-        local event_code_valid = component_choices[12] == 5 &&
-            |component_raws[12]| >= 1 && |component_raws[12]| <= 2 &&
-            component_integer_values[12] >= -32768 &&
-            component_integer_values[12] <= 32767;
-        if ( ! event_code_valid )
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_event_code");
-            }
-        else if ( conditions_valid && (condition_flags & 0x08) != 0 )
-            parameters$event_code_requested = component_integer_values[12];
-        }
-
-    if ( deviation )
-        parameters$conformance = "standards_deviation";
-    if ( reasons != "" ) parameters$conformance_reasons = reasons;
+    local validation = decode_ds_transfer_parameters(
+        access_choice, object_scope, object_domain, object_name,
+        variable_count, data_count, first_data_choice,
+        component_choices, component_raws, component_integer_values,
+        data_set_component_choices, data_set_component_raws,
+        data_set_component_integer_values);
+    local deviation = validation$deviation;
+    local reasons = validation$reasons;
+    local parameters = validation$parameters;
 
     local enabled = parameters?$enabled && parameters$enabled;
     local action = enabled ? "start" : "stop";
