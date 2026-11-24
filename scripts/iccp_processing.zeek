@@ -4100,88 +4100,173 @@ function write_additional_information_report_results(
         }
     }
 
-function process_gva_message(
-    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
-    object_scope: count, object_domain: string, object_name: string,
+function retire_untrusted_gva_response(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int)
+    {
+    if ( pdu_type != 1 || invoke_id < 0 )
+        return;
+
+    local key = int_to_count(invoke_id);
+    local request_is_orig = ! is_orig;
+    delete pending_variable_types[c$uid, request_is_orig, key];
+    delete invalid_variable_type_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_INVALID_VARIABLE_TYPE, F);
+    }
+
+function process_gva_request(
+    c: connection, is_orig: bool, invoke_id: int, key: count,
+    object_scope: count, object_domain: string, object_name: string)
+    {
+    if ( ! valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        return;
+
+    if ( [c$uid, is_orig, key] in invalid_variable_type_invokes )
+        return;
+
+    if ( [c$uid, is_orig, key] in pending_variable_types )
+        {
+        local reused = pending_variable_types[c$uid, is_orig, key];
+        delete pending_variable_types[c$uid, is_orig, key];
+        invalid_variable_type_invokes[c$uid, is_orig, key] =
+            reused$request_is_orig;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, F);
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_VARIABLE_TYPE, T);
+        return;
+        }
+
+    if ( pending_variable_type_count(c$uid) >= max_pending_transfer_sets )
+        {
+        event ICCP::resource_limit_exceeded(
+            c, is_orig, "pending_variable_types",
+            max_pending_transfer_sets,
+            pending_variable_type_count(c$uid), invoke_id);
+        return;
+        }
+
+    pending_variable_types[c$uid, is_orig, key] = [
+        $request_is_orig=is_orig,
+        $server=is_orig ? c$id$resp_h : c$id$orig_h,
+        $peer=is_orig ? c$id$orig_h : c$id$resp_h,
+        $scope=object_scope, $domain=object_domain, $name=object_name
+    ];
+    update_directional_processing_state(
+        c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, T);
+    }
+
+function new_gva_discovery_record(
+    c: connection, is_orig: bool, invoke_id: int,
+    prior: PendingVariableType): TransferInfo
+    {
+    local discovery: TransferInfo = [
+        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
+        $action="type_discovery", $outcome="unmapped",
+        $invoke_id=invoke_id,
+        $list_scope=transfer_scope_name(prior$scope),
+        $list_name=prior$name
+    ];
+    if ( prior$domain != "" )
+        discovery$list_domain = prior$domain;
+    return discovery;
+    }
+
+function add_gva_type_description_fields(
+    discovery: TransferInfo, observed: TypeDescriptionSignature,
+    mms_deletable: bool, type_raw: string,
+    type_node_count: count, type_maximum_depth: count): TransferInfo
+    {
+    discovery$deletable = mms_deletable;
+    discovery$type_node_count = type_node_count;
+    discovery$type_maximum_depth = type_maximum_depth;
+    if ( type_raw != "" )
+        {
+        discovery$type_raw = bounded_information_report_result_raw(type_raw);
+        discovery$type_raw_truncated =
+            |type_raw| > max_logged_result_raw_bytes;
+        }
+
+    if ( |observed$choices| == 0 ||
+         |observed$primary| != |observed$choices| ||
+         |observed$secondary| != |observed$choices| ||
+         |observed$child_counts| != |observed$choices| ||
+         |observed$packed| != |observed$choices| )
+        return discovery;
+
+    local root_index = |observed$choices| - 1;
+    local root_choice = observed$choices[root_index];
+    discovery$type_choice = root_choice;
+    discovery$type_constructed =
+        root_choice == 1 || root_choice == 2 || root_choice == 7 ||
+        root_choice == 16;
+    discovery$type_packed = observed$packed[root_index];
+    if ( root_choice == 1 )
+        discovery$type_number_of_elements = observed$primary[root_index];
+    else if ( root_choice == 2 )
+        discovery$type_component_count = observed$child_counts[root_index];
+    else if ( root_choice == 7 )
+        {
+        discovery$type_format_width = observed$primary[root_index];
+        discovery$type_exponent_width = observed$secondary[root_index];
+        }
+    else if ( root_choice == 12 )
+        discovery$type_boolean_value = observed$primary[root_index] != 0;
+    else if ( root_choice == 4 || root_choice == 5 ||
+              root_choice == 6 || root_choice == 9 ||
+              root_choice == 10 || root_choice == 13 ||
+              root_choice == 16 )
+        discovery$type_signed_value = observed$primary[root_index];
+
+    return discovery;
+    }
+
+function gva_type_mismatch_reasons(
+    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
+    unresolved_type_name_count: count,
+    observed: TypeDescriptionSignature,
+    expected: TypeDescriptionSignature): string
+    {
+    local mismatch_reasons = "";
+    if ( ! deletable_present )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "mms_deletable_missing");
+    else if ( mms_deletable )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "mms_deletable_true");
+    if ( ! type_resolved || unresolved_type_name_count > 0 )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "unresolved_type_name");
+    if ( ! valid_type_description_signature(observed) )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "invalid_type_signature");
+    else if ( ! type_description_signatures_equal(observed, expected) )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "type_signature_mismatch");
+    return mismatch_reasons;
+    }
+
+function revoke_known_variable_type(
+    c: connection, server_is_orig: bool, prior: PendingVariableType)
+    {
+    delete known_variable_types[
+        c$uid, server_is_orig, prior$scope, prior$domain, prior$name];
+    update_object_processing_state(
+        c$uid, server_is_orig, prior$scope, prior$domain, prior$name,
+        PROCESSING_KNOWN_VARIABLE_TYPE, F);
+    }
+
+function process_gva_response(
+    c: connection, is_orig: bool, invoke_id: int, key: count,
     deletable_present: bool, mms_deletable: bool, type_resolved: bool,
     unresolved_type_name_count: count,
     observed: TypeDescriptionSignature, type_raw: string,
     type_node_count: count, type_maximum_depth: count,
-    provenance: count, legacy_compatibility: bool)
+    legacy_compatibility: bool)
     {
-    # Recovered/inferred parser output remains available through evidence
-    # events, but it cannot create, contradict, or revoke trusted exact state.
-    # A terminal response still retires an opposite-direction verified request
-    # so truncated recovery cannot leak correlation state or poison invoke
-    # reuse.
-    if ( ! legacy_compatibility && provenance != 1 )
-        {
-        if ( pdu_type == 1 && invoke_id >= 0 )
-            {
-            local untrusted_key = int_to_count(invoke_id);
-            local untrusted_request_is_orig = ! is_orig;
-            delete pending_variable_types[
-                c$uid, untrusted_request_is_orig, untrusted_key];
-            delete invalid_variable_type_invokes[
-                c$uid, untrusted_request_is_orig, untrusted_key];
-            update_directional_processing_state(
-                c$uid, untrusted_request_is_orig, untrusted_key,
-                PROCESSING_PENDING_VARIABLE_TYPE, F);
-            update_directional_processing_state(
-                c$uid, untrusted_request_is_orig, untrusted_key,
-                PROCESSING_INVALID_VARIABLE_TYPE, F);
-            }
-        return;
-        }
-    if ( association_kind(c) != "tase2" || invoke_id < 0 )
-        return;
-    if ( pdu_type == 0 &&
-         ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
-        return;
-    if ( pdu_type == 1 &&
-         confirmed_response_is_ambiguous(c, is_orig, invoke_id) )
-        return;
-    local key = int_to_count(invoke_id);
-    if ( pdu_type == 0 )
-        {
-        if ( ! valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) ) return;
-        if ( [c$uid, is_orig, key] in invalid_variable_type_invokes ) return;
-        if ( [c$uid, is_orig, key] in pending_variable_types )
-            {
-            local reused = pending_variable_types[c$uid, is_orig, key];
-            delete pending_variable_types[c$uid, is_orig, key];
-            invalid_variable_type_invokes[c$uid, is_orig, key] =
-                reused$request_is_orig;
-            update_directional_processing_state(
-                c$uid, is_orig, key,
-                PROCESSING_PENDING_VARIABLE_TYPE, F);
-            update_directional_processing_state(
-                c$uid, is_orig, key,
-                PROCESSING_INVALID_VARIABLE_TYPE, T);
-            return;
-            }
-        if ( pending_variable_type_count(c$uid) >=
-             max_pending_transfer_sets )
-            {
-            event ICCP::resource_limit_exceeded(
-                c, is_orig, "pending_variable_types",
-                max_pending_transfer_sets,
-                pending_variable_type_count(c$uid), invoke_id);
-            return;
-            }
-        pending_variable_types[c$uid, is_orig, key] = [
-            $request_is_orig=is_orig,
-            $server=is_orig ? c$id$resp_h : c$id$orig_h,
-            $peer=is_orig ? c$id$orig_h : c$id$resp_h,
-            $scope=object_scope,
-            $domain=object_domain, $name=object_name
-        ];
-        update_directional_processing_state(
-            c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, T);
-        return;
-        }
-    if ( pdu_type != 1 ) return;
     local request_is_orig = ! is_orig;
     if ( [c$uid, request_is_orig, key] !in pending_variable_types )
         {
@@ -4207,14 +4292,8 @@ function process_gva_message(
         configured_type = configured_variable_types[
             prior$server, prior$peer, prior$scope, prior$domain, prior$name];
 
-    local discovery: TransferInfo = [
-        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
-        $action="type_discovery", $outcome="unmapped",
-        $invoke_id=invoke_id,
-        $list_scope=transfer_scope_name(prior$scope),
-        $list_name=prior$name
-    ];
-    if ( prior$domain != "" ) discovery$list_domain = prior$domain;
+    local discovery = new_gva_discovery_record(
+        c, is_orig, invoke_id, prior);
 
     # GetVariableAccessAttributes-Response carries an inline TypeDescription,
     # never a standardized type name. Exact names therefore come only from
@@ -4232,11 +4311,7 @@ function process_gva_message(
     if ( ! configured_tase2_type_scope_valid(
              configured_type, prior$scope, prior$domain, prior$name) )
         {
-        delete known_variable_types[
-            c$uid, is_orig, prior$scope, prior$domain, prior$name];
-        update_object_processing_state(
-            c$uid, is_orig, prior$scope, prior$domain, prior$name,
-            PROCESSING_KNOWN_VARIABLE_TYPE, F);
+        revoke_known_variable_type(c, is_orig, prior);
         discovery$outcome = "invalid_configuration";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = "invalid_standardized_scope";
@@ -4257,73 +4332,19 @@ function process_gva_message(
         unresolved_type_name_count = 0;
         }
 
-    discovery$deletable = mms_deletable;
-    discovery$type_node_count = type_node_count;
-    discovery$type_maximum_depth = type_maximum_depth;
-    if ( type_raw != "" )
-        {
-        discovery$type_raw = bounded_information_report_result_raw(type_raw);
-        discovery$type_raw_truncated =
-            |type_raw| > max_logged_result_raw_bytes;
-        }
-    if ( |observed$choices| > 0 &&
-         |observed$primary| == |observed$choices| &&
-         |observed$secondary| == |observed$choices| &&
-         |observed$child_counts| == |observed$choices| &&
-         |observed$packed| == |observed$choices| )
-        {
-        local root_index = |observed$choices| - 1;
-        local root_choice = observed$choices[root_index];
-        discovery$type_choice = root_choice;
-        discovery$type_constructed =
-            root_choice == 1 || root_choice == 2 || root_choice == 7 ||
-            root_choice == 16;
-        discovery$type_packed = observed$packed[root_index];
-        if ( root_choice == 1 )
-            discovery$type_number_of_elements = observed$primary[root_index];
-        else if ( root_choice == 2 )
-            discovery$type_component_count =
-                observed$child_counts[root_index];
-        else if ( root_choice == 7 )
-            {
-            discovery$type_format_width = observed$primary[root_index];
-            discovery$type_exponent_width = observed$secondary[root_index];
-            }
-        else if ( root_choice == 12 )
-            discovery$type_boolean_value = observed$primary[root_index] != 0;
-        else if ( root_choice == 4 || root_choice == 5 ||
-                  root_choice == 6 || root_choice == 9 ||
-                  root_choice == 10 || root_choice == 13 ||
-                  root_choice == 16 )
-            discovery$type_signed_value = observed$primary[root_index];
-        }
+    discovery = add_gva_type_description_fields(
+        discovery, observed, mms_deletable, type_raw,
+        type_node_count, type_maximum_depth);
 
-    local mismatch_reasons = "";
-    if ( ! deletable_present )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "mms_deletable_missing");
-    else if ( mms_deletable )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "mms_deletable_true");
-    if ( ! type_resolved || unresolved_type_name_count > 0 )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "unresolved_type_name");
-    if ( ! valid_type_description_signature(observed) )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "invalid_type_signature");
-    else if ( ! type_description_signatures_equal(observed, expected) )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "type_signature_mismatch");
+    local mismatch_reasons = gva_type_mismatch_reasons(
+        deletable_present, mms_deletable, type_resolved,
+        unresolved_type_name_count, observed, expected);
 
     if ( mismatch_reasons != "" )
         {
         # A later contradictory response revokes stale trust for the exact
         # endpoint-owned object instead of leaving an earlier learned type live.
-        delete known_variable_types[
-            c$uid, is_orig, prior$scope, prior$domain, prior$name];
-        update_object_processing_state(
-            c$uid, is_orig, prior$scope, prior$domain, prior$name,
-            PROCESSING_KNOWN_VARIABLE_TYPE, F);
+        revoke_known_variable_type(c, is_orig, prior);
         discovery$outcome = "type_mismatch";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = mismatch_reasons;
@@ -4351,6 +4372,51 @@ function process_gva_message(
         PROCESSING_KNOWN_VARIABLE_TYPE, T);
     discovery$outcome = "configured";
     write_transfer_record(c, is_orig, discovery);
+    }
+
+function process_gva_message(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    object_scope: count, object_domain: string, object_name: string,
+    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
+    unresolved_type_name_count: count,
+    observed: TypeDescriptionSignature, type_raw: string,
+    type_node_count: count, type_maximum_depth: count,
+    provenance: count, legacy_compatibility: bool)
+    {
+    # Recovered/inferred parser output remains available through evidence
+    # events, but it cannot create, contradict, or revoke trusted exact state.
+    # A terminal response still retires an opposite-direction verified request
+    # so truncated recovery cannot leak correlation state or poison invoke
+    # reuse.
+    if ( ! legacy_compatibility && provenance != 1 )
+        {
+        retire_untrusted_gva_response(c, is_orig, pdu_type, invoke_id);
+        return;
+        }
+    if ( association_kind(c) != "tase2" || invoke_id < 0 )
+        return;
+    if ( pdu_type == 0 &&
+         ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
+        return;
+    if ( pdu_type == 1 &&
+         confirmed_response_is_ambiguous(c, is_orig, invoke_id) )
+        return;
+
+    local key = int_to_count(invoke_id);
+    if ( pdu_type == 0 )
+        {
+        process_gva_request(
+            c, is_orig, invoke_id, key, object_scope, object_domain,
+            object_name);
+        return;
+        }
+    if ( pdu_type != 1 )
+        return;
+
+    process_gva_response(
+        c, is_orig, invoke_id, key, deletable_present, mms_deletable,
+        type_resolved, unresolved_type_name_count, observed, type_raw,
+        type_node_count, type_maximum_depth, legacy_compatibility);
     }
 
 event ICCP::mms_gva_message_v3(
