@@ -1,8 +1,8 @@
-@Library('CISAGOV Jenkins@iccp-resource-limits') _
+@Library('CISAGOV Jenkins') _
 build(
     parallelCompilers: false,
     useCgroupfs: true,
     zkgCompilers: ['clang'],
-    spicyJobs: 2,
+    spicyJobs: 1,
     buildJobs: 1
 )
