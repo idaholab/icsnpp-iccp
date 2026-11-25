@@ -3,6 +3,6 @@ build(
     parallelCompilers: false,
     useCgroupfs: true,
     zkgCompilers: ['clang'],
-    spicyJobs: 1,
+    spicyJobs: 2,
     buildJobs: 1
 )
