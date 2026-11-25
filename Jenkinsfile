@@ -1,4 +1,4 @@
-@Library('CISAGOV Jenkins') _
+@Library('CISAGOV Jenkins@iccp-resource-limits') _
 build(
     parallelCompilers: false,
     useCgroupfs: true,
