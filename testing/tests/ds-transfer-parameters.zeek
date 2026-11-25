@@ -50,6 +50,11 @@ function ds_integer_values(interval_value: int): vector of int
     return values;
     }
 
+function ds_component_choices(): vector of count
+    {
+    return vector(2, 5, 5, 5, 5, 5, 4, 3, 3, 3, 3, 3, 5);
+    }
+
 function ds_component_raws(conditions: string, enabled: string): vector of string
     {
     return vector("", "\x65\x53\xf1\x00", "\x3c", "\x05", "\x02",
@@ -67,7 +72,7 @@ event zeek_init() &priority=-5
         $start_time=network_time(), $duration=0secs, $service=set("iccp"),
         $history="", $uid="Cdsparams"
     ];
-    local choices = vector(2, 5, 5, 5, 5, 5, 4, 3, 3, 3, 3, 3, 5);
+    local choices = ds_component_choices();
     local data_set_choices = vector(6, 10, 10);
     local data_set_values: vector of int = vector();
     data_set_values[0] = 0;
@@ -168,5 +173,73 @@ event zeek_init() &priority=-5
         c, T, 0, 24, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
         choices, ds_component_raws("\x03", "\xff"),
         ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    # Group malformed root shape fields so their diagnostic ordering remains
+    # stable when validation is separated into helpers.
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 25, 5, 1, 1, "CONTROL_CENTER_B", "TS_TYPED", 2, 2, 5,
+        choices, ds_component_raws("\x03\xa8", "\xff"),
+        ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    local short_choices = vector(2, 5, 5, 5, 5, 5, 4, 3, 3, 3, 3, 3);
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 26, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        short_choices, ds_component_raws("\x03\xa8", "\xff"),
+        ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    local short_data_set_values: vector of int = vector();
+    short_data_set_values[0] = 0;
+    short_data_set_values[1] = 0;
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 27, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        choices, ds_component_raws("\x03\xa8", "\xff"),
+        ds_integer_values(60), vector(6, 10),
+        vector("\x00", "IGNORED"), short_data_set_values, 0);
+
+    local invalid_timing = ds_integer_values(60);
+    invalid_timing[1] = -1;
+    invalid_timing[3] = -1;
+    invalid_timing[4] = -1;
+    invalid_timing[5] = -1;
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 28, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        choices, ds_component_raws("\x03\xa8", "\xff"),
+        invalid_timing, data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    local invalid_condition_choice = ds_component_choices();
+    invalid_condition_choice[6] = 5;
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 29, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        invalid_condition_choice, ds_component_raws("\x03\xa8", "\xff"),
+        ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 30, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        choices, ds_component_raws("\x03\xaf", "\xff"),
+        ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    local invalid_booleans = ds_component_raws("\x03\xa8", "\xff");
+    invalid_booleans[7] = "";
+    invalid_booleans[8] = "";
+    invalid_booleans[9] = "";
+    invalid_booleans[10] = "";
+    invalid_booleans[11] = "";
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 31, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        choices, invalid_booleans, ds_integer_values(60), data_set_choices,
+        vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
+
+    local invalid_event_code = ds_integer_values(60);
+    invalid_event_code[12] = 32768;
+    event ICCP::mms_ds_transfer_set_message_v1(
+        c, T, 0, 32, 5, 0, 1, "CONTROL_CENTER_B", "TS_TYPED", 1, 1, 2,
+        choices, ds_component_raws("\x03\xa8", "\xff"),
+        invalid_event_code, data_set_choices,
         vector("\x00", "IGNORED", "DATA_SET"), data_set_values, 0);
     }

@@ -52,6 +52,6 @@ F	1	decoded	23	unmatched_response	response-to-rejected-peer
 Cinvoke-races	T	0	decoded	2	inferred	-
 Cinvoke-races	T	0	decoded	3	inferred	-
 Cinvoke-races	T	0	decoded	3	inferred	-
-Cinvoke-races	F	1	decoded	3	verified	OLD_POINT
 Cinvoke-races	T	0	decoded	1	verified	-
+Cinvoke-races	F	1	decoded	3	verified	OLD_POINT
 F	ambiguous_response	16	-	-

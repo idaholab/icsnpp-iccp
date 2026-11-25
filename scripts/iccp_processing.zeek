@@ -147,10 +147,8 @@ type PendingConfirmed: record {
     request_is_orig: bool;
 };
 
-global pending_confirmed: table[string, bool, count] of PendingConfirmed
-    &read_expire=association_state_timeout;
-global invalid_confirmed_invokes: set[string, bool, count]
-    &read_expire=association_state_timeout;
+global pending_confirmed: table[string, bool, count] of PendingConfirmed;
+global invalid_confirmed_invokes: set[string, bool, count];
 global processing_acse_lifecycle_spdu: table[string, bool] of count
     &read_expire=association_state_timeout;
 global processing_session_cleanup_spdu: table[string, bool] of count
@@ -173,8 +171,7 @@ type IdentifyEvidence: record {
 };
 
 global identify_evidence:
-    table[string, bool, count, count, count] of IdentifyEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count, count, count] of IdentifyEvidence;
 
 function identify_evidence_available(
     c: connection, is_orig: bool, sequence: count, pdu_type: count,
@@ -194,13 +191,9 @@ type InformationReportResultsEvidence: record {
     variable_scopes: vector of count;
     variable_domains: vector of string;
     variable_names: vector of string;
-    result_choices: vector of count;
-    result_errors: vector of int;
-    result_raws: vector of string;
-    result_integer_values: vector of int;
-    result_floating_values: vector of double;
-    result_boolean_values: vector of bool;
-    result_string_values: vector of string;
+    results: vector of MMSDataEvidence;
+    results_complete: bool;
+    exact_raw_metadata: bool;
 };
 
 type PointValueShapeEvidence: record {
@@ -218,12 +211,10 @@ type PointValueShapeEvidence: record {
 };
 
 global point_value_shape_evidence:
-    table[string, bool, count] of PointValueShapeEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PointValueShapeEvidence;
 
 global control_read_value_shape_evidence:
-    table[string, bool, count, count] of PointValueShapeEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count, count] of PointValueShapeEvidence;
 
 function point_value_shape_available(
     c: connection, is_orig: bool, sequence: count): bool
@@ -232,8 +223,10 @@ function point_value_shape_available(
     }
 
 global information_report_results_evidence:
-    table[string, bool, count] of InformationReportResultsEvidence
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of InformationReportResultsEvidence;
+
+global first_result_evidence:
+    table[string, bool, count, count] of MMSDataEvidence;
 
 function information_report_results_available(
     c: connection, is_orig: bool, sequence: count): bool
@@ -283,72 +276,312 @@ type ControlValueShapeEvidence: record {
     component_integer_values: vector of int &optional;
 };
 
+type DirectionalProcessingStateKind: enum {
+    PROCESSING_PENDING_CONFIRMED,
+    PROCESSING_INVALID_CONFIRMED,
+    PROCESSING_PENDING_CONTROL,
+    PROCESSING_PENDING_CONTROL_READ,
+    PROCESSING_INVALID_CONTROL_READ,
+    PROCESSING_PENDING_TRANSFER_SET,
+    PROCESSING_PENDING_TRANSFER_SUPPORT,
+    PROCESSING_PENDING_TRANSFER_CONTROL,
+    PROCESSING_PENDING_VARIABLE_TYPE,
+    PROCESSING_INVALID_VARIABLE_TYPE,
+};
+
+type SequenceProcessingStateKind: enum {
+    PROCESSING_INFORMATION_REPORT_RESULTS,
+    PROCESSING_POINT_VALUE_SHAPE,
+    PROCESSING_CONTROL_VALUE_SHAPE,
+    PROCESSING_CONTROL_VALUE_SHAPE_INVOKE,
+};
+
+type SequenceInvokeProcessingStateKind: enum {
+    PROCESSING_CONTROL_READ_VALUE_SHAPE,
+    PROCESSING_FIRST_RESULT_EVIDENCE,
+};
+
+type ObjectProcessingStateKind: enum {
+    PROCESSING_KNOWN_TRANSFER_SET,
+    PROCESSING_ACTIVE_TRANSFER_SET,
+    PROCESSING_KNOWN_VARIABLE_TYPE,
+};
+
+type ProcessingStateIndex: record {
+    pending_confirmed: set[bool, count];
+    invalid_confirmed: set[bool, count];
+    pending_controls: set[bool, count];
+    pending_control_reads: set[bool, count];
+    invalid_control_reads: set[bool, count];
+    pending_transfer_sets: set[bool, count];
+    pending_transfer_support: set[bool, count];
+    pending_transfer_controls: set[bool, count];
+    pending_variable_types: set[bool, count];
+    invalid_variable_types: set[bool, count];
+    identify_evidence: set[bool, count, count, count];
+    information_report_results: set[bool, count];
+    point_value_shapes: set[bool, count];
+    control_value_shapes: set[bool, count];
+    control_value_shape_invokes: set[bool, count];
+    control_read_value_shapes: set[bool, count, count];
+    first_result_evidence: set[bool, count, count];
+    known_transfer_sets: set[bool, count, string, string];
+    active_transfer_sets: set[bool, count, string, string];
+    known_variable_types: set[bool, count, string, string];
+};
+
+global processing_state_indexes: table[string] of ProcessingStateIndex;
+
+function initial_processing_state_index(): ProcessingStateIndex
+    {
+    local pending_confirmed_keys: set[bool, count] = set();
+    local invalid_confirmed_keys: set[bool, count] = set();
+    local pending_control_keys: set[bool, count] = set();
+    local pending_control_read_keys: set[bool, count] = set();
+    local invalid_control_read_keys: set[bool, count] = set();
+    local pending_transfer_set_keys: set[bool, count] = set();
+    local pending_transfer_support_keys: set[bool, count] = set();
+    local pending_transfer_control_keys: set[bool, count] = set();
+    local pending_variable_type_keys: set[bool, count] = set();
+    local invalid_variable_type_keys: set[bool, count] = set();
+    local identify_keys: set[bool, count, count, count] = set();
+    local report_keys: set[bool, count] = set();
+    local point_shape_keys: set[bool, count] = set();
+    local control_shape_keys: set[bool, count] = set();
+    local control_shape_invoke_keys: set[bool, count] = set();
+    local control_read_shape_keys: set[bool, count, count] = set();
+    local first_result_keys: set[bool, count, count] = set();
+    local known_transfer_keys: set[bool, count, string, string] = set();
+    local active_transfer_keys: set[bool, count, string, string] = set();
+    local known_variable_keys: set[bool, count, string, string] = set();
+    return [
+        $pending_confirmed=pending_confirmed_keys,
+        $invalid_confirmed=invalid_confirmed_keys,
+        $pending_controls=pending_control_keys,
+        $pending_control_reads=pending_control_read_keys,
+        $invalid_control_reads=invalid_control_read_keys,
+        $pending_transfer_sets=pending_transfer_set_keys,
+        $pending_transfer_support=pending_transfer_support_keys,
+        $pending_transfer_controls=pending_transfer_control_keys,
+        $pending_variable_types=pending_variable_type_keys,
+        $invalid_variable_types=invalid_variable_type_keys,
+        $identify_evidence=identify_keys,
+        $information_report_results=report_keys,
+        $point_value_shapes=point_shape_keys,
+        $control_value_shapes=control_shape_keys,
+        $control_value_shape_invokes=control_shape_invoke_keys,
+        $control_read_value_shapes=control_read_shape_keys,
+        $first_result_evidence=first_result_keys,
+        $known_transfer_sets=known_transfer_keys,
+        $active_transfer_sets=active_transfer_keys,
+        $known_variable_types=known_variable_keys
+    ];
+    }
+
+function processing_state_index(uid: string): ProcessingStateIndex
+    {
+    if ( uid !in processing_state_indexes )
+        processing_state_indexes[uid] = initial_processing_state_index();
+    return processing_state_indexes[uid];
+    }
+
+function update_directional_processing_state(
+    uid: string, is_orig: bool, key: count,
+    kind: DirectionalProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_PENDING_CONFIRMED )
+        if ( retain ) add state$pending_confirmed[is_orig, key];
+        else delete state$pending_confirmed[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_CONFIRMED )
+        if ( retain ) add state$invalid_confirmed[is_orig, key];
+        else delete state$invalid_confirmed[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_CONTROL )
+        if ( retain ) add state$pending_controls[is_orig, key];
+        else delete state$pending_controls[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_CONTROL_READ )
+        if ( retain ) add state$pending_control_reads[is_orig, key];
+        else delete state$pending_control_reads[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_CONTROL_READ )
+        if ( retain ) add state$invalid_control_reads[is_orig, key];
+        else delete state$invalid_control_reads[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_SET )
+        if ( retain ) add state$pending_transfer_sets[is_orig, key];
+        else delete state$pending_transfer_sets[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_SUPPORT )
+        if ( retain ) add state$pending_transfer_support[is_orig, key];
+        else delete state$pending_transfer_support[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_TRANSFER_CONTROL )
+        if ( retain ) add state$pending_transfer_controls[is_orig, key];
+        else delete state$pending_transfer_controls[is_orig, key];
+    else if ( kind == PROCESSING_PENDING_VARIABLE_TYPE )
+        if ( retain ) add state$pending_variable_types[is_orig, key];
+        else delete state$pending_variable_types[is_orig, key];
+    else if ( kind == PROCESSING_INVALID_VARIABLE_TYPE )
+        if ( retain ) add state$invalid_variable_types[is_orig, key];
+        else delete state$invalid_variable_types[is_orig, key];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_sequence_processing_state(
+    uid: string, is_orig: bool, sequence: count,
+    kind: SequenceProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_INFORMATION_REPORT_RESULTS )
+        if ( retain ) add state$information_report_results[
+            is_orig, sequence];
+        else delete state$information_report_results[is_orig, sequence];
+    else if ( kind == PROCESSING_POINT_VALUE_SHAPE )
+        if ( retain ) add state$point_value_shapes[is_orig, sequence];
+        else delete state$point_value_shapes[is_orig, sequence];
+    else if ( kind == PROCESSING_CONTROL_VALUE_SHAPE )
+        if ( retain ) add state$control_value_shapes[is_orig, sequence];
+        else delete state$control_value_shapes[is_orig, sequence];
+    else if ( kind == PROCESSING_CONTROL_VALUE_SHAPE_INVOKE )
+        if ( retain ) add state$control_value_shape_invokes[
+            is_orig, sequence];
+        else delete state$control_value_shape_invokes[is_orig, sequence];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_sequence_invoke_processing_state(
+    uid: string, is_orig: bool, sequence: count, invoke: count,
+    kind: SequenceInvokeProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_CONTROL_READ_VALUE_SHAPE )
+        if ( retain ) add state$control_read_value_shapes[
+            is_orig, sequence, invoke];
+        else delete state$control_read_value_shapes[
+            is_orig, sequence, invoke];
+    else if ( kind == PROCESSING_FIRST_RESULT_EVIDENCE )
+        if ( retain ) add state$first_result_evidence[
+            is_orig, sequence, invoke];
+        else delete state$first_result_evidence[
+            is_orig, sequence, invoke];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_object_processing_state(
+    uid: string, is_orig: bool, scope: count, domain: string, name: string,
+    kind: ObjectProcessingStateKind, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( kind == PROCESSING_KNOWN_TRANSFER_SET )
+        if ( retain ) add state$known_transfer_sets[
+            is_orig, scope, domain, name];
+        else delete state$known_transfer_sets[is_orig, scope, domain, name];
+    else if ( kind == PROCESSING_ACTIVE_TRANSFER_SET )
+        if ( retain ) add state$active_transfer_sets[
+            is_orig, scope, domain, name];
+        else delete state$active_transfer_sets[
+            is_orig, scope, domain, name];
+    else if ( kind == PROCESSING_KNOWN_VARIABLE_TYPE )
+        if ( retain ) add state$known_variable_types[
+            is_orig, scope, domain, name];
+        else delete state$known_variable_types[
+            is_orig, scope, domain, name];
+    processing_state_indexes[uid] = state;
+    }
+
+function update_identify_processing_state(
+    uid: string, is_orig: bool, sequence: count, pdu_type: count,
+    invoke: count, retain: bool)
+    {
+    if ( ! retain && uid !in processing_state_indexes ) return;
+    local state = processing_state_index(uid);
+    if ( retain ) add state$identify_evidence[
+        is_orig, sequence, pdu_type, invoke];
+    else delete state$identify_evidence[
+        is_orig, sequence, pdu_type, invoke];
+    processing_state_indexes[uid] = state;
+    }
+
 global control_value_shape_evidence:
-    table[string, bool, count] of ControlValueShapeEvidence
-    &read_expire=association_state_timeout;
-global control_value_shape_invokes: table[string, bool, count] of count
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of ControlValueShapeEvidence;
+global control_value_shape_invokes: table[string, bool, count] of count;
 
 function clear_control_value_shapes(uid: string, is_orig: bool)
     {
-    # A parser-delivered Write records its invoke alongside the sequence before
-    # the richer shape hooks run. Clear both indexed and standalone/direct-event
-    # evidence when the whole direction or association is retired.
-    local indexed_sequences: vector of count;
-    for ( [indexed_uid, indexed_is_orig, indexed_sequence] in
-          control_value_shape_invokes )
-        if ( indexed_uid == uid && indexed_is_orig == is_orig )
-            indexed_sequences[|indexed_sequences|] = indexed_sequence;
-    for ( indexed_index in indexed_sequences )
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
+    local invoke_sequences: vector of count;
+    for ( [entry_is_orig, indexed_sequence] in
+          state$control_value_shape_invokes )
+        if ( entry_is_orig == is_orig )
+            invoke_sequences[|invoke_sequences|] = indexed_sequence;
+    for ( index in invoke_sequences )
         {
-        delete control_value_shape_invokes[
-            uid, is_orig, indexed_sequences[indexed_index]];
-        delete control_value_shape_evidence[
-            uid, is_orig, indexed_sequences[indexed_index]];
+        local invoke_sequence = invoke_sequences[index];
+        delete control_value_shape_invokes[uid, is_orig, invoke_sequence];
+        delete state$control_value_shape_invokes[
+            is_orig, invoke_sequence];
         }
 
-    local orphan_sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence] in
-          control_value_shape_evidence )
-        if ( entry_uid == uid && entry_is_orig == is_orig )
-            orphan_sequences[|orphan_sequences|] = sequence;
-    for ( orphan_index in orphan_sequences )
+    local shape_sequences: vector of count;
+    for ( [entry_is_orig, shape_sequence] in state$control_value_shapes )
+        if ( entry_is_orig == is_orig )
+            shape_sequences[|shape_sequences|] = shape_sequence;
+    for ( index in shape_sequences )
+        {
+        local retained_sequence = shape_sequences[index];
         delete control_value_shape_evidence[
-            uid, is_orig, orphan_sequences[orphan_index]];
+            uid, is_orig, retained_sequence];
+        delete state$control_value_shapes[is_orig, retained_sequence];
+        }
+    processing_state_indexes[uid] = state;
     }
 
 function clear_control_value_shapes_for_invoke(
     uid: string, is_orig: bool, invoke: count)
     {
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
     local sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence] in
-          control_value_shape_invokes )
-        if ( entry_uid == uid && entry_is_orig == is_orig &&
+    for ( [entry_is_orig, indexed_sequence] in
+          state$control_value_shape_invokes )
+        if ( entry_is_orig == is_orig &&
              control_value_shape_invokes[
-                 entry_uid, entry_is_orig, sequence] == invoke )
-            sequences[|sequences|] = sequence;
+                 uid, is_orig, indexed_sequence] == invoke )
+            sequences[|sequences|] = indexed_sequence;
 
     for ( index in sequences )
         {
+        local retained_sequence = sequences[index];
         delete control_value_shape_invokes[
-            uid, is_orig, sequences[index]];
+            uid, is_orig, retained_sequence];
         delete control_value_shape_evidence[
-            uid, is_orig, sequences[index]];
+            uid, is_orig, retained_sequence];
+        delete state$control_value_shape_invokes[
+            is_orig, retained_sequence];
+        delete state$control_value_shapes[is_orig, retained_sequence];
         }
+    processing_state_indexes[uid] = state;
     }
 
 function clear_control_read_shapes(
     uid: string, is_orig: bool, invoke: count)
     {
+    if ( uid !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid];
     local sequences: vector of count;
-    for ( [entry_uid, entry_is_orig, sequence, entry_invoke] in
-          control_read_value_shape_evidence )
-        if ( entry_uid == uid && entry_is_orig == is_orig &&
-             entry_invoke == invoke )
+    for ( [entry_is_orig, sequence, entry_invoke] in
+          state$control_read_value_shapes )
+        if ( entry_is_orig == is_orig && entry_invoke == invoke )
             sequences[|sequences|] = sequence;
     for ( index in sequences )
+        {
         delete control_read_value_shape_evidence[
             uid, is_orig, sequences[index], invoke];
+        delete state$control_read_value_shapes[
+            is_orig, sequences[index], invoke];
+        }
+    processing_state_indexes[uid] = state;
     }
 
 global classify_control_write: function(
@@ -369,6 +602,9 @@ event ICCP::mms_control_value_shape_v3(
     if ( first_data_choice == 0 )
         {
         delete control_value_shape_evidence[c$uid, is_orig, sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         return;
         }
     local evidence: ControlValueShapeEvidence = [
@@ -389,6 +625,8 @@ event ICCP::mms_control_value_shape_v3(
                 existing$component_integer_values;
         }
     control_value_shape_evidence[c$uid, is_orig, sequence] = evidence;
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_CONTROL_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_control_value_shape_v4(
@@ -403,6 +641,9 @@ event ICCP::mms_control_value_shape_v4(
     if ( first_data_choice == 0 )
         {
         delete control_value_shape_evidence[c$uid, is_orig, sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         return;
         }
     control_value_shape_evidence[c$uid, is_orig, sequence] = [
@@ -413,15 +654,14 @@ event ICCP::mms_control_value_shape_v4(
         $component_raws=component_raws,
         $component_integer_values=component_integer_values
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_CONTROL_VALUE_SHAPE, T);
     }
 
-global pending_controls: table[string, bool, count] of PendingControl
-    &read_expire=association_state_timeout;
-global pending_control_reads: table[string, bool, count] of PendingControlRead
-    &read_expire=association_state_timeout;
+global pending_controls: table[string, bool, count] of PendingControl;
+global pending_control_reads: table[string, bool, count] of PendingControlRead;
 global invalid_control_read_invokes:
-    table[string, bool, count] of InvalidControlReadInvoke
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of InvalidControlReadInvoke;
 
 # The compatibility Read events do not expose VariableAccessSpecification.
 # A packet-derived event must therefore be handled by mms_read_message_v3,
@@ -620,13 +860,9 @@ event ICCP::mms_device_action_message_v1(
 
 function pending_confirmed_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_confirmed )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_confirmed_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_confirmed| + |state$invalid_confirmed|;
     }
 
 function mms_error_class_name(error_class: count): string
@@ -664,8 +900,78 @@ event ICCP::mms_identify_message_v2(
         $revision=revision, $abstract_syntax_count=abstract_syntax_count,
         $first_abstract_syntax=first_abstract_syntax
     ];
+    update_identify_processing_state(
+        c$uid, is_orig, sequence, pdu_type,
+        int_to_count(invoke_id), T);
     }
 
+function store_information_report_results_evidence(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    exact_raw_metadata: bool)
+    {
+    local complete = result_count == |result_choices| &&
+        result_count == |result_errors| &&
+        result_count == |result_raws| &&
+        result_count == |result_raw_lengths| &&
+        result_count == |result_raw_truncated| &&
+        result_count == |result_integer_values| &&
+        result_count == |result_floating_values| &&
+        result_count == |result_boolean_values| &&
+        result_count == |result_string_values|;
+    local results: vector of MMSDataEvidence;
+    local index: count = 0;
+    while ( complete && index < result_count )
+        {
+        results[index] = [
+            $choice=result_choices[index], $error=result_errors[index],
+            $raw_prefix=result_raws[index],
+            $raw_length=result_raw_lengths[index],
+            $raw_truncated=result_raw_truncated[index],
+            $integer_value=result_integer_values[index],
+            $floating_value=result_floating_values[index],
+            $boolean_value=result_boolean_values[index],
+            $string_value=result_string_values[index]
+        ];
+        ++index;
+        }
+    local sequence = mms_parser_sequence(c, is_orig);
+    if ( ! exact_raw_metadata &&
+         [c$uid, is_orig, sequence] in
+            information_report_results_evidence &&
+         information_report_results_evidence[
+            c$uid, is_orig, sequence]$exact_raw_metadata )
+        return;
+    information_report_results_evidence[c$uid, is_orig, sequence] = [
+        $access_choice=access_choice,
+        $list_scope=list_scope, $list_domain=list_domain,
+        $list_name=list_name, $result_count=result_count,
+        $failure_count=failure_count,
+        $variable_scopes=variable_scopes,
+        $variable_domains=variable_domains,
+        $variable_names=variable_names,
+        $results=results, $results_complete=complete,
+        $exact_raw_metadata=exact_raw_metadata
+    ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence,
+        PROCESSING_INFORMATION_REPORT_RESULTS, T);
+    }
+
+## Deprecated compatibility adapter. Packet-derived reports use v3.
 event ICCP::mms_information_report_results_v2(
     c: connection, is_orig: bool, access_choice: count,
     list_scope: count, list_domain: string, list_name: string,
@@ -682,22 +988,71 @@ event ICCP::mms_information_report_results_v2(
     result_string_values: vector of string,
     provenance: count) &priority=20
     {
-    local sequence = mms_parser_sequence(c, is_orig);
-    information_report_results_evidence[c$uid, is_orig, sequence] = [
-        $access_choice=access_choice,
-        $list_scope=list_scope, $list_domain=list_domain,
-        $list_name=list_name, $result_count=result_count,
-        $failure_count=failure_count,
-        $variable_scopes=variable_scopes,
-        $variable_domains=variable_domains,
-        $variable_names=variable_names,
-        $result_choices=result_choices,
-        $result_errors=result_errors, $result_raws=result_raws,
-        $result_integer_values=result_integer_values,
-        $result_floating_values=result_floating_values,
-        $result_boolean_values=result_boolean_values,
-        $result_string_values=result_string_values
+    local raw_lengths: vector of count;
+    local raw_truncated: vector of bool;
+    local index: count = 0;
+    while ( index < |result_raws| )
+        {
+        raw_lengths[index] = |result_raws[index]|;
+        raw_truncated[index] =
+            |result_raws[index]| > max_logged_result_raw_bytes;
+        ++index;
+        }
+    store_information_report_results_evidence(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        raw_lengths, raw_truncated, result_integer_values,
+        result_floating_values, result_boolean_values,
+        result_string_values, F);
+    }
+
+event ICCP::mms_information_report_results_v3(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    provenance: count) &priority=20
+    {
+    store_information_report_results_evidence(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        result_raw_lengths, result_raw_truncated, result_integer_values,
+        result_floating_values, result_boolean_values,
+        result_string_values, T);
+    }
+
+event ICCP::mms_first_result_evidence_v1(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    service_tag: count, choice: count, raw_prefix: string,
+    raw_length: count, raw_truncated: bool, integer_value: int,
+    floating_value: double, provenance: count) &priority=20
+    {
+    if ( pdu_type != 1 || service_tag != 4 || invoke_id < 0 ) return;
+    first_result_evidence[
+        c$uid, is_orig, mms_parser_sequence(c, is_orig),
+        int_to_count(invoke_id)
+    ] = [
+        $choice=choice, $error=-1, $raw_prefix=raw_prefix,
+        $raw_length=raw_length, $raw_truncated=raw_truncated,
+        $integer_value=integer_value, $floating_value=floating_value,
+        $boolean_value=F, $string_value=""
     ];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, mms_parser_sequence(c, is_orig),
+        int_to_count(invoke_id), PROCESSING_FIRST_RESULT_EVIDENCE, T);
     }
 
 event ICCP::mms_point_value_shape_v2(
@@ -719,6 +1074,8 @@ event ICCP::mms_point_value_shape_v2(
         existing$second_component_length = second_component_length;
         existing$third_component_length = third_component_length;
         point_value_shape_evidence[c$uid, is_orig, sequence] = existing;
+        update_sequence_processing_state(
+            c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
         return;
         }
     point_value_shape_evidence[c$uid, is_orig, sequence] = [
@@ -727,6 +1084,8 @@ event ICCP::mms_point_value_shape_v2(
         $second_component_length=second_component_length,
         $third_component_length=third_component_length
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_point_value_shape_v3(
@@ -756,6 +1115,8 @@ event ICCP::mms_point_value_shape_v3(
         $nested_raws=nested_raws,
         $nested_integer_values=nested_integer_values
     ];
+    update_sequence_processing_state(
+        c$uid, is_orig, sequence, PROCESSING_POINT_VALUE_SHAPE, T);
     }
 
 event ICCP::mms_control_read_value_shape_v1(
@@ -781,25 +1142,22 @@ event ICCP::mms_control_read_value_shape_v1(
         $component_raws=component_raws,
         $component_integer_values=component_integer_values
     ];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, sequence, key,
+        PROCESSING_CONTROL_READ_VALUE_SHAPE, T);
     }
 
 function pending_control_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_controls )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_controls|;
     }
 
 function pending_control_read_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_control_reads )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, request_is_orig, invoke] in
-          invalid_control_read_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_control_reads| + |state$invalid_control_reads|;
     }
 
 function control_scope_name(scope: count): string
@@ -1016,10 +1374,14 @@ function invalidate_control_read_for_other_request(
         {
         local prior = pending_control_reads[c$uid, is_orig, key];
         delete pending_control_reads[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, F);
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 prior$classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         local reused: ControlInfo = [
             $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
             $association_kind=association_kind(c),
@@ -1053,7 +1415,12 @@ function finish_invalid_control_read_for_other_response(
     local invalid = invalid_control_read_invokes[
         c$uid, request_is_orig, key];
     if ( outcome != "direction_mismatch" )
+        {
         delete invalid_control_read_invokes[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_INVALID_CONTROL_READ, F);
+        }
     local ambiguous: ControlInfo = [
         $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
         $association_kind=association_kind(c),
@@ -1095,24 +1462,41 @@ function begin_control_read_request(
     if ( [c$uid, is_orig, key] in pending_controls )
         {
         delete pending_controls[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL, F);
         if ( [c$uid, is_orig, key] in pending_control_reads )
+            {
             delete pending_control_reads[c$uid, is_orig, key];
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_PENDING_CONTROL_READ, F);
+            }
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         }
     else if ( [c$uid, is_orig, key] in pending_control_reads )
         {
         local prior = pending_control_reads[c$uid, is_orig, key];
         delete pending_control_reads[c$uid, is_orig, key];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, F);
         invalid_control_read_invokes[c$uid, is_orig, key] = [
             $classification=control_read_candidate_classification(
                 prior$classification)
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_CONTROL_READ, T);
         }
     else if ( ! state_full && ! reused )
+        {
         pending_control_reads[c$uid, is_orig, key] = pending;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL_READ, T);
+        }
 
     if ( state_full )
         event ICCP::resource_limit_exceeded(
@@ -1147,6 +1531,9 @@ function finish_control_read_response(
         local invalid = invalid_control_read_invokes[
             c$uid, request_is_orig, key];
         delete invalid_control_read_invokes[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_INVALID_CONTROL_READ, F);
         local ambiguous: ControlInfo = [
             $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
             $association_kind=association_kind(c),
@@ -1207,6 +1594,9 @@ function finish_control_read_response(
             c$uid, is_orig, parser_sequence, key];
         delete control_read_value_shape_evidence[
             c$uid, is_orig, parser_sequence, key];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, parser_sequence, key,
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
         }
     local tag_success = result_count == 1 && failure_count == 0 &&
         first_result_choice == 2 && point_tag_value_shape(tag_shape);
@@ -1249,6 +1639,9 @@ function finish_control_read_response(
                 c, is_orig, invoke_id, "failed", prior, failure_count,
                 "", -1);
         delete pending_control_reads[c$uid, request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, request_is_orig, key,
+            PROCESSING_PENDING_CONTROL_READ, F);
         }
     }
 
@@ -1274,6 +1667,9 @@ function finish_deferred_control_read_response(
             c$uid, is_orig, context$parser_sequence, key];
         delete control_read_value_shape_evidence[
             c$uid, is_orig, context$parser_sequence, key];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, context$parser_sequence, key,
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
         }
 
     local prior: PendingControlRead = [
@@ -1346,8 +1742,13 @@ event mms_control_read_shape_cleanup(
     c: connection, is_orig: bool, parser_sequence: count, invoke_id: int)
     {
     if ( invoke_id >= 0 )
+        {
         delete control_read_value_shape_evidence[
             c$uid, is_orig, parser_sequence, int_to_count(invoke_id)];
+        update_sequence_invoke_processing_state(
+            c$uid, is_orig, parser_sequence, int_to_count(invoke_id),
+            PROCESSING_CONTROL_READ_VALUE_SHAPE, F);
+        }
     }
 
 event ICCP::mms_error_message(
@@ -1394,6 +1795,9 @@ event ICCP::mms_error_message(
             rec$outcome = "correlated";
             delete pending_confirmed[
                 c$uid, confirmed_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, confirmed_request_is_orig, key,
+                PROCESSING_PENDING_CONFIRMED, F);
             }
         else if ( [c$uid, is_orig, key] in invalid_confirmed_invokes )
             rec$outcome = "direction_mismatch";
@@ -1453,6 +1857,9 @@ event ICCP::mms_error_message(
                     mms_error_class_name(error_class), error_code);
                 delete pending_controls[
                     c$uid, control_request_is_orig, control_key];
+                update_directional_processing_state(
+                    c$uid, control_request_is_orig, control_key,
+                    PROCESSING_PENDING_CONTROL, F);
                 }
             }
         }
@@ -1482,8 +1889,13 @@ event ICCP::mms_error_message(
             local invalid_read = invalid_control_read_invokes[
                 c$uid, read_request_is_orig, invalid_read_key];
             if ( read_direction_valid )
+                {
                 delete invalid_control_read_invokes[
                     c$uid, read_request_is_orig, invalid_read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, invalid_read_key,
+                    PROCESSING_INVALID_CONTROL_READ, F);
+                }
             local ambiguous_read_error: ControlInfo = [
                 $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
                 $association_kind=association_kind(c),
@@ -1524,6 +1936,9 @@ event ICCP::mms_error_message(
                     mms_error_class_name(error_class), error_code);
                 delete pending_control_reads[
                     c$uid, read_request_is_orig, invalid_read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, invalid_read_key,
+                    PROCESSING_PENDING_CONTROL_READ, F);
                 }
             }
         }
@@ -1542,6 +1957,10 @@ event ICCP::mms_reject_message_v1(
     local key = int_to_count(invoke_id);
     delete pending_confirmed[c$uid, request_is_orig, key];
     delete invalid_confirmed_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_CONFIRMED, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_INVALID_CONFIRMED, F);
     purge_confirmed_request_state(c, request_is_orig, invoke_id);
     }
 
@@ -1571,6 +1990,12 @@ event ICCP::mms_control_message(
             c$uid, is_orig, rejected_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, rejected_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, rejected_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, rejected_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
     if ( pdu_type == 1 &&
@@ -1602,6 +2027,9 @@ event ICCP::mms_control_message(
         local control_provenance = mms_provenance(c, is_orig);
         control_value_shape_invokes[
             c$uid, is_orig, control_sequence] = key;
+        update_sequence_processing_state(
+            c$uid, is_orig, control_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, T);
         schedule 0secs {
             ICCP::mms_control_request_deferred_v3(
                 c, is_orig, invoke_id, object_scope, object_domain,
@@ -1661,6 +2089,9 @@ event ICCP::mms_control_message(
                 failure_count, "", -1);
             }
         delete pending_controls[c$uid, response_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, response_request_is_orig, key,
+            PROCESSING_PENDING_CONTROL, F);
         }
     }
 
@@ -1676,6 +2107,12 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
 
@@ -1685,6 +2122,12 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_invokes[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
         return;
         }
 
@@ -1698,8 +2141,14 @@ function process_control_request_deferred(
             c$uid, is_orig, parser_sequence];
         delete control_value_shape_evidence[
             c$uid, is_orig, parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, parser_sequence,
+            PROCESSING_CONTROL_VALUE_SHAPE, F);
         }
     delete control_value_shape_invokes[c$uid, is_orig, parser_sequence];
+    update_sequence_processing_state(
+        c$uid, is_orig, parser_sequence,
+        PROCESSING_CONTROL_VALUE_SHAPE_INVOKE, F);
 
     local key = int_to_count(invoke_id);
     local reused = [c$uid, is_orig, key] in pending_controls;
@@ -1736,7 +2185,11 @@ function process_control_request_deferred(
         pending$tag_reason = shape$component_raws[1];
         }
     if ( ! state_full && ! read_reused )
+        {
         pending_controls[c$uid, is_orig, key] = pending;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_CONTROL, T);
+        }
     else if ( state_full )
         {
         event ICCP::legacy_alert_provenance_marker_v1(
@@ -1806,44 +2259,21 @@ event ICCP::mms_control_request_deferred_v3(
 
 function clear_control_processing_state(uid_to_clear: string)
     {
-    local keys: vector of count;
-    local directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_controls )
-        if ( uid == uid_to_clear )
-            {
-            keys[|keys|] = invoke;
-            directions[|directions|] = request_is_orig;
-            }
-    for ( index in keys )
-        delete pending_controls[
-            uid_to_clear, directions[index], keys[index]];
-    local select_keys: vector of count;
-    local select_directions: vector of bool;
-    for ( [select_uid, select_is_orig, select_invoke] in
-          pending_control_reads )
-        if ( select_uid == uid_to_clear )
-            {
-            select_keys[|select_keys|] = select_invoke;
-            select_directions[|select_directions|] = select_is_orig;
-            }
-    for ( select_index in select_keys )
-        delete pending_control_reads[
-            uid_to_clear, select_directions[select_index],
-            select_keys[select_index]];
-    local invalid_select_keys: vector of count;
-    local invalid_select_directions: vector of bool;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_control_read_invokes )
-        if ( invalid_uid == uid_to_clear )
-            {
-            invalid_select_keys[|invalid_select_keys|] = invalid_invoke;
-            invalid_select_directions[|invalid_select_directions|] =
-                invalid_is_orig;
-            }
-    for ( invalid_select_index in invalid_select_keys )
-        delete invalid_control_read_invokes[
-            uid_to_clear, invalid_select_directions[invalid_select_index],
-            invalid_select_keys[invalid_select_index]];
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_controls )
+        delete pending_controls[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_control_reads )
+        delete pending_control_reads[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_control_reads )
+        delete invalid_control_read_invokes[uid_to_clear, is_orig, invoke];
+    local empty_pending_controls: set[bool, count] = set();
+    local empty_pending_reads: set[bool, count] = set();
+    local empty_invalid_reads: set[bool, count] = set();
+    state$pending_controls = empty_pending_controls;
+    state$pending_control_reads = empty_pending_reads;
+    state$invalid_control_reads = empty_invalid_reads;
+    processing_state_indexes[uid_to_clear] = state;
     clear_control_value_shapes(uid_to_clear, T);
     clear_control_value_shapes(uid_to_clear, F);
     }
@@ -2092,11 +2522,9 @@ global information_report_pairing_status: function(
     c: connection, server_is_orig: bool,
     evidence: InformationReportResultsEvidence): string;
 
-global pending_transfer_sets: table[string, bool, count] of PendingTransferSet
-    &read_expire=association_state_timeout;
+global pending_transfer_sets: table[string, bool, count] of PendingTransferSet;
 global known_transfer_sets:
-    table[string, bool, count, string, string] of TransferMembership
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of TransferMembership;
 
 type DSTransferParameters: record {
     data_set_scope: count &optional;
@@ -2117,6 +2545,12 @@ type DSTransferParameters: record {
     event_code_requested: int &optional;
     conformance: string;
     conformance_reasons: string &optional;
+};
+
+type DSTransferParameterValidation: record {
+    parameters: DSTransferParameters;
+    deviation: bool;
+    reasons: string;
 };
 
 type PendingTransferControl: record {
@@ -2145,15 +2579,12 @@ type PendingTransferSupport: record {
 };
 
 global pending_transfer_support:
-    table[string, bool, count] of PendingTransferSupport
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingTransferSupport;
 
 global pending_transfer_controls:
-    table[string, bool, count] of PendingTransferControl
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingTransferControl;
 global active_ds_transfers:
-    table[string, bool, count, string, string] of ActiveDSTransfer
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of ActiveDSTransfer;
 
 global transfer_scope_name: function(scope: count): string;
 global decode_ds_conditions: function(bits: count): string;
@@ -2203,13 +2634,10 @@ type PendingVariableType: record {
 };
 
 global pending_variable_types:
-    table[string, bool, count] of PendingVariableType
-    &read_expire=association_state_timeout;
-global invalid_variable_type_invokes: table[string, bool, count] of bool
-    &read_expire=association_state_timeout;
+    table[string, bool, count] of PendingVariableType;
+global invalid_variable_type_invokes: table[string, bool, count] of bool;
 global known_variable_types:
-    table[string, bool, count, string, string] of string
-    &read_expire=association_state_timeout;
+    table[string, bool, count, string, string] of string;
 
 # Return true when a specialized request handler may retain correlation state.
 # The aggregate event purges additive state on a newly detected global limit;
@@ -2261,6 +2689,29 @@ function purge_confirmed_request_state(
     delete pending_transfer_controls[c$uid, request_is_orig, key];
     delete pending_variable_types[c$uid, request_is_orig, key];
     delete invalid_variable_type_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_CONTROL, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_CONTROL_READ, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_INVALID_CONTROL_READ, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SET, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SUPPORT, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_CONTROL, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_VARIABLE_TYPE, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_INVALID_VARIABLE_TYPE, F);
 
     # Read identity also lives in the association state used by the aggregate
     # logger.  Do not let an overwritten request supply an object identity to a
@@ -2297,6 +2748,9 @@ function track_confirmed_request(
         # Keep a tombstone until one direction-correct terminal response.
         # Further reuse cannot make an already ambiguous invoke resolvable.
         delete pending_confirmed[c$uid, is_orig, request_key];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, F);
         purge_confirmed_request_state(c, is_orig, invoke_id);
         return;
         }
@@ -2308,6 +2762,12 @@ function track_confirmed_request(
         # neither a response nor ConfirmedError can then be safely attributed.
         delete pending_confirmed[c$uid, is_orig, request_key];
         add invalid_confirmed_invokes[c$uid, is_orig, request_key];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, F);
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_INVALID_CONFIRMED, T);
         purge_confirmed_request_state(c, is_orig, invoke_id);
         return;
         }
@@ -2318,6 +2778,9 @@ function track_confirmed_request(
             $service_tag=service_tag, $operation=candidate_operation,
             $request_is_orig=is_orig
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, request_key,
+            PROCESSING_PENDING_CONFIRMED, T);
         return;
         }
 
@@ -2338,22 +2801,16 @@ type KnownVariableTypeKey: record {
 
 function pending_variable_type_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_variable_types )
-        if ( entry_uid == uid ) ++total;
-    for ( [invalid_uid, request_is_orig, invalid_invoke] in
-          invalid_variable_type_invokes )
-        if ( invalid_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    local state = processing_state_indexes[uid];
+    return |state$pending_variable_types| +
+        |state$invalid_variable_types|;
     }
 
 function known_variable_type_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, server_is_orig, scope, domain, name] in
-          known_variable_types )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$known_variable_types|;
     }
 
 function supported_tase2_variable_type(name: string): bool
@@ -2791,19 +3248,14 @@ function classify_control_write(
 
 function pending_transfer_control_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_controls )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_controls|;
     }
 
 function active_ds_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, client_is_orig, transfer_scope, transfer_domain,
-           transfer_name] in active_ds_transfers )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$active_transfer_sets|;
     }
 
 function transfer_member_matches(membership: TransferMembership,
@@ -2849,28 +3301,27 @@ function block_data_special_value_valid(
     evidence: InformationReportResultsEvidence, index: count,
     name: string): bool
     {
-    if ( index >= |evidence$result_choices| ||
-         index >= |evidence$result_raws| ||
-         index >= |evidence$result_integer_values| )
-        return F;
+    if ( index >= |evidence$results| ) return F;
 
-    local choice = evidence$result_choices[index];
-    local raw = evidence$result_raws[index];
-    local value = evidence$result_integer_values[index];
+    local result = evidence$results[index];
+    local choice = result$choice;
+    local raw = result$raw_prefix;
+    local value = result$integer_value;
     if ( name == "Transfer_Set_Name" )
         # Per-result nested structure is not available in this bounded event;
         # require the exact outer MMS Structure shape and retain an explicitly
         # unverified-content result below.
-        return choice == 2 && |raw| > 0;
+        return choice == 2 && result$raw_length > 0;
     if ( name == "DSConditions_Detected" )
-        return choice == 4 && |raw| == 2 &&
+        return choice == 4 && result$raw_length == 2 &&
             bytestring_to_count(sub_bytes(raw, 1, 1)) == 3 &&
             (bytestring_to_count(sub_bytes(raw, 2, 1)) & 0x07) == 0;
     if ( name == "Event_Code_Detected" )
-        return choice == 5 && |raw| >= 1 && |raw| <= 2 &&
+        return choice == 5 && result$raw_length >= 1 &&
+            result$raw_length <= 2 &&
             value >= -32768 && value <= 32767;
     if ( name == "Transfer_Set_Time_Stamp" )
-        return choice == 5 && |raw| == 4 && value >= 0;
+        return choice == 5 && result$raw_length == 4 && value >= 0;
     return F;
     }
 
@@ -2911,8 +3362,8 @@ function assess_block_data_report(
     local index: count = 0;
     while ( index < evidence$result_count )
         {
-        if ( evidence$result_choices[index] == 0 ||
-             evidence$result_errors[index] >= 0 )
+        if ( evidence$results[index]$choice == 0 ||
+             evidence$results[index]$error >= 0 )
             return block_data_deviation("failed_result");
         local scope = evidence$variable_scopes[index];
         local domain = evidence$variable_domains[index];
@@ -2940,10 +3391,11 @@ function assess_block_data_report(
         return block_data_deviation("missing_payload");
     if ( payload_count != 1 )
         return block_data_deviation("multiple_payloads");
-    if ( evidence$result_choices[payload_index] != 9 )
+    if ( evidence$results[payload_index]$choice != 9 )
         return block_data_deviation("payload_not_octet_string");
-    local payload = evidence$result_raws[payload_index];
-    if ( |payload| == 0 )
+    local payload_result = evidence$results[payload_index];
+    local payload = payload_result$raw_prefix;
+    if ( payload_result$raw_length == 0 )
         return block_data_deviation("empty_payload");
     local rule = bytestring_to_count(sub_bytes(payload, 1, 1));
     if ( rule > 2 )
@@ -3103,12 +3555,14 @@ event ICCP::mms_information_report_results_v2(
     local selected_client_is_orig = F;
     local selected_scope: count = 0;
     local selected_domain = "";
-    for ( [uid, client_is_orig, transfer_scope, transfer_domain,
-           transfer_name] in active_ds_transfers )
+    local active_keys: set[bool, count, string, string] = set();
+    if ( c$uid in processing_state_indexes )
+        active_keys = processing_state_indexes[c$uid]$active_transfer_sets;
+    for ( [client_is_orig, transfer_scope, transfer_domain,
+           transfer_name] in active_keys )
         {
-        if ( uid != c$uid ) next;
         local active = active_ds_transfers[
-            uid, client_is_orig, transfer_scope, transfer_domain,
+            c$uid, client_is_orig, transfer_scope, transfer_domain,
             transfer_name];
         if ( ! report_matches_active_data_set(
                  c, is_orig, evidence, active) ) next;
@@ -3128,12 +3582,11 @@ event ICCP::mms_information_report_results_v2(
         {
         if ( wrong_direction == 1 )
             {
-            for ( [wrong_uid, wrong_client_is_orig, wrong_scope,
-                   wrong_domain, wrong_name] in active_ds_transfers )
+            for ( [wrong_client_is_orig, wrong_scope,
+                   wrong_domain, wrong_name] in active_keys )
                 {
-                if ( wrong_uid != c$uid ) next;
                 local wrong = active_ds_transfers[
-                    wrong_uid, wrong_client_is_orig, wrong_scope,
+                    c$uid, wrong_client_is_orig, wrong_scope,
                     wrong_domain, wrong_name];
                 if ( report_matches_active_data_set(
                          c, is_orig, evidence, wrong) &&
@@ -3150,14 +3603,12 @@ event ICCP::mms_information_report_results_v2(
         if ( access_choice == 0 )
             {
             local blocked_candidates: count = 0;
-            for ( [candidate_uid, candidate_client_is_orig,
-                   candidate_scope, candidate_domain,
-                   candidate_name] in active_ds_transfers )
+            for ( [candidate_client_is_orig, candidate_scope,
+                   candidate_domain, candidate_name] in active_keys )
                 {
-                if ( candidate_uid != c$uid ||
-                     is_orig == candidate_client_is_orig ) next;
+                if ( is_orig == candidate_client_is_orig ) next;
                 local candidate = active_ds_transfers[
-                    candidate_uid, candidate_client_is_orig,
+                    c$uid, candidate_client_is_orig,
                     candidate_scope, candidate_domain, candidate_name];
                 if ( candidate$parameters?$block_data &&
                      candidate$parameters$block_data )
@@ -3232,32 +3683,54 @@ event ICCP::mms_information_report_results_v2(
     active_ds_transfers[
         c$uid, selected_client_is_orig, selected_scope, selected_domain,
         selected_name] = selected;
+    update_object_processing_state(
+        c$uid, selected_client_is_orig, selected_scope, selected_domain,
+        selected_name, PROCESSING_ACTIVE_TRANSFER_SET, T);
+    }
+
+event ICCP::mms_information_report_results_v3(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    provenance: count) &priority=5
+    {
+    event ICCP::mms_information_report_results_v2(
+        c, is_orig, access_choice, list_scope, list_domain, list_name,
+        result_count, failure_count, variable_scopes, variable_domains,
+        variable_names, result_choices, result_errors, result_raws,
+        result_integer_values, result_floating_values,
+        result_boolean_values, result_string_values, provenance);
     }
 
 function pending_transfer_support_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_support )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_support|;
     }
 
 
 function pending_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, request_is_orig, invoke] in pending_transfer_sets )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$pending_transfer_sets|;
     }
 
 function known_transfer_count(uid: string): count
     {
-    local total: count = 0;
-    for ( [entry_uid, server_is_orig, scope, domain, name] in
-          known_transfer_sets )
-        if ( entry_uid == uid ) ++total;
-    return total;
+    if ( uid !in processing_state_indexes ) return 0;
+    return |processing_state_indexes[uid]$known_transfer_sets|;
     }
 
 function transfer_scope_name(scope: count): string
@@ -3330,13 +3803,8 @@ function information_report_pairing_status(
     c: connection, server_is_orig: bool,
     evidence: InformationReportResultsEvidence): string
     {
-    if ( evidence$result_count != |evidence$result_choices| ||
-         evidence$result_count != |evidence$result_errors| ||
-         evidence$result_count != |evidence$result_raws| ||
-         evidence$result_count != |evidence$result_integer_values| ||
-         evidence$result_count != |evidence$result_floating_values| ||
-         evidence$result_count != |evidence$result_boolean_values| ||
-         evidence$result_count != |evidence$result_string_values| )
+    if ( ! evidence$results_complete ||
+         evidence$result_count != |evidence$results| )
         return "count_mismatch";
 
     if ( evidence$access_choice == 0 )
@@ -3386,7 +3854,7 @@ function information_report_loggable_result_count(
     local logged: count = 0;
     local index: count = 0;
     local limit = information_report_result_limit();
-    while ( index < |evidence$result_choices| && logged < limit )
+    while ( index < |evidence$results| && logged < limit )
         {
         if ( information_report_result_identity(
                  c, server_is_orig, evidence, index)$known )
@@ -3444,8 +3912,8 @@ function write_information_message_observation(
         c, is_orig, evidence, 1);
     local capacity = information_buffer_capacity(buffer$name);
     local header_valid = evidence$failure_count == 0 &&
-        |evidence$result_choices| == 2 &&
-        evidence$result_choices[0] == 2 &&
+        |evidence$results| == 2 &&
+        evidence$results[0]$choice == 2 &&
         shape?$component_choices && shape?$component_raws &&
         shape?$component_integer_values &&
         |shape$component_choices| == 4 &&
@@ -3462,10 +3930,9 @@ function write_information_message_observation(
         }
 
     local buffer_valid = evidence$failure_count == 0 &&
-        |evidence$result_choices| == 2 &&
-        |evidence$result_raws| == 2 &&
-        evidence$result_choices[1] == 9 &&
-        |evidence$result_raws[1]| == capacity;
+        |evidence$results| == 2 &&
+        evidence$results[1]$choice == 9 &&
+        evidence$results[1]$raw_length == capacity;
     local size_valid = header_valid &&
         shape$component_integer_values[3] >= 0 &&
         int_to_count(shape$component_integer_values[3]) <= capacity;
@@ -3483,8 +3950,8 @@ function write_information_message_observation(
         $pairing_status=information_report_pairing_status(
             c, is_orig, evidence),
         $buffer_capacity=capacity,
-        $buffer_length=|evidence$result_raws| > 1 ?
-            |evidence$result_raws[1]| : 0
+        $buffer_length=|evidence$results| > 1 ?
+            evidence$results[1]$raw_length : 0
     ];
     if ( header$domain != "" ) rec$first_variable_domain = header$domain;
     if ( evidence$access_choice == 1 )
@@ -3520,40 +3987,28 @@ function add_information_report_result_to_info(
     {
     rec$result_index = index;
     rec$result_count = evidence$result_count;
-    if ( index < |evidence$result_choices| )
-        rec$result_type = evidence$result_choices[index];
-    if ( index < |evidence$result_errors| &&
-         evidence$result_errors[index] >= 0 )
-        rec$result_error = evidence$result_errors[index];
-    if ( index < |evidence$result_raws| &&
-         evidence$result_raws[index] != "" )
+    if ( index >= |evidence$results| ) return rec;
+    local result = evidence$results[index];
+    rec$result_type = result$choice;
+    if ( result$error >= 0 ) rec$result_error = result$error;
+    if ( result$raw_prefix != "" )
         {
         rec$result_raw = bounded_information_report_result_raw(
-            evidence$result_raws[index]);
-        rec$result_raw_truncated =
-            |evidence$result_raws[index]| > max_logged_result_raw_bytes;
+            result$raw_prefix);
+        rec$result_raw_truncated = result$raw_truncated ||
+            |result$raw_prefix| > max_logged_result_raw_bytes;
         }
-    if ( index < |evidence$result_choices| )
-        {
-        local choice = evidence$result_choices[index];
-        if ( (choice == 5 || choice == 6 || choice == 13 || choice == 17) &&
-             index < |evidence$result_integer_values| )
-            rec$integer_value = evidence$result_integer_values[index];
-        else if ( choice == 7 &&
-                  index < |evidence$result_floating_values| )
-            rec$floating_value = evidence$result_floating_values[index];
-        else if ( choice == 3 &&
-                  index < |evidence$result_boolean_values| )
-            rec$boolean_value = evidence$result_boolean_values[index];
-        else if ( (choice == 10 || choice == 16) &&
-                  index < |evidence$result_string_values| )
-            rec$string_value = bounded_detail(
-                evidence$result_string_values[index]);
-        else if ( choice == 15 &&
-                  index < |evidence$result_string_values| )
-            rec$object_identifier_value = bounded_detail(
-                evidence$result_string_values[index]);
-        }
+    if ( result$choice == 5 || result$choice == 6 ||
+         result$choice == 13 || result$choice == 17 )
+        rec$integer_value = result$integer_value;
+    else if ( result$choice == 7 )
+        rec$floating_value = result$floating_value;
+    else if ( result$choice == 3 )
+        rec$boolean_value = result$boolean_value;
+    else if ( result$choice == 10 || result$choice == 16 )
+        rec$string_value = bounded_detail(result$string_value);
+    else if ( result$choice == 15 )
+        rec$object_identifier_value = bounded_detail(result$string_value);
     return rec;
     }
 
@@ -3569,7 +4024,7 @@ function write_additional_information_report_results(
         c, is_orig, evidence);
     local standardized_information_message =
         information_message_candidate(c, is_orig, evidence);
-    while ( index < |evidence$result_choices| && emitted < limit )
+    while ( index < |evidence$results| && emitted < limit )
         {
         local identity = information_report_result_identity(
             c, is_orig, evidence, index);
@@ -3603,48 +4058,40 @@ function write_additional_information_report_results(
                     $result_count=evidence$result_count,
                     $result_pairing_status=pairing_status,
                     $result_index=index,
-                    $result_type=evidence$result_choices[index],
+                    $result_type=evidence$results[index]$choice,
                     $provenance=provenance,
                     $stream_completeness=output_completeness(c, is_orig)
                 ];
                 if ( identity$domain != "" )
                     result$object_domain = identity$domain;
-                if ( index < |evidence$result_errors| &&
-                     evidence$result_errors[index] >= 0 )
-                    result$result_error = evidence$result_errors[index];
-                if ( index < |evidence$result_raws| &&
-                     evidence$result_raws[index] != "" &&
+                local value_evidence = evidence$results[index];
+                if ( value_evidence$error >= 0 )
+                    result$result_error = value_evidence$error;
+                if ( value_evidence$raw_prefix != "" &&
                      information_buffer_capacity(identity$name) == 0 )
                     {
                     result$result_raw =
                         bounded_information_report_result_raw(
-                            evidence$result_raws[index]);
+                            value_evidence$raw_prefix);
                     result$result_raw_truncated =
-                        |evidence$result_raws[index]| >
+                        value_evidence$raw_truncated ||
+                        |value_evidence$raw_prefix| >
                             max_logged_result_raw_bytes;
                     }
-                local choice = evidence$result_choices[index];
-                if ( (choice == 5 || choice == 6 || choice == 13 ||
-                      choice == 17) &&
-                     index < |evidence$result_integer_values| )
-                    result$integer_value =
-                        evidence$result_integer_values[index];
-                else if ( choice == 7 &&
-                          index < |evidence$result_floating_values| )
-                    result$floating_value =
-                        evidence$result_floating_values[index];
-                else if ( choice == 3 &&
-                          index < |evidence$result_boolean_values| )
-                    result$boolean_value =
-                        evidence$result_boolean_values[index];
-                else if ( (choice == 10 || choice == 16) &&
-                          index < |evidence$result_string_values| )
+                local choice = value_evidence$choice;
+                if ( choice == 5 || choice == 6 || choice == 13 ||
+                     choice == 17 )
+                    result$integer_value = value_evidence$integer_value;
+                else if ( choice == 7 )
+                    result$floating_value = value_evidence$floating_value;
+                else if ( choice == 3 )
+                    result$boolean_value = value_evidence$boolean_value;
+                else if ( choice == 10 || choice == 16 )
                     result$string_value = bounded_detail(
-                        evidence$result_string_values[index]);
-                else if ( choice == 15 &&
-                          index < |evidence$result_string_values| )
+                        value_evidence$string_value);
+                else if ( choice == 15 )
                     result$object_identifier_value = bounded_detail(
-                        evidence$result_string_values[index]);
+                        value_evidence$string_value);
                 write_iccp_object_record(c, result);
                 }
             ++emitted;
@@ -3653,91 +4100,69 @@ function write_additional_information_report_results(
         }
     }
 
-function process_gva_message(
-    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
-    object_scope: count, object_domain: string, object_name: string,
-    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
-    unresolved_type_name_count: count,
-    observed: TypeDescriptionSignature, type_raw: string,
-    type_node_count: count, type_maximum_depth: count,
-    provenance: count, legacy_compatibility: bool)
+function retire_untrusted_gva_response(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int)
     {
-    # Recovered/inferred parser output remains available through evidence
-    # events, but it cannot create, contradict, or revoke trusted exact state.
-    # A terminal response still retires an opposite-direction verified request
-    # so truncated recovery cannot leak correlation state or poison invoke
-    # reuse.
-    if ( ! legacy_compatibility && provenance != 1 )
-        {
-        if ( pdu_type == 1 && invoke_id >= 0 )
-            {
-            local untrusted_key = int_to_count(invoke_id);
-            local untrusted_request_is_orig = ! is_orig;
-            delete pending_variable_types[
-                c$uid, untrusted_request_is_orig, untrusted_key];
-            delete invalid_variable_type_invokes[
-                c$uid, untrusted_request_is_orig, untrusted_key];
-            }
+    if ( pdu_type != 1 || invoke_id < 0 )
         return;
-        }
-    if ( association_kind(c) != "tase2" || invoke_id < 0 )
-        return;
-    if ( pdu_type == 0 &&
-         ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
-        return;
-    if ( pdu_type == 1 &&
-         confirmed_response_is_ambiguous(c, is_orig, invoke_id) )
-        return;
-    local key = int_to_count(invoke_id);
-    if ( pdu_type == 0 )
-        {
-        if ( ! valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) ) return;
-        if ( [c$uid, is_orig, key] in invalid_variable_type_invokes ) return;
-        if ( [c$uid, is_orig, key] in pending_variable_types )
-            {
-            local reused = pending_variable_types[c$uid, is_orig, key];
-            delete pending_variable_types[c$uid, is_orig, key];
-            invalid_variable_type_invokes[c$uid, is_orig, key] =
-                reused$request_is_orig;
-            return;
-            }
-        if ( pending_variable_type_count(c$uid) >=
-             max_pending_transfer_sets )
-            {
-            event ICCP::resource_limit_exceeded(
-                c, is_orig, "pending_variable_types",
-                max_pending_transfer_sets,
-                pending_variable_type_count(c$uid), invoke_id);
-            return;
-            }
-        pending_variable_types[c$uid, is_orig, key] = [
-            $request_is_orig=is_orig,
-            $server=is_orig ? c$id$resp_h : c$id$orig_h,
-            $peer=is_orig ? c$id$orig_h : c$id$resp_h,
-            $scope=object_scope,
-            $domain=object_domain, $name=object_name
-        ];
-        return;
-        }
-    if ( pdu_type != 1 ) return;
-    local request_is_orig = ! is_orig;
-    if ( [c$uid, request_is_orig, key] !in pending_variable_types )
-        {
-        if ( [c$uid, request_is_orig, key] in
-             invalid_variable_type_invokes )
-            delete invalid_variable_type_invokes[
-                c$uid, request_is_orig, key];
-        return;
-        }
-    local prior = pending_variable_types[c$uid, request_is_orig, key];
-    delete pending_variable_types[c$uid, request_is_orig, key];
-    local configured_type = "";
-    if ( [prior$server, prior$peer, prior$scope, prior$domain, prior$name] in
-         configured_variable_types )
-        configured_type = configured_variable_types[
-            prior$server, prior$peer, prior$scope, prior$domain, prior$name];
 
+    local key = int_to_count(invoke_id);
+    local request_is_orig = ! is_orig;
+    delete pending_variable_types[c$uid, request_is_orig, key];
+    delete invalid_variable_type_invokes[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, F);
+    update_directional_processing_state(
+        c$uid, request_is_orig, key, PROCESSING_INVALID_VARIABLE_TYPE, F);
+    }
+
+function process_gva_request(
+    c: connection, is_orig: bool, invoke_id: int, key: count,
+    object_scope: count, object_domain: string, object_name: string)
+    {
+    if ( ! valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        return;
+
+    if ( [c$uid, is_orig, key] in invalid_variable_type_invokes )
+        return;
+
+    if ( [c$uid, is_orig, key] in pending_variable_types )
+        {
+        local reused = pending_variable_types[c$uid, is_orig, key];
+        delete pending_variable_types[c$uid, is_orig, key];
+        invalid_variable_type_invokes[c$uid, is_orig, key] =
+            reused$request_is_orig;
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, F);
+        update_directional_processing_state(
+            c$uid, is_orig, key, PROCESSING_INVALID_VARIABLE_TYPE, T);
+        return;
+        }
+
+    if ( pending_variable_type_count(c$uid) >= max_pending_transfer_sets )
+        {
+        event ICCP::resource_limit_exceeded(
+            c, is_orig, "pending_variable_types",
+            max_pending_transfer_sets,
+            pending_variable_type_count(c$uid), invoke_id);
+        return;
+        }
+
+    pending_variable_types[c$uid, is_orig, key] = [
+        $request_is_orig=is_orig,
+        $server=is_orig ? c$id$resp_h : c$id$orig_h,
+        $peer=is_orig ? c$id$orig_h : c$id$resp_h,
+        $scope=object_scope, $domain=object_domain, $name=object_name
+    ];
+    update_directional_processing_state(
+        c$uid, is_orig, key, PROCESSING_PENDING_VARIABLE_TYPE, T);
+    }
+
+function new_gva_discovery_record(
+    c: connection, is_orig: bool, invoke_id: int,
+    prior: PendingVariableType): TransferInfo
+    {
     local discovery: TransferInfo = [
         $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
         $action="type_discovery", $outcome="unmapped",
@@ -3745,7 +4170,130 @@ function process_gva_message(
         $list_scope=transfer_scope_name(prior$scope),
         $list_name=prior$name
     ];
-    if ( prior$domain != "" ) discovery$list_domain = prior$domain;
+    if ( prior$domain != "" )
+        discovery$list_domain = prior$domain;
+    return discovery;
+    }
+
+function add_gva_type_description_fields(
+    discovery: TransferInfo, observed: TypeDescriptionSignature,
+    mms_deletable: bool, type_raw: string,
+    type_node_count: count, type_maximum_depth: count): TransferInfo
+    {
+    discovery$deletable = mms_deletable;
+    discovery$type_node_count = type_node_count;
+    discovery$type_maximum_depth = type_maximum_depth;
+    if ( type_raw != "" )
+        {
+        discovery$type_raw = bounded_information_report_result_raw(type_raw);
+        discovery$type_raw_truncated =
+            |type_raw| > max_logged_result_raw_bytes;
+        }
+
+    if ( |observed$choices| == 0 ||
+         |observed$primary| != |observed$choices| ||
+         |observed$secondary| != |observed$choices| ||
+         |observed$child_counts| != |observed$choices| ||
+         |observed$packed| != |observed$choices| )
+        return discovery;
+
+    local root_index = |observed$choices| - 1;
+    local root_choice = observed$choices[root_index];
+    discovery$type_choice = root_choice;
+    discovery$type_constructed =
+        root_choice == 1 || root_choice == 2 || root_choice == 7 ||
+        root_choice == 16;
+    discovery$type_packed = observed$packed[root_index];
+    if ( root_choice == 1 )
+        discovery$type_number_of_elements = observed$primary[root_index];
+    else if ( root_choice == 2 )
+        discovery$type_component_count = observed$child_counts[root_index];
+    else if ( root_choice == 7 )
+        {
+        discovery$type_format_width = observed$primary[root_index];
+        discovery$type_exponent_width = observed$secondary[root_index];
+        }
+    else if ( root_choice == 12 )
+        discovery$type_boolean_value = observed$primary[root_index] != 0;
+    else if ( root_choice == 4 || root_choice == 5 ||
+              root_choice == 6 || root_choice == 9 ||
+              root_choice == 10 || root_choice == 13 ||
+              root_choice == 16 )
+        discovery$type_signed_value = observed$primary[root_index];
+
+    return discovery;
+    }
+
+function gva_type_mismatch_reasons(
+    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
+    unresolved_type_name_count: count,
+    observed: TypeDescriptionSignature,
+    expected: TypeDescriptionSignature): string
+    {
+    local mismatch_reasons = "";
+    if ( ! deletable_present )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "mms_deletable_missing");
+    else if ( mms_deletable )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "mms_deletable_true");
+    if ( ! type_resolved || unresolved_type_name_count > 0 )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "unresolved_type_name");
+    if ( ! valid_type_description_signature(observed) )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "invalid_type_signature");
+    else if ( ! type_description_signatures_equal(observed, expected) )
+        mismatch_reasons = append_feature(
+            mismatch_reasons, "type_signature_mismatch");
+    return mismatch_reasons;
+    }
+
+function revoke_known_variable_type(
+    c: connection, server_is_orig: bool, prior: PendingVariableType)
+    {
+    delete known_variable_types[
+        c$uid, server_is_orig, prior$scope, prior$domain, prior$name];
+    update_object_processing_state(
+        c$uid, server_is_orig, prior$scope, prior$domain, prior$name,
+        PROCESSING_KNOWN_VARIABLE_TYPE, F);
+    }
+
+function process_gva_response(
+    c: connection, is_orig: bool, invoke_id: int, key: count,
+    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
+    unresolved_type_name_count: count,
+    observed: TypeDescriptionSignature, type_raw: string,
+    type_node_count: count, type_maximum_depth: count,
+    legacy_compatibility: bool)
+    {
+    local request_is_orig = ! is_orig;
+    if ( [c$uid, request_is_orig, key] !in pending_variable_types )
+        {
+        if ( [c$uid, request_is_orig, key] in
+             invalid_variable_type_invokes )
+            {
+            delete invalid_variable_type_invokes[
+                c$uid, request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, request_is_orig, key,
+                PROCESSING_INVALID_VARIABLE_TYPE, F);
+            }
+        return;
+        }
+    local prior = pending_variable_types[c$uid, request_is_orig, key];
+    delete pending_variable_types[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_VARIABLE_TYPE, F);
+    local configured_type = "";
+    if ( [prior$server, prior$peer, prior$scope, prior$domain, prior$name] in
+         configured_variable_types )
+        configured_type = configured_variable_types[
+            prior$server, prior$peer, prior$scope, prior$domain, prior$name];
+
+    local discovery = new_gva_discovery_record(
+        c, is_orig, invoke_id, prior);
 
     # GetVariableAccessAttributes-Response carries an inline TypeDescription,
     # never a standardized type name. Exact names therefore come only from
@@ -3763,8 +4311,7 @@ function process_gva_message(
     if ( ! configured_tase2_type_scope_valid(
              configured_type, prior$scope, prior$domain, prior$name) )
         {
-        delete known_variable_types[
-            c$uid, is_orig, prior$scope, prior$domain, prior$name];
+        revoke_known_variable_type(c, is_orig, prior);
         discovery$outcome = "invalid_configuration";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = "invalid_standardized_scope";
@@ -3785,70 +4332,19 @@ function process_gva_message(
         unresolved_type_name_count = 0;
         }
 
-    discovery$deletable = mms_deletable;
-    discovery$type_node_count = type_node_count;
-    discovery$type_maximum_depth = type_maximum_depth;
-    if ( type_raw != "" )
-        {
-        discovery$type_raw = bounded_information_report_result_raw(type_raw);
-        discovery$type_raw_truncated =
-            |type_raw| > max_logged_result_raw_bytes;
-        }
-    if ( |observed$choices| > 0 &&
-         |observed$primary| == |observed$choices| &&
-         |observed$secondary| == |observed$choices| &&
-         |observed$child_counts| == |observed$choices| &&
-         |observed$packed| == |observed$choices| )
-        {
-        local root_index = |observed$choices| - 1;
-        local root_choice = observed$choices[root_index];
-        discovery$type_choice = root_choice;
-        discovery$type_constructed =
-            root_choice == 1 || root_choice == 2 || root_choice == 7 ||
-            root_choice == 16;
-        discovery$type_packed = observed$packed[root_index];
-        if ( root_choice == 1 )
-            discovery$type_number_of_elements = observed$primary[root_index];
-        else if ( root_choice == 2 )
-            discovery$type_component_count =
-                observed$child_counts[root_index];
-        else if ( root_choice == 7 )
-            {
-            discovery$type_format_width = observed$primary[root_index];
-            discovery$type_exponent_width = observed$secondary[root_index];
-            }
-        else if ( root_choice == 12 )
-            discovery$type_boolean_value = observed$primary[root_index] != 0;
-        else if ( root_choice == 4 || root_choice == 5 ||
-                  root_choice == 6 || root_choice == 9 ||
-                  root_choice == 10 || root_choice == 13 ||
-                  root_choice == 16 )
-            discovery$type_signed_value = observed$primary[root_index];
-        }
+    discovery = add_gva_type_description_fields(
+        discovery, observed, mms_deletable, type_raw,
+        type_node_count, type_maximum_depth);
 
-    local mismatch_reasons = "";
-    if ( ! deletable_present )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "mms_deletable_missing");
-    else if ( mms_deletable )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "mms_deletable_true");
-    if ( ! type_resolved || unresolved_type_name_count > 0 )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "unresolved_type_name");
-    if ( ! valid_type_description_signature(observed) )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "invalid_type_signature");
-    else if ( ! type_description_signatures_equal(observed, expected) )
-        mismatch_reasons = append_feature(
-            mismatch_reasons, "type_signature_mismatch");
+    local mismatch_reasons = gva_type_mismatch_reasons(
+        deletable_present, mms_deletable, type_resolved,
+        unresolved_type_name_count, observed, expected);
 
     if ( mismatch_reasons != "" )
         {
         # A later contradictory response revokes stale trust for the exact
         # endpoint-owned object instead of leaving an earlier learned type live.
-        delete known_variable_types[
-            c$uid, is_orig, prior$scope, prior$domain, prior$name];
+        revoke_known_variable_type(c, is_orig, prior);
         discovery$outcome = "type_mismatch";
         discovery$conformance = "standards_deviation";
         discovery$conformance_reasons = mismatch_reasons;
@@ -3871,8 +4367,56 @@ function process_gva_message(
     known_variable_types[
         c$uid, is_orig, prior$scope, prior$domain, prior$name] =
             configured_type;
+    update_object_processing_state(
+        c$uid, is_orig, prior$scope, prior$domain, prior$name,
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     discovery$outcome = "configured";
     write_transfer_record(c, is_orig, discovery);
+    }
+
+function process_gva_message(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    object_scope: count, object_domain: string, object_name: string,
+    deletable_present: bool, mms_deletable: bool, type_resolved: bool,
+    unresolved_type_name_count: count,
+    observed: TypeDescriptionSignature, type_raw: string,
+    type_node_count: count, type_maximum_depth: count,
+    provenance: count, legacy_compatibility: bool)
+    {
+    # Recovered/inferred parser output remains available through evidence
+    # events, but it cannot create, contradict, or revoke trusted exact state.
+    # A terminal response still retires an opposite-direction verified request
+    # so truncated recovery cannot leak correlation state or poison invoke
+    # reuse.
+    if ( ! legacy_compatibility && provenance != 1 )
+        {
+        retire_untrusted_gva_response(c, is_orig, pdu_type, invoke_id);
+        return;
+        }
+    if ( association_kind(c) != "tase2" || invoke_id < 0 )
+        return;
+    if ( pdu_type == 0 &&
+         ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
+        return;
+    if ( pdu_type == 1 &&
+         confirmed_response_is_ambiguous(c, is_orig, invoke_id) )
+        return;
+
+    local key = int_to_count(invoke_id);
+    if ( pdu_type == 0 )
+        {
+        process_gva_request(
+            c, is_orig, invoke_id, key, object_scope, object_domain,
+            object_name);
+        return;
+        }
+    if ( pdu_type != 1 )
+        return;
+
+    process_gva_response(
+        c, is_orig, invoke_id, key, deletable_present, mms_deletable,
+        type_resolved, unresolved_type_name_count, observed, type_raw,
+        type_node_count, type_maximum_depth, legacy_compatibility);
     }
 
 event ICCP::mms_gva_message_v3(
@@ -3959,6 +4503,8 @@ function begin_transfer_support_read_request(
         $request_is_orig=is_orig, $scope=object_scope,
         $domain=object_domain, $name=object_name
     ];
+    update_directional_processing_state(
+        c$uid, is_orig, key, PROCESSING_PENDING_TRANSFER_SUPPORT, T);
     }
 
 # Authoritative packet Read request policy.  Unlike the two compatibility
@@ -4048,8 +4594,13 @@ event ICCP::mms_transfer_support_value_message(
                 $named_type=read_pending$named_type
             ];
             if ( read_direction_valid )
+                {
                 delete pending_control_reads[
                     c$uid, read_request_is_orig, read_key];
+                update_directional_processing_state(
+                    c$uid, read_request_is_orig, read_key,
+                    PROCESSING_PENDING_CONTROL_READ, F);
+                }
             schedule 0secs {
                 ICCP::mms_control_read_response_deferred_v2(
                     c, is_orig, invoke_id, result_count, failure_count,
@@ -4072,6 +4623,20 @@ event ICCP::mms_transfer_support_value_message(
         return;
         }
     if ( pdu_type != 1 ) return;
+    local first_result_length = |first_result_raw|;
+    local first_result_truncated =
+        |first_result_raw| > max_logged_result_raw_bytes;
+    local first_result_sequence = mms_parser_sequence(c, is_orig);
+    if ( [c$uid, is_orig, first_result_sequence, key] in
+         first_result_evidence )
+        {
+        local exact_first_result = first_result_evidence[
+            c$uid, is_orig, first_result_sequence, key];
+        first_result_length = exact_first_result$raw_length;
+        first_result_truncated = exact_first_result$raw_truncated ||
+            |exact_first_result$raw_prefix| >
+                max_logged_result_raw_bytes;
+        }
     local request_is_orig = ! is_orig;
     if ( [c$uid, request_is_orig, key] !in pending_transfer_support )
         {
@@ -4096,16 +4661,19 @@ event ICCP::mms_transfer_support_value_message(
         }
     local prior = pending_transfer_support[c$uid, request_is_orig, key];
     delete pending_transfer_support[c$uid, request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_SUPPORT, F);
 
     local decoded = result_count == 1 && failure_count == 0;
     local is_timestamp = prior$name == "Transfer_Set_Time_Stamp";
     local is_event_code = prior$name == "Event_Code_Detected";
     if ( is_timestamp )
         decoded = decoded && first_result_choice == 5 &&
-            |first_result_raw| == 4 && first_integer_value >= 0;
+            first_result_length == 4 && first_integer_value >= 0;
     else if ( is_event_code )
         decoded = decoded && first_result_choice == 5 &&
-            |first_result_raw| >= 1 && |first_result_raw| <= 2 &&
+            first_result_length >= 1 && first_result_length <= 2 &&
             first_integer_value >= -32768 && first_integer_value <= 32767;
     else
         decoded = decoded && first_result_choice == 2 &&
@@ -4140,10 +4708,303 @@ event ICCP::mms_transfer_support_value_message(
         {
         rec$result_raw = bounded_information_report_result_raw(
             first_result_raw);
-        rec$result_raw_truncated =
-            |first_result_raw| > max_logged_result_raw_bytes;
+        rec$result_raw_truncated = first_result_truncated;
         }
     write_transfer_record(c, is_orig, rec);
+    delete first_result_evidence[
+        c$uid, is_orig, first_result_sequence, key];
+    update_sequence_invoke_processing_state(
+        c$uid, is_orig, first_result_sequence, key,
+        PROCESSING_FIRST_RESULT_EVIDENCE, F);
+    }
+
+function add_ds_transfer_validation_reason(
+    validation: DSTransferParameterValidation,
+    reason: string): DSTransferParameterValidation
+    {
+    validation$deviation = T;
+    validation$reasons = append_feature(validation$reasons, reason);
+    return validation;
+    }
+
+function validate_ds_transfer_root(
+    validation: DSTransferParameterValidation,
+    access_choice: count, object_scope: count,
+    object_domain: string, object_name: string,
+    variable_count: count, data_count: count,
+    first_data_choice: count): DSTransferParameterValidation
+    {
+    if ( access_choice != 0 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_access_selection");
+
+    # IEC 60870-6-503 maps Transfer Set named variables to the MMS Domain for
+    # the client control centre.  The transfer variable itself is therefore
+    # Domain-specific even though its embedded DataSetName may be either VMD-
+    # or Domain-specific.
+    if ( object_scope != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_scope");
+    if ( object_scope == 1 &&
+         ! valid_tase2_identifier(object_domain) )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_domain");
+    if ( ! valid_tase2_identifier(object_name) )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_variable_name");
+    if ( variable_count != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_variable_count");
+    if ( data_count != 1 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_count");
+    if ( first_data_choice != 2 )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_value_choice");
+    return validation;
+    }
+
+function decode_ds_transfer_data_set_name(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    data_set_component_choices: vector of count,
+    data_set_component_raws: vector of string,
+    data_set_component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local data_set_evidence = component_choices[0] == 2 &&
+        |data_set_component_choices| == 3 &&
+        |data_set_component_raws| == 3 &&
+        |data_set_component_integer_values| == 3;
+    if ( ! data_set_evidence )
+        return add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_name_structure");
+
+    if ( data_set_component_choices[0] == 6 &&
+         |data_set_component_raws[0]| == 1 &&
+         (data_set_component_integer_values[0] == 0 ||
+          data_set_component_integer_values[0] == 1) )
+        validation$parameters$data_set_scope = int_to_count(
+            data_set_component_integer_values[0]);
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_scope");
+
+    if ( data_set_component_choices[1] == 10 &&
+         |data_set_component_raws[1]| >= 1 &&
+         |data_set_component_raws[1]| <= 32 &&
+         valid_tase2_visible_identifier(data_set_component_raws[1]) )
+        validation$parameters$data_set_domain = data_set_component_raws[1];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_domain");
+
+    if ( data_set_component_choices[2] == 10 &&
+         |data_set_component_raws[2]| >= 1 &&
+         |data_set_component_raws[2]| <= 32 &&
+         valid_tase2_visible_identifier(data_set_component_raws[2]) )
+        validation$parameters$data_set_name = data_set_component_raws[2];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_data_set_name");
+
+    return validation;
+    }
+
+function decode_ds_transfer_timing_parameters(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    if ( component_choices[1] == 5 &&
+         |component_raws[1]| >= 1 && |component_raws[1]| <= 4 &&
+         component_integer_values[1] >= 0 &&
+         component_integer_values[1] <= 2147483647 )
+        validation$parameters$start_time = component_integer_values[1];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_start_time");
+
+    if ( component_choices[2] == 5 &&
+         |component_raws[2]| >= 1 && |component_raws[2]| <= 4 &&
+         component_integer_values[2] >= 0 &&
+         component_integer_values[2] <= 2147483647 )
+        validation$parameters$transfer_interval = component_integer_values[2];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_transfer_interval");
+
+    if ( component_choices[3] == 5 &&
+         |component_raws[3]| >= 1 && |component_raws[3]| <= 4 &&
+         component_integer_values[3] >= 0 &&
+         component_integer_values[3] <= 2147483647 )
+        validation$parameters$tle = component_integer_values[3];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_tle");
+
+    if ( component_choices[4] == 5 &&
+         |component_raws[4]| >= 1 && |component_raws[4]| <= 4 &&
+         component_integer_values[4] >= 0 &&
+         component_integer_values[4] <= 2147483647 )
+        validation$parameters$buffer_time = component_integer_values[4];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_buffer_time");
+
+    if ( component_choices[5] == 5 &&
+         |component_raws[5]| >= 1 && |component_raws[5]| <= 4 &&
+         component_integer_values[5] >= 0 &&
+         component_integer_values[5] <= 2147483647 )
+        validation$parameters$integrity_check = component_integer_values[5];
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_integrity_check");
+
+    return validation;
+    }
+
+function decode_ds_transfer_flags(
+    validation: DSTransferParameterValidation,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local conditions_valid = T;
+    if ( component_choices[6] != 4 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_choice");
+        }
+    else if ( |component_raws[6]| != 2 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_width");
+        }
+    else if ( bytestring_to_count(
+                  sub_bytes(component_raws[6], 1, 1)) != 3 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_unused_bits");
+        }
+    else if ( (bytestring_to_count(
+                   sub_bytes(component_raws[6], 2, 1)) & 0x07) != 0 )
+        {
+        conditions_valid = F;
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_ds_conditions_reserved_bits");
+        }
+
+    local condition_flags: count = 0;
+    if ( conditions_valid )
+        {
+        condition_flags = bytestring_to_count(
+            sub_bytes(component_raws[6], 2, 1));
+        validation$parameters$conditions =
+            decode_ds_conditions(condition_flags);
+        validation$parameters$condition_mask = condition_flags / 8;
+        }
+
+    if ( component_choices[7] == 3 && |component_raws[7]| == 1 )
+        validation$parameters$block_data =
+            bytestring_to_count(component_raws[7]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_block_data");
+
+    if ( component_choices[8] == 3 && |component_raws[8]| == 1 )
+        validation$parameters$critical =
+            bytestring_to_count(component_raws[8]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_critical");
+
+    if ( component_choices[9] == 3 && |component_raws[9]| == 1 )
+        validation$parameters$report_by_exception =
+            bytestring_to_count(component_raws[9]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_rbe");
+
+    if ( component_choices[10] == 3 && |component_raws[10]| == 1 )
+        validation$parameters$all_changes_reported =
+            bytestring_to_count(component_raws[10]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_all_changes_reported");
+
+    if ( component_choices[11] == 3 && |component_raws[11]| == 1 )
+        validation$parameters$enabled =
+            bytestring_to_count(component_raws[11]) != 0;
+    else
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_status");
+
+    local event_code_valid = component_choices[12] == 5 &&
+        |component_raws[12]| >= 1 && |component_raws[12]| <= 2 &&
+        component_integer_values[12] >= -32768 &&
+        component_integer_values[12] <= 32767;
+    if ( ! event_code_valid )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_event_code");
+    else if ( conditions_valid && (condition_flags & 0x08) != 0 )
+        validation$parameters$event_code_requested =
+            component_integer_values[12];
+
+    return validation;
+    }
+
+function decode_ds_transfer_parameters(
+    access_choice: count, object_scope: count,
+    object_domain: string, object_name: string,
+    variable_count: count, data_count: count,
+    first_data_choice: count,
+    component_choices: vector of count,
+    component_raws: vector of string,
+    component_integer_values: vector of int,
+    data_set_component_choices: vector of count,
+    data_set_component_raws: vector of string,
+    data_set_component_integer_values: vector of int):
+        DSTransferParameterValidation
+    {
+    local validation: DSTransferParameterValidation = [
+        $parameters=[$conformance="parameters_conformant"],
+        $deviation=F, $reasons=""
+    ];
+    validation = validate_ds_transfer_root(
+        validation, access_choice, object_scope, object_domain, object_name,
+        variable_count, data_count, first_data_choice);
+
+    local component_evidence = |component_choices| == 13 &&
+        |component_raws| == 13 && |component_integer_values| == 13;
+    if ( ! component_evidence )
+        validation = add_ds_transfer_validation_reason(
+            validation, "invalid_component_count");
+    else
+        {
+        validation = decode_ds_transfer_data_set_name(
+            validation, component_choices,
+            data_set_component_choices, data_set_component_raws,
+            data_set_component_integer_values);
+        validation = decode_ds_transfer_timing_parameters(
+            validation, component_choices, component_raws,
+            component_integer_values);
+        validation = decode_ds_transfer_flags(
+            validation, component_choices, component_raws,
+            component_integer_values);
+        }
+
+    if ( validation$deviation )
+        validation$parameters$conformance = "standards_deviation";
+    if ( validation$reasons != "" )
+        validation$parameters$conformance_reasons = validation$reasons;
+    return validation;
     }
 
 event ICCP::mms_ds_transfer_set_message_v1(
@@ -4171,261 +5032,15 @@ event ICCP::mms_ds_transfer_set_message_v1(
     if ( ! confirmed_request_tracking_allowed(c, is_orig, invoke_id) )
         return;
 
-    local deviation = F;
-    local reasons = "";
-    local parameters: DSTransferParameters = [
-        $conformance="parameters_conformant"
-    ];
-
-    if ( access_choice != 0 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_access_selection");
-        }
-    # IEC 60870-6-503 maps Transfer Set named variables to the MMS Domain for
-    # the client control centre.  The transfer variable itself is therefore
-    # Domain-specific even though its embedded DataSetName may be either VMD-
-    # or Domain-specific.
-    if ( object_scope != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_scope");
-        }
-    if ( object_scope == 1 &&
-         ! valid_tase2_identifier(object_domain) )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_domain");
-        }
-    if ( ! valid_tase2_identifier(object_name) )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_transfer_variable_name");
-        }
-    if ( variable_count != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_variable_count");
-        }
-    if ( data_count != 1 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_data_count");
-        }
-    if ( first_data_choice != 2 )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_value_choice");
-        }
-
-    local component_evidence = |component_choices| == 13 &&
-        |component_raws| == 13 && |component_integer_values| == 13;
-    if ( ! component_evidence )
-        {
-        deviation = T;
-        reasons = append_feature(reasons, "invalid_component_count");
-        }
-
-    if ( component_evidence )
-        {
-        local data_set_evidence = component_choices[0] == 2 &&
-            |data_set_component_choices| == 3 &&
-            |data_set_component_raws| == 3 &&
-            |data_set_component_integer_values| == 3;
-        if ( ! data_set_evidence )
-            {
-            deviation = T;
-            reasons = append_feature(
-                reasons, "invalid_data_set_name_structure");
-            }
-        else
-            {
-            if ( data_set_component_choices[0] == 6 &&
-                 |data_set_component_raws[0]| == 1 &&
-                 (data_set_component_integer_values[0] == 0 ||
-                  data_set_component_integer_values[0] == 1) )
-                parameters$data_set_scope = int_to_count(
-                    data_set_component_integer_values[0]);
-            else
-                {
-                deviation = T;
-                reasons = append_feature(
-                    reasons, "invalid_data_set_scope");
-                }
-
-            if ( data_set_component_choices[1] == 10 &&
-                 |data_set_component_raws[1]| >= 1 &&
-                 |data_set_component_raws[1]| <= 32 &&
-                 valid_tase2_visible_identifier(
-                     data_set_component_raws[1]) )
-                parameters$data_set_domain = data_set_component_raws[1];
-            else
-                {
-                deviation = T;
-                reasons = append_feature(
-                    reasons, "invalid_data_set_domain");
-                }
-
-            if ( data_set_component_choices[2] == 10 &&
-                 |data_set_component_raws[2]| >= 1 &&
-                 |data_set_component_raws[2]| <= 32 &&
-                 valid_tase2_visible_identifier(
-                     data_set_component_raws[2]) )
-                parameters$data_set_name = data_set_component_raws[2];
-            else
-                {
-                deviation = T;
-                reasons = append_feature(reasons, "invalid_data_set_name");
-                }
-
-            }
-
-        if ( component_choices[1] == 5 &&
-             |component_raws[1]| >= 1 && |component_raws[1]| <= 4 &&
-             component_integer_values[1] >= 0 &&
-             component_integer_values[1] <= 2147483647 )
-            parameters$start_time = component_integer_values[1];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_start_time");
-            }
-        if ( component_choices[2] == 5 &&
-             |component_raws[2]| >= 1 && |component_raws[2]| <= 4 &&
-             component_integer_values[2] >= 0 &&
-             component_integer_values[2] <= 2147483647 )
-            parameters$transfer_interval = component_integer_values[2];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_transfer_interval");
-            }
-        if ( component_choices[3] == 5 &&
-             |component_raws[3]| >= 1 && |component_raws[3]| <= 4 &&
-             component_integer_values[3] >= 0 &&
-             component_integer_values[3] <= 2147483647 )
-            parameters$tle = component_integer_values[3];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_tle");
-            }
-        if ( component_choices[4] == 5 &&
-             |component_raws[4]| >= 1 && |component_raws[4]| <= 4 &&
-             component_integer_values[4] >= 0 &&
-             component_integer_values[4] <= 2147483647 )
-            parameters$buffer_time = component_integer_values[4];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_buffer_time");
-            }
-        if ( component_choices[5] == 5 &&
-             |component_raws[5]| >= 1 && |component_raws[5]| <= 4 &&
-             component_integer_values[5] >= 0 &&
-             component_integer_values[5] <= 2147483647 )
-            parameters$integrity_check = component_integer_values[5];
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_integrity_check");
-            }
-
-        local conditions_valid = T;
-        if ( component_choices[6] != 4 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_choice");
-            }
-        else if ( |component_raws[6]| != 2 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_width");
-            }
-        else if ( bytestring_to_count(
-                      sub_bytes(component_raws[6], 1, 1)) != 3 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_unused_bits");
-            }
-        else if ( (bytestring_to_count(
-                       sub_bytes(component_raws[6], 2, 1)) & 0x07) != 0 )
-            {
-            conditions_valid = F;
-            reasons = append_feature(
-                reasons, "invalid_ds_conditions_reserved_bits");
-            }
-        local condition_flags: count = 0;
-        if ( conditions_valid )
-            {
-            condition_flags = bytestring_to_count(
-                sub_bytes(component_raws[6], 2, 1));
-            parameters$conditions = decode_ds_conditions(condition_flags);
-            parameters$condition_mask = condition_flags / 8;
-            }
-        else
-            {
-            deviation = T;
-            }
-
-        if ( component_choices[7] == 3 && |component_raws[7]| == 1 )
-            parameters$block_data =
-                bytestring_to_count(component_raws[7]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_block_data");
-            }
-        if ( component_choices[8] == 3 && |component_raws[8]| == 1 )
-            parameters$critical = bytestring_to_count(component_raws[8]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_critical");
-            }
-        if ( component_choices[9] == 3 && |component_raws[9]| == 1 )
-            parameters$report_by_exception =
-                bytestring_to_count(component_raws[9]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_rbe");
-            }
-        if ( component_choices[10] == 3 && |component_raws[10]| == 1 )
-            parameters$all_changes_reported =
-                bytestring_to_count(component_raws[10]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_all_changes_reported");
-            }
-        if ( component_choices[11] == 3 && |component_raws[11]| == 1 )
-            parameters$enabled = bytestring_to_count(component_raws[11]) != 0;
-        else
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_status");
-            }
-
-        local event_code_valid = component_choices[12] == 5 &&
-            |component_raws[12]| >= 1 && |component_raws[12]| <= 2 &&
-            component_integer_values[12] >= -32768 &&
-            component_integer_values[12] <= 32767;
-        if ( ! event_code_valid )
-            {
-            deviation = T;
-            reasons = append_feature(reasons, "invalid_event_code");
-            }
-        else if ( conditions_valid && (condition_flags & 0x08) != 0 )
-            parameters$event_code_requested = component_integer_values[12];
-        }
-
-    if ( deviation )
-        parameters$conformance = "standards_deviation";
-    if ( reasons != "" ) parameters$conformance_reasons = reasons;
+    local validation = decode_ds_transfer_parameters(
+        access_choice, object_scope, object_domain, object_name,
+        variable_count, data_count, first_data_choice,
+        component_choices, component_raws, component_integer_values,
+        data_set_component_choices, data_set_component_raws,
+        data_set_component_integer_values);
+    local deviation = validation$deviation;
+    local reasons = validation$reasons;
+    local parameters = validation$parameters;
 
     local enabled = parameters?$enabled && parameters$enabled;
     local action = enabled ? "start" : "stop";
@@ -4455,11 +5070,16 @@ event ICCP::mms_ds_transfer_set_message_v1(
     local state_full = ! reused &&
         pending_transfer_control_count(c$uid) >= max_pending_transfer_sets;
     if ( ! state_full )
+        {
         pending_transfer_controls[c$uid, is_orig, key] = [
             $action=action, $request_is_orig=is_orig,
             $scope=object_scope, $domain=object_domain, $name=object_name,
             $parameters=parameters
         ];
+        update_directional_processing_state(
+            c$uid, is_orig, key,
+            PROCESSING_PENDING_TRANSFER_CONTROL, T);
+        }
     else
         event ICCP::resource_limit_exceeded(
             c, is_orig, "pending_transfer_controls",
@@ -4519,11 +5139,16 @@ event ICCP::mms_transfer_control_message(
         local state_full = ! reused &&
             pending_transfer_control_count(c$uid) >= max_pending_transfer_sets;
         if ( ! state_full )
+            {
             pending_transfer_controls[c$uid, is_orig, key] = [
                 $action=action, $request_is_orig=is_orig,
                 $scope=object_scope, $domain=object_domain,
                 $name=object_name
             ];
+            update_directional_processing_state(
+                c$uid, is_orig, key,
+                PROCESSING_PENDING_TRANSFER_CONTROL, T);
+            }
         else
             event ICCP::resource_limit_exceeded(
                 c, is_orig, "pending_transfer_controls",
@@ -4620,6 +5245,7 @@ event ICCP::mms_transfer_control_message(
                 }
             else if ( existing || active_ds_transfer_count(c$uid) <
                       max_active_transfer_sets )
+                {
                 active_ds_transfers[
                     c$uid, prior$request_is_orig, prior$scope, prior$domain,
                     prior$name] = [
@@ -4628,6 +5254,11 @@ event ICCP::mms_transfer_control_message(
                     $name=prior$name, $parameters=prior$parameters,
                     $state="active"
                 ];
+                update_object_processing_state(
+                    c$uid, prior$request_is_orig, prior$scope,
+                    prior$domain, prior$name,
+                    PROCESSING_ACTIVE_TRANSFER_SET, T);
+                }
             else
                 {
                 response$outcome = "confirmed_state_limit";
@@ -4651,10 +5282,17 @@ event ICCP::mms_transfer_control_message(
                 active_ds_transfers[
                     c$uid, prior$request_is_orig, prior$scope, prior$domain,
                     prior$name] = active;
+                update_object_processing_state(
+                    c$uid, prior$request_is_orig, prior$scope,
+                    prior$domain, prior$name,
+                    PROCESSING_ACTIVE_TRANSFER_SET, T);
                 }
             }
         }
     delete pending_transfer_controls[c$uid, response_request_is_orig, key];
+    update_directional_processing_state(
+        c$uid, response_request_is_orig, key,
+        PROCESSING_PENDING_TRANSFER_CONTROL, F);
     write_transfer_record(c, is_orig, response);
     }
 
@@ -4668,11 +5306,21 @@ event ICCP::mms_error_message(
     local key = int_to_count(invoke_id);
     local error_request_is_orig = ! is_orig;
     if ( [c$uid, error_request_is_orig, key] in pending_variable_types )
+        {
         delete pending_variable_types[c$uid, error_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, error_request_is_orig, key,
+            PROCESSING_PENDING_VARIABLE_TYPE, F);
+        }
     if ( [c$uid, error_request_is_orig, key] in
          invalid_variable_type_invokes )
+        {
         delete invalid_variable_type_invokes[
             c$uid, error_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, error_request_is_orig, key,
+            PROCESSING_INVALID_VARIABLE_TYPE, F);
+        }
 
     local set_request_is_orig = ! is_orig;
     local set_direction_valid = T;
@@ -4699,8 +5347,13 @@ event ICCP::mms_error_message(
                 set_error$list_domain = set_prior$domain;
             }
         if ( set_direction_valid )
+            {
             delete pending_transfer_sets[
                 c$uid, set_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, set_request_is_orig, key,
+                PROCESSING_PENDING_TRANSFER_SET, F);
+            }
         write_transfer_record(c, is_orig, set_error);
         }
 
@@ -4726,8 +5379,13 @@ event ICCP::mms_error_message(
             $list_name=support_prior$name
         ];
         if ( support_direction_valid )
+            {
             delete pending_transfer_support[
                 c$uid, support_request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, support_request_is_orig, key,
+                PROCESSING_PENDING_TRANSFER_SUPPORT, F);
+            }
         write_transfer_record(c, is_orig, support_error);
         }
 
@@ -4758,8 +5416,424 @@ event ICCP::mms_error_message(
         rejected = add_ds_transfer_parameters(rejected, prior$parameters);
         }
     if ( control_direction_valid )
+        {
         delete pending_transfer_controls[c$uid, control_request_is_orig, key];
+        update_directional_processing_state(
+            c$uid, control_request_is_orig, key,
+            PROCESSING_PENDING_TRANSFER_CONTROL, F);
+        }
     write_transfer_record(c, is_orig, rejected);
+    }
+
+function process_transfer_set_request(
+    c: connection, is_orig: bool, invoke_id: int, service_tag: count,
+    list_scope: count, list_domain: string, list_name: string,
+    variable_count: count, first_variable_scope: count,
+    first_variable_domain: string, first_variable_name: string,
+    delete_scope: int, name_count: count,
+    member_scopes: vector of count, member_domains: vector of string,
+    member_names: vector of string,
+    member_alternate_access_counts: vector of count,
+    exact_member_access_evidence: bool)
+    {
+    local action = service_tag == 11 ? "define" :
+                   service_tag == 12 ? "inspect" : "delete";
+    local request_pending_key = int_to_count(invoke_id);
+    local invoke_reused = [c$uid, is_orig, request_pending_key] in
+                          pending_transfer_sets;
+    local prior_known = list_name != "" &&
+        [c$uid, ! is_orig, list_scope, list_domain, list_name] in
+            known_transfer_sets;
+    local pending: PendingTransferSet = [
+        $action=action, $scope=list_scope, $domain=list_domain,
+        $name=list_name, $variable_count=variable_count,
+        $first_variable_scope=first_variable_scope,
+        $first_variable_domain=first_variable_domain,
+        $first_variable_name=first_variable_name,
+        $prior_known=prior_known,
+        $delete_scope=delete_scope, $name_count=name_count,
+        $profile_valid=F,
+        $member_scopes=member_scopes, $member_domains=member_domains,
+        $member_names=member_names,
+        $member_alternate_access_counts=
+            member_alternate_access_counts,
+        $exact_member_access_evidence=exact_member_access_evidence,
+        $profile_reasons=""
+    ];
+    local identifiers_valid = valid_pending_transfer_identifiers(pending);
+    pending$profile_reasons = transfer_set_profile_reasons(pending);
+    pending$profile_valid = identifiers_valid &&
+        pending$profile_reasons == "";
+    local state_full = identifiers_valid && ! invoke_reused &&
+        pending_transfer_count(c$uid) >= max_pending_transfer_sets;
+    if ( identifiers_valid && ! state_full )
+        {
+        pending_transfer_sets[
+            c$uid, is_orig, request_pending_key] = pending;
+        update_directional_processing_state(
+            c$uid, is_orig, request_pending_key,
+            PROCESSING_PENDING_TRANSFER_SET, T);
+        }
+    else if ( state_full )
+        event ICCP::resource_limit_exceeded(
+            c, is_orig, "pending_transfer_sets",
+            max_pending_transfer_sets, pending_transfer_count(c$uid),
+            invoke_id);
+
+    local request: TransferInfo = [
+        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
+        $action=action,
+        $outcome=! identifiers_valid ? "invalid_identifier" :
+            state_full ? "state_limit" :
+            invoke_reused ? "invoke_reused" : "requested",
+        $invoke_id=invoke_id
+    ];
+    if ( list_name != "" )
+        {
+        request$list_scope = transfer_scope_name(list_scope);
+        request$list_name = list_name;
+        if ( list_domain != "" ) request$list_domain = list_domain;
+        request$known_list = prior_known;
+        }
+    if ( service_tag == 11 ) request$variable_count = variable_count;
+    if ( service_tag == 13 ) request$delete_scope = delete_scope;
+    if ( identifiers_valid && action != "inspect" &&
+         ! pending$profile_valid )
+        {
+        request$conformance = "standards_deviation";
+        request$conformance_reasons = pending$profile_reasons;
+        }
+    write_transfer_record(c, is_orig, request);
+    }
+
+function transfer_set_service_action(service_tag: count): string
+    {
+    return service_tag == 11 ? "define" :
+           service_tag == 12 ? "inspect" : "delete";
+    }
+
+function new_transfer_set_response_record(
+    c: connection, is_orig: bool, invoke_id: int, action: string,
+    outcome: string): TransferInfo
+    {
+    return [
+        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
+        $action=action, $outcome=outcome, $invoke_id=invoke_id
+    ];
+    }
+
+function add_pending_transfer_identity(
+    response: TransferInfo, prior: PendingTransferSet): TransferInfo
+    {
+    if ( prior$name == "" )
+        return response;
+
+    response$list_scope = transfer_scope_name(prior$scope);
+    response$list_name = prior$name;
+    if ( prior$domain != "" )
+        response$list_domain = prior$domain;
+    return response;
+    }
+
+function add_define_transfer_set_response(
+    c: connection, is_orig: bool, invoke_id: int,
+    response: TransferInfo, prior: PendingTransferSet): TransferInfo
+    {
+    # Re-check at response time as well as using the request snapshot: two
+    # outstanding definitions for one previously unknown name can confirm out
+    # of order.
+    local existing_definition = prior$prior_known ||
+        (prior$name != "" &&
+         [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+             known_transfer_sets);
+    response$variable_count = prior$variable_count;
+    if ( prior$first_variable_name != "" )
+        {
+        response$first_variable_scope =
+            transfer_scope_name(prior$first_variable_scope);
+        response$first_variable_name = prior$first_variable_name;
+        if ( prior$first_variable_domain != "" )
+            response$first_variable_domain = prior$first_variable_domain;
+        }
+
+    # A successful duplicate definition is a peer deviation, not a valid
+    # update operation. Preserve the membership learned from the original
+    # confirmed definition.
+    if ( prior$profile_valid && ! existing_definition && prior$name != "" &&
+         known_transfer_count(c$uid) < max_known_transfer_sets )
+        {
+        known_transfer_sets[
+            c$uid, is_orig, prior$scope, prior$domain, prior$name] = [
+                $scopes=prior$member_scopes,
+                $domains=prior$member_domains,
+                $names=prior$member_names
+            ];
+        update_object_processing_state(
+            c$uid, is_orig, prior$scope, prior$domain, prior$name,
+            PROCESSING_KNOWN_TRANSFER_SET, T);
+        }
+    if ( existing_definition )
+        {
+        response$conformance = "standards_deviation";
+        response$conformance_reasons = add_transfer_profile_reason(
+            response?$conformance_reasons ?
+                response$conformance_reasons : "",
+            "define_existing_name_confirmed");
+        }
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    response$outcome = existing_definition ?
+        "confirmed_existing_name" :
+        ! prior$profile_valid ? "confirmed_profile_deviation" :
+            response$known_list ? "confirmed" : "state_limit";
+    if ( prior$profile_valid && ! existing_definition && prior$name != "" &&
+         ! response$known_list )
+        event ICCP::resource_limit_exceeded(
+            c, is_orig, "known_transfer_sets", max_known_transfer_sets,
+            known_transfer_count(c$uid), invoke_id);
+
+    return response;
+    }
+
+function add_inspect_transfer_set_response(
+    c: connection, is_orig: bool, response: TransferInfo,
+    prior: PendingTransferSet, variable_count: count,
+    deletable: bool): TransferInfo
+    {
+    response$variable_count = variable_count;
+    response$deletable = deletable;
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    return response;
+    }
+
+function add_delete_transfer_set_response(
+    c: connection, is_orig: bool, response: TransferInfo,
+    prior: PendingTransferSet, number_matched: int,
+    number_deleted: int): TransferInfo
+    {
+    response$number_matched = number_matched;
+    response$number_deleted = number_deleted;
+    if ( ! prior$profile_valid )
+        response$outcome = "confirmed_profile_deviation";
+    else
+        {
+        # The TASE.2 Delete Data Set profile requires a positive response only
+        # after every specifically named Data Set was found and deleted. Keep
+        # aggregate wire counts observable without treating a partial result
+        # as a conforming confirmation.
+        local delete_count_reasons = "";
+        if ( number_matched != prior$name_count )
+            delete_count_reasons = add_transfer_profile_reason(
+                delete_count_reasons,
+                "matched_count_differs_requested_names");
+        if ( number_deleted != prior$name_count )
+            delete_count_reasons = add_transfer_profile_reason(
+                delete_count_reasons,
+                "deleted_count_differs_requested_names");
+        if ( delete_count_reasons != "" )
+            {
+            response$outcome = "confirmed_count_deviation";
+            response$conformance = "standards_deviation";
+            response$conformance_reasons = delete_count_reasons;
+            }
+
+        if ( number_deleted > 0 )
+            {
+            # DeleteNamedVariableList returns only aggregate counts. A
+            # positive partial result cannot identify which requested names
+            # were deleted, so invalidate every requested identity.
+            local delete_index: count = 0;
+            while ( delete_index < |prior$member_names| )
+                {
+                delete known_transfer_sets[
+                    c$uid, is_orig,
+                    prior$member_scopes[delete_index],
+                    prior$member_domains[delete_index],
+                    prior$member_names[delete_index]];
+                update_object_processing_state(
+                    c$uid, is_orig,
+                    prior$member_scopes[delete_index],
+                    prior$member_domains[delete_index],
+                    prior$member_names[delete_index],
+                    PROCESSING_KNOWN_TRANSFER_SET, F);
+                ++delete_index;
+                }
+            }
+        }
+    response$known_list = prior$name != "" &&
+        [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
+            known_transfer_sets;
+    return response;
+    }
+
+function process_transfer_set_response(
+    c: connection, is_orig: bool, invoke_id: int, service_tag: count,
+    variable_count: count, deletable: bool,
+    number_matched: int, number_deleted: int)
+    {
+    local response_pending_key = int_to_count(invoke_id);
+    local response_request_is_orig = ! is_orig;
+    local response_direction_valid = T;
+    if ( [c$uid, response_request_is_orig, response_pending_key] !in
+         pending_transfer_sets )
+        {
+        response_request_is_orig = is_orig;
+        response_direction_valid = F;
+        }
+    if ( [c$uid, response_request_is_orig, response_pending_key] !in
+         pending_transfer_sets )
+        {
+        local unexpected = new_transfer_set_response_record(
+            c, is_orig, invoke_id,
+            transfer_set_service_action(service_tag),
+            "unexpected_response");
+        write_transfer_record(c, is_orig, unexpected);
+        return;
+        }
+    local prior = pending_transfer_sets[
+        c$uid, response_request_is_orig, response_pending_key];
+    if ( ! response_direction_valid )
+        {
+        local wrong_direction = new_transfer_set_response_record(
+            c, is_orig, invoke_id, prior$action, "direction_mismatch");
+        write_transfer_record(c, is_orig, wrong_direction);
+        return;
+        }
+    local response_action = transfer_set_service_action(service_tag);
+    if ( prior$action != response_action )
+        {
+        # Define/Get/DeleteNamedVariableList share one pending family, but
+        # a response from a different service must never mutate the prior
+        # list lifecycle.  Leave the request available for a valid reply.
+        local wrong_service = new_transfer_set_response_record(
+            c, is_orig, invoke_id, prior$action, "service_mismatch");
+        wrong_service = add_pending_transfer_identity(wrong_service, prior);
+        write_transfer_record(c, is_orig, wrong_service);
+        return;
+        }
+    local response = new_transfer_set_response_record(
+        c, is_orig, invoke_id, prior$action, "confirmed");
+    response = add_pending_transfer_identity(response, prior);
+    if ( prior$action != "inspect" && ! prior$profile_valid )
+        {
+        response$conformance = "standards_deviation";
+        response$conformance_reasons = prior$profile_reasons;
+        }
+    if ( service_tag == 11 )
+        response = add_define_transfer_set_response(
+            c, is_orig, invoke_id, response, prior);
+    else if ( service_tag == 12 )
+        response = add_inspect_transfer_set_response(
+            c, is_orig, response, prior, variable_count, deletable);
+    else
+        response = add_delete_transfer_set_response(
+            c, is_orig, response, prior, number_matched, number_deleted);
+    delete pending_transfer_sets[
+        c$uid, response_request_is_orig, response_pending_key];
+    update_directional_processing_state(
+        c$uid, response_request_is_orig, response_pending_key,
+        PROCESSING_PENDING_TRANSFER_SET, F);
+    write_transfer_record(c, is_orig, response);
+    }
+
+function process_transfer_set_report(
+    c: connection, is_orig: bool, list_scope: count, list_domain: string,
+    list_name: string, result_count: count, failure_count: count,
+    result_choices: vector of count, result_errors: vector of int,
+    result_raws: vector of string)
+    {
+    local report_sequence = mms_parser_sequence(c, is_orig);
+    local rich_results_available =
+        information_report_results_available(
+            c, is_orig, report_sequence);
+    local rich_results: vector of MMSDataEvidence;
+    if ( rich_results_available )
+        rich_results = information_report_results_evidence[
+            c$uid, is_orig, report_sequence]$results;
+    local report: TransferInfo = [
+        $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
+        $action="report", $outcome=failure_count == 0 ?
+            "delivered" : "partial_or_failed",
+        $list_scope=transfer_scope_name(list_scope),
+        $list_name=list_name, $result_count=result_count,
+        $failure_count=failure_count,
+        $known_list=[c$uid, is_orig,
+                     list_scope, list_domain, list_name] in
+            known_transfer_sets
+    ];
+    if ( list_domain != "" ) report$list_domain = list_domain;
+
+    if ( [c$uid, is_orig, list_scope, list_domain, list_name] in
+         known_transfer_sets )
+        {
+        local membership = known_transfer_sets[
+            c$uid, is_orig, list_scope, list_domain, list_name];
+        report$pairing_status = |membership$names| == |result_choices| ?
+            "complete" : "count_mismatch";
+        local pair_count = |membership$names| < |result_choices| ?
+            |membership$names| : |result_choices|;
+        local row_limit = information_report_result_limit();
+        if ( pair_count > row_limit )
+            pair_count = row_limit;
+        report$logged_result_count = pair_count;
+        report$omitted_result_count = result_count > pair_count ?
+            result_count - pair_count : 0;
+        write_transfer_record(c, is_orig, report);
+        local index: count = 0;
+        while ( index < pair_count )
+            {
+            local paired: TransferInfo = [
+                $ts=network_time(), $uid=c$uid, $id=c$id,
+                $is_orig=is_orig, $action="report_value",
+                $outcome=result_choices[index] == 0 ? "failed" :
+                    "delivered", $list_scope=transfer_scope_name(list_scope),
+                $list_name=list_name, $known_list=T,
+                $result_index=index, $result_type=result_choices[index]
+            ];
+            if ( list_domain != "" ) paired$list_domain = list_domain;
+            if ( index < |membership$scopes| )
+                paired$first_variable_scope =
+                    transfer_scope_name(membership$scopes[index]);
+            if ( index < |membership$domains| &&
+                 membership$domains[index] != "" )
+                paired$first_variable_domain = membership$domains[index];
+            paired$first_variable_name = membership$names[index];
+            if ( index < |result_errors| && result_errors[index] >= 0 )
+                paired$result_error = result_errors[index];
+            if ( index < |rich_results| &&
+                 rich_results[index]$raw_prefix != "" &&
+                 information_buffer_capacity(
+                    membership$names[index]) == 0 )
+                {
+                paired$result_raw = bounded_information_report_result_raw(
+                    rich_results[index]$raw_prefix);
+                paired$result_raw_truncated =
+                    rich_results[index]$raw_truncated ||
+                    |rich_results[index]$raw_prefix| >
+                        max_logged_result_raw_bytes;
+                }
+            else if ( index < |result_raws| &&
+                      result_raws[index] != "" &&
+                      information_buffer_capacity(
+                        membership$names[index]) == 0 )
+                {
+                paired$result_raw = bounded_information_report_result_raw(
+                    result_raws[index]);
+                paired$result_raw_truncated =
+                    |result_raws[index]| > max_logged_result_raw_bytes;
+                }
+            write_transfer_record(c, is_orig, paired);
+            ++index;
+            }
+        }
+    else
+        {
+        report$pairing_status = "untracked_list";
+        write_transfer_record(c, is_orig, report);
+        }
     }
 
 function process_transfer_set_message(
@@ -4790,335 +5864,32 @@ function process_transfer_set_message(
     if ( pdu_type == 0 && invoke_id >= 0 &&
          (service_tag == 11 || service_tag == 12 || service_tag == 13) )
         {
-        local action = service_tag == 11 ? "define" :
-                       service_tag == 12 ? "inspect" : "delete";
-        local request_pending_key = int_to_count(invoke_id);
-        local invoke_reused = [c$uid, is_orig, request_pending_key] in
-                              pending_transfer_sets;
-        local prior_known = list_name != "" &&
-            [c$uid, ! is_orig, list_scope, list_domain, list_name] in
-                known_transfer_sets;
-        local pending: PendingTransferSet = [
-            $action=action, $scope=list_scope, $domain=list_domain,
-            $name=list_name, $variable_count=variable_count,
-            $first_variable_scope=first_variable_scope,
-            $first_variable_domain=first_variable_domain,
-            $first_variable_name=first_variable_name,
-            $prior_known=prior_known,
-            $delete_scope=delete_scope, $name_count=name_count,
-            $profile_valid=F,
-            $member_scopes=member_scopes, $member_domains=member_domains,
-            $member_names=member_names,
-            $member_alternate_access_counts=
-                member_alternate_access_counts,
-            $exact_member_access_evidence=exact_member_access_evidence,
-            $profile_reasons=""
-        ];
-        local identifiers_valid = valid_pending_transfer_identifiers(pending);
-        pending$profile_reasons = transfer_set_profile_reasons(pending);
-        pending$profile_valid = identifiers_valid &&
-            pending$profile_reasons == "";
-        local state_full = identifiers_valid && ! invoke_reused &&
-            pending_transfer_count(c$uid) >= max_pending_transfer_sets;
-        if ( identifiers_valid && ! state_full )
-            pending_transfer_sets[
-                c$uid, is_orig, request_pending_key] = pending;
-        else if ( state_full )
-            event ICCP::resource_limit_exceeded(
-                c, is_orig, "pending_transfer_sets",
-                max_pending_transfer_sets, pending_transfer_count(c$uid),
-                invoke_id);
-
-        local request: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
-            $action=action,
-            $outcome=! identifiers_valid ? "invalid_identifier" :
-                state_full ? "state_limit" :
-                invoke_reused ? "invoke_reused" : "requested",
-            $invoke_id=invoke_id
-        ];
-        if ( list_name != "" )
-            {
-            request$list_scope = transfer_scope_name(list_scope);
-            request$list_name = list_name;
-            if ( list_domain != "" ) request$list_domain = list_domain;
-            request$known_list = prior_known;
-            }
-        if ( service_tag == 11 ) request$variable_count = variable_count;
-        if ( service_tag == 13 ) request$delete_scope = delete_scope;
-        if ( identifiers_valid && action != "inspect" &&
-             ! pending$profile_valid )
-            {
-            request$conformance = "standards_deviation";
-            request$conformance_reasons = pending$profile_reasons;
-            }
-        write_transfer_record(c, is_orig, request);
+        process_transfer_set_request(
+            c, is_orig, invoke_id, service_tag,
+            list_scope, list_domain, list_name, variable_count,
+            first_variable_scope, first_variable_domain,
+            first_variable_name, delete_scope, name_count,
+            member_scopes, member_domains, member_names,
+            member_alternate_access_counts, exact_member_access_evidence);
         return;
         }
 
     if ( pdu_type == 1 && invoke_id >= 0 &&
          (service_tag == 11 || service_tag == 12 || service_tag == 13) )
         {
-        local response_pending_key = int_to_count(invoke_id);
-        local response_request_is_orig = ! is_orig;
-        local response_direction_valid = T;
-        if ( [c$uid, response_request_is_orig, response_pending_key] !in
-             pending_transfer_sets )
-            {
-            response_request_is_orig = is_orig;
-            response_direction_valid = F;
-            }
-        if ( [c$uid, response_request_is_orig, response_pending_key] !in
-             pending_transfer_sets )
-            {
-            local unexpected: TransferInfo = [
-                $ts=network_time(), $uid=c$uid, $id=c$id,
-                $is_orig=is_orig,
-                $action=service_tag == 11 ? "define" :
-                    service_tag == 12 ? "inspect" : "delete",
-                $outcome="unexpected_response", $invoke_id=invoke_id
-            ];
-            write_transfer_record(c, is_orig, unexpected);
-            return;
-            }
-        local prior = pending_transfer_sets[
-            c$uid, response_request_is_orig, response_pending_key];
-        if ( ! response_direction_valid )
-            {
-            local wrong_direction: TransferInfo = [
-                $ts=network_time(), $uid=c$uid, $id=c$id,
-                $is_orig=is_orig, $action=prior$action,
-                $outcome="direction_mismatch", $invoke_id=invoke_id
-            ];
-            write_transfer_record(c, is_orig, wrong_direction);
-            return;
-            }
-        local response_action = service_tag == 11 ? "define" :
-                                service_tag == 12 ? "inspect" : "delete";
-        if ( prior$action != response_action )
-            {
-            # Define/Get/DeleteNamedVariableList share one pending family, but
-            # a response from a different service must never mutate the prior
-            # list lifecycle.  Leave the request available for a valid reply.
-            local wrong_service: TransferInfo = [
-                $ts=network_time(), $uid=c$uid, $id=c$id,
-                $is_orig=is_orig, $action=prior$action,
-                $outcome="service_mismatch", $invoke_id=invoke_id
-            ];
-            if ( prior$name != "" )
-                {
-                wrong_service$list_scope = transfer_scope_name(prior$scope);
-                wrong_service$list_name = prior$name;
-                if ( prior$domain != "" )
-                    wrong_service$list_domain = prior$domain;
-                }
-            write_transfer_record(c, is_orig, wrong_service);
-            return;
-            }
-        local response: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
-            $action=prior$action, $outcome="confirmed", $invoke_id=invoke_id
-        ];
-        if ( prior$name != "" )
-            {
-            response$list_scope = transfer_scope_name(prior$scope);
-            response$list_name = prior$name;
-            if ( prior$domain != "" ) response$list_domain = prior$domain;
-            }
-        if ( prior$action != "inspect" && ! prior$profile_valid )
-            {
-            response$conformance = "standards_deviation";
-            response$conformance_reasons = prior$profile_reasons;
-            }
-        if ( service_tag == 11 )
-            {
-            # Re-check at response time as well as using the request snapshot:
-            # two outstanding definitions for one previously unknown name can
-            # confirm out of order.
-            local existing_definition = prior$prior_known ||
-                (prior$name != "" &&
-                 [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                     known_transfer_sets);
-            response$variable_count = prior$variable_count;
-            if ( prior$first_variable_name != "" )
-                {
-                response$first_variable_scope =
-                    transfer_scope_name(prior$first_variable_scope);
-                response$first_variable_name = prior$first_variable_name;
-                if ( prior$first_variable_domain != "" )
-                    response$first_variable_domain =
-                        prior$first_variable_domain;
-                }
-            # A successful duplicate definition is a peer deviation, not a
-            # valid update operation.  Preserve the membership learned from
-            # the original confirmed definition.
-            if ( prior$profile_valid && ! existing_definition &&
-                 prior$name != "" &&
-                 known_transfer_count(c$uid) < max_known_transfer_sets )
-                known_transfer_sets[c$uid, is_orig, prior$scope,
-                                    prior$domain, prior$name] = [
-                    $scopes=prior$member_scopes,
-                    $domains=prior$member_domains,
-                    $names=prior$member_names
-                ];
-            if ( existing_definition )
-                {
-                response$conformance = "standards_deviation";
-                response$conformance_reasons = add_transfer_profile_reason(
-                    response?$conformance_reasons ?
-                        response$conformance_reasons : "",
-                    "define_existing_name_confirmed");
-                }
-            response$known_list = prior$name != "" &&
-                [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                known_transfer_sets;
-            response$outcome = existing_definition ?
-                "confirmed_existing_name" :
-                ! prior$profile_valid ? "confirmed_profile_deviation" :
-                    response$known_list ? "confirmed" : "state_limit";
-            if ( prior$profile_valid && ! existing_definition &&
-                 prior$name != "" &&
-                 ! response$known_list )
-                event ICCP::resource_limit_exceeded(
-                    c, is_orig, "known_transfer_sets",
-                    max_known_transfer_sets, known_transfer_count(c$uid),
-                    invoke_id);
-            }
-        else if ( service_tag == 12 )
-            {
-            response$variable_count = variable_count;
-            response$deletable = deletable;
-            response$known_list = prior$name != "" &&
-                [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                known_transfer_sets;
-            }
-        else
-            {
-            response$number_matched = number_matched;
-            response$number_deleted = number_deleted;
-            if ( ! prior$profile_valid )
-                response$outcome = "confirmed_profile_deviation";
-            else
-                {
-                # The TASE.2 Delete Data Set profile requires a positive
-                # response only after every specifically named Data Set was
-                # found and deleted.  Keep the wire-level aggregate counts
-                # observable, but do not treat a partial positive result as a
-                # conforming confirmation.
-                local delete_count_reasons = "";
-                if ( number_matched != prior$name_count )
-                    delete_count_reasons = add_transfer_profile_reason(
-                        delete_count_reasons,
-                        "matched_count_differs_requested_names");
-                if ( number_deleted != prior$name_count )
-                    delete_count_reasons = add_transfer_profile_reason(
-                        delete_count_reasons,
-                        "deleted_count_differs_requested_names");
-                if ( delete_count_reasons != "" )
-                    {
-                    response$outcome = "confirmed_count_deviation";
-                    response$conformance = "standards_deviation";
-                    response$conformance_reasons = delete_count_reasons;
-                    }
-
-                if ( number_deleted > 0 )
-                    {
-                    # DeleteNamedVariableList returns only aggregate counts. A
-                    # positive partial result cannot identify which requested
-                    # names were deleted, so invalidate every requested
-                    # identity.
-                    local delete_index: count = 0;
-                    while ( delete_index < |prior$member_names| )
-                        {
-                        delete known_transfer_sets[
-                            c$uid, is_orig,
-                            prior$member_scopes[delete_index],
-                            prior$member_domains[delete_index],
-                            prior$member_names[delete_index]];
-                        ++delete_index;
-                        }
-                    }
-                }
-            response$known_list = prior$name != "" &&
-                [c$uid, is_orig, prior$scope, prior$domain, prior$name] in
-                    known_transfer_sets;
-            }
-        delete pending_transfer_sets[
-            c$uid, response_request_is_orig, response_pending_key];
-        write_transfer_record(c, is_orig, response);
+        process_transfer_set_response(
+            c, is_orig, invoke_id, service_tag, variable_count,
+            deletable, number_matched, number_deleted);
         return;
         }
 
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
          access_choice == 1 && list_name != "" )
         {
-        local report: TransferInfo = [
-            $ts=network_time(), $uid=c$uid, $id=c$id, $is_orig=is_orig,
-            $action="report", $outcome=failure_count == 0 ?
-                "delivered" : "partial_or_failed",
-            $list_scope=transfer_scope_name(list_scope),
-            $list_name=list_name, $result_count=result_count,
-            $failure_count=failure_count,
-            $known_list=[c$uid, is_orig,
-                         list_scope, list_domain, list_name] in
-                known_transfer_sets
-        ];
-        if ( list_domain != "" ) report$list_domain = list_domain;
-
-        if ( [c$uid, is_orig, list_scope, list_domain, list_name] in
-             known_transfer_sets )
-            {
-            local membership = known_transfer_sets[
-                c$uid, is_orig, list_scope, list_domain, list_name];
-            report$pairing_status = |membership$names| == |result_choices| ?
-                "complete" : "count_mismatch";
-            local pair_count = |membership$names| < |result_choices| ?
-                |membership$names| : |result_choices|;
-            local row_limit = information_report_result_limit();
-            if ( pair_count > row_limit )
-                pair_count = row_limit;
-            report$logged_result_count = pair_count;
-            report$omitted_result_count = result_count > pair_count ?
-                result_count - pair_count : 0;
-            write_transfer_record(c, is_orig, report);
-            local index: count = 0;
-            while ( index < pair_count )
-                {
-                local paired: TransferInfo = [
-                    $ts=network_time(), $uid=c$uid, $id=c$id,
-                    $is_orig=is_orig, $action="report_value",
-                    $outcome=result_choices[index] == 0 ? "failed" :
-                        "delivered", $list_scope=transfer_scope_name(list_scope),
-                    $list_name=list_name, $known_list=T,
-                    $result_index=index, $result_type=result_choices[index]
-                ];
-                if ( list_domain != "" ) paired$list_domain = list_domain;
-                if ( index < |membership$scopes| )
-                    paired$first_variable_scope =
-                        transfer_scope_name(membership$scopes[index]);
-                if ( index < |membership$domains| &&
-                     membership$domains[index] != "" )
-                    paired$first_variable_domain = membership$domains[index];
-                paired$first_variable_name = membership$names[index];
-                if ( index < |result_errors| && result_errors[index] >= 0 )
-                    paired$result_error = result_errors[index];
-                if ( index < |result_raws| && result_raws[index] != "" &&
-                     information_buffer_capacity(membership$names[index]) == 0 )
-                    {
-                    paired$result_raw = bounded_information_report_result_raw(
-                        result_raws[index]);
-                    paired$result_raw_truncated =
-                        |result_raws[index]| > max_logged_result_raw_bytes;
-                    }
-                write_transfer_record(c, is_orig, paired);
-                ++index;
-                }
-            }
-        else
-            {
-            report$pairing_status = "untracked_list";
-            write_transfer_record(c, is_orig, report);
-            }
+        process_transfer_set_report(
+            c, is_orig, list_scope, list_domain, list_name,
+            result_count, failure_count, result_choices,
+            result_errors, result_raws);
         }
     }
 
@@ -5184,125 +5955,45 @@ event ICCP::mms_transfer_set_message_v3(
 
 function clear_transfer_processing_state(uid_to_clear: string)
     {
-    local pending_keys: vector of count;
-    local pending_directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_transfer_sets )
-        if ( uid == uid_to_clear )
-            {
-            pending_keys[|pending_keys|] = invoke;
-            pending_directions[|pending_directions|] = request_is_orig;
-            }
-    for ( index in pending_keys )
-        delete pending_transfer_sets[
-            uid_to_clear, pending_directions[index], pending_keys[index]];
-
-    local control_keys: vector of count;
-    local control_directions: vector of bool;
-    for ( [control_uid, control_is_orig, control_invoke] in
-          pending_transfer_controls )
-        if ( control_uid == uid_to_clear )
-            {
-            control_keys[|control_keys|] = control_invoke;
-            control_directions[|control_directions|] = control_is_orig;
-            }
-    for ( control_index in control_keys )
-        delete pending_transfer_controls[
-            uid_to_clear, control_directions[control_index],
-            control_keys[control_index]];
-
-    local active_keys: vector of string;
-    local active_directions: vector of bool;
-    local active_scopes: vector of count;
-    local active_domains: vector of string;
-    for ( [active_uid, active_is_orig, active_scope, active_domain,
-           active_name] in active_ds_transfers )
-        if ( active_uid == uid_to_clear )
-            {
-            active_keys[|active_keys|] = active_name;
-            active_directions[|active_directions|] = active_is_orig;
-            active_scopes[|active_scopes|] = active_scope;
-            active_domains[|active_domains|] = active_domain;
-            }
-    for ( active_index in active_keys )
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_transfer_sets )
+        delete pending_transfer_sets[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_transfer_controls )
+        delete pending_transfer_controls[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_transfer_support )
+        delete pending_transfer_support[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$pending_variable_types )
+        delete pending_variable_types[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_variable_types )
+        delete invalid_variable_type_invokes[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, scope, domain, name] in state$active_transfer_sets )
         delete active_ds_transfers[
-            uid_to_clear, active_directions[active_index],
-            active_scopes[active_index], active_domains[active_index],
-            active_keys[active_index]];
-
-    local support_keys: vector of count;
-    local support_directions: vector of bool;
-    for ( [support_uid, support_is_orig, support_invoke] in
-          pending_transfer_support )
-        if ( support_uid == uid_to_clear )
-            {
-            support_keys[|support_keys|] = support_invoke;
-            support_directions[|support_directions|] = support_is_orig;
-            }
-    for ( support_index in support_keys )
-        delete pending_transfer_support[
-            uid_to_clear, support_directions[support_index],
-            support_keys[support_index]];
-
-    local type_pending_keys: vector of count;
-    local type_pending_directions: vector of bool;
-    for ( [type_uid, type_is_orig, type_invoke] in pending_variable_types )
-        if ( type_uid == uid_to_clear )
-            {
-            type_pending_keys[|type_pending_keys|] = type_invoke;
-            type_pending_directions[|type_pending_directions|] = type_is_orig;
-            }
-    for ( type_pending_index in type_pending_keys )
-        delete pending_variable_types[
-            uid_to_clear, type_pending_directions[type_pending_index],
-            type_pending_keys[type_pending_index]];
-
-    local invalid_type_keys: vector of count;
-    local invalid_type_directions: vector of bool;
-    for ( [invalid_type_uid, invalid_type_is_orig, invalid_type_invoke] in
-          invalid_variable_type_invokes )
-        if ( invalid_type_uid == uid_to_clear )
-            {
-            invalid_type_keys[|invalid_type_keys|] = invalid_type_invoke;
-            invalid_type_directions[|invalid_type_directions|] =
-                invalid_type_is_orig;
-            }
-    for ( invalid_type_index in invalid_type_keys )
-        delete invalid_variable_type_invokes[
-            uid_to_clear, invalid_type_directions[invalid_type_index],
-            invalid_type_keys[invalid_type_index]];
-
-    local type_known_keys: vector of KnownVariableTypeKey;
-    for ( [type_known_uid, type_server_is_orig, type_scope, type_domain,
-           known_type_name] in known_variable_types )
-        if ( type_known_uid == uid_to_clear )
-            type_known_keys[|type_known_keys|] = [
-                $server_is_orig=type_server_is_orig,
-                $scope=type_scope, $domain=type_domain,
-                $name=known_type_name
-            ];
-    for ( type_known_index in type_known_keys )
-        {
-        local type_key = type_known_keys[type_known_index];
-        delete known_variable_types[
-            uid_to_clear, type_key$server_is_orig, type_key$scope,
-            type_key$domain, type_key$name];
-        }
-
-    local known_keys: vector of KnownTransferKey;
-    for ( [uid, server_is_orig, scope, domain, name] in
-          known_transfer_sets )
-        if ( uid == uid_to_clear )
-            known_keys[|known_keys|] = [
-                $server_is_orig=server_is_orig,
-                $scope=scope, $domain=domain, $name=name
-            ];
-    for ( known_index in known_keys )
-        {
-        local known_key = known_keys[known_index];
+            uid_to_clear, is_orig, scope, domain, name];
+    for ( [is_orig, scope, domain, name] in state$known_transfer_sets )
         delete known_transfer_sets[
-            uid_to_clear, known_key$server_is_orig, known_key$scope,
-            known_key$domain, known_key$name];
-        }
+            uid_to_clear, is_orig, scope, domain, name];
+    for ( [is_orig, scope, domain, name] in state$known_variable_types )
+        delete known_variable_types[
+            uid_to_clear, is_orig, scope, domain, name];
+
+    local empty_directional: set[bool, count] = set();
+    local empty_pending_controls: set[bool, count] = set();
+    local empty_pending_support: set[bool, count] = set();
+    local empty_pending_types: set[bool, count] = set();
+    local empty_invalid_types: set[bool, count] = set();
+    local empty_active: set[bool, count, string, string] = set();
+    local empty_known_transfers: set[bool, count, string, string] = set();
+    local empty_known_types: set[bool, count, string, string] = set();
+    state$pending_transfer_sets = empty_directional;
+    state$pending_transfer_controls = empty_pending_controls;
+    state$pending_transfer_support = empty_pending_support;
+    state$pending_variable_types = empty_pending_types;
+    state$invalid_variable_types = empty_invalid_types;
+    state$active_transfer_sets = empty_active;
+    state$known_transfer_sets = empty_known_transfers;
+    state$known_variable_types = empty_known_types;
+    processing_state_indexes[uid_to_clear] = state;
     }
 
 event connection_state_remove(c: connection)
@@ -5326,37 +6017,51 @@ function clear_failed_mms_pdu_evidence(c: connection, is_orig: bool)
     # sequence. Evidence from completed earlier PDUs uses older sequence keys.
     if ( [c$uid, is_orig] !in pending_mms_parser_markers )
         return;
+    if ( c$uid !in processing_state_indexes ) return;
 
     local sequence = mms_parser_sequence(c, is_orig);
+    local state = processing_state_indexes[c$uid];
     local identify_pdus: vector of count;
     local identify_invokes: vector of count;
-    for ( [uid, direction, entry_sequence, pdu_type, invoke] in
-          identify_evidence )
-        if ( uid == c$uid && direction == is_orig &&
-             entry_sequence == sequence )
+    for ( [direction, entry_sequence, pdu_type, invoke] in
+          state$identify_evidence )
+        if ( direction == is_orig && entry_sequence == sequence )
             {
             identify_pdus[|identify_pdus|] = pdu_type;
             identify_invokes[|identify_invokes|] = invoke;
             }
     for ( index in identify_pdus )
+        {
         delete identify_evidence[
             c$uid, is_orig, sequence, identify_pdus[index],
             identify_invokes[index]];
+        delete state$identify_evidence[
+            is_orig, sequence, identify_pdus[index],
+            identify_invokes[index]];
+        }
 
     delete information_report_results_evidence[c$uid, is_orig, sequence];
     delete point_value_shape_evidence[c$uid, is_orig, sequence];
     delete control_value_shape_evidence[c$uid, is_orig, sequence];
     delete control_value_shape_invokes[c$uid, is_orig, sequence];
+    delete state$information_report_results[is_orig, sequence];
+    delete state$point_value_shapes[is_orig, sequence];
+    delete state$control_value_shapes[is_orig, sequence];
+    delete state$control_value_shape_invokes[is_orig, sequence];
 
     local read_invokes: vector of count;
-    for ( [read_uid, read_direction, read_sequence, read_invoke] in
-          control_read_value_shape_evidence )
-        if ( read_uid == c$uid && read_direction == is_orig &&
-             read_sequence == sequence )
+    for ( [read_direction, read_sequence, read_invoke] in
+          state$control_read_value_shapes )
+        if ( read_direction == is_orig && read_sequence == sequence )
             read_invokes[|read_invokes|] = read_invoke;
     for ( read_index in read_invokes )
+        {
         delete control_read_value_shape_evidence[
             c$uid, is_orig, sequence, read_invokes[read_index]];
+        delete state$control_read_value_shapes[
+            is_orig, sequence, read_invokes[read_index]];
+        }
+    processing_state_indexes[c$uid] = state;
     }
 
 event ICCP::parser_error(c: connection, reason: string)
@@ -5810,15 +6515,10 @@ function capture_mms_processing_context(
     return context;
     }
 
-function add_mms_quality_result(
+function add_mms_state_quality_result(
     c: connection, rec: Info, learned_point_type: string,
     first_result_type: count, first_result_raw: string,
-    result_component_count: count, result_first_choice: count,
-    result_second_choice: count, result_third_choice: count,
-    result_integer_value: int, result_floating_value: double,
-    result_flags_raw: string, result_timestamp_value: int,
-    shape_available: bool, first_component_length: count,
-    second_component_length: count, third_component_length: count,
+    shape_available: bool,
     point_shape: PointValueShapeEvidence): Info
     {
     if ( association_kind(c) == "tase2" &&
@@ -5873,22 +6573,38 @@ function add_mms_quality_result(
         rec$timestamp_quality =
             (supplemental_q_flags & 0x01) != 0;
         }
-    else if ( association_kind(c) == "tase2" &&
-              first_result_type == 2 &&
-              result_component_count == 2 &&
-              shape_available &&
-              ((learned_point_type == "Data_RealQ" &&
-                result_first_choice == 7 &&
-                first_component_length == 5) ||
-               (learned_point_type == "Data_DiscreteQ" &&
-                result_first_choice == 5 &&
-                first_component_length > 0 &&
-                first_component_length <= 4)) &&
-              result_second_choice == 4 &&
-              second_component_length == 2 &&
-              |result_flags_raw| == 2 &&
-              bytestring_to_count(
-                  sub_bytes(result_flags_raw, 1, 1)) == 0 )
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_numeric_quality_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_component_count: count, result_first_choice: count,
+    result_second_choice: count, result_third_choice: count,
+    result_integer_value: int, result_floating_value: double,
+    result_flags_raw: string, result_timestamp_value: int,
+    shape_available: bool, first_component_length: count,
+    second_component_length: count, third_component_length: count): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         first_result_type == 2 &&
+         result_component_count == 2 &&
+         shape_available &&
+         ((learned_point_type == "Data_RealQ" &&
+           result_first_choice == 7 &&
+           first_component_length == 5) ||
+          (learned_point_type == "Data_DiscreteQ" &&
+           result_first_choice == 5 &&
+           first_component_length > 0 &&
+           first_component_length <= 4)) &&
+         result_second_choice == 4 &&
+         second_component_length == 2 &&
+         |result_flags_raw| == 2 &&
+         bytestring_to_count(
+             sub_bytes(result_flags_raw, 1, 1)) == 0 )
         {
         local flags = bytestring_to_count(
             sub_bytes(result_flags_raw, 2, 1));
@@ -5939,22 +6655,34 @@ function add_mms_quality_result(
         rec$timestamp_quality = (time_flags & 0x01) != 0;
         rec$timestamp_value = double_to_time(result_timestamp_value);
         }
-    else if ( association_kind(c) == "tase2" &&
-              learned_point_type == "Data_StateQTimeTag" &&
-              first_result_type == 2 && shape_available &&
-              point_shape?$component_choices &&
-              point_shape?$component_raws &&
-              point_shape?$component_integer_values &&
-              |point_shape$component_choices| == 2 &&
-              |point_shape$component_raws| == 2 &&
-              |point_shape$component_integer_values| == 2 &&
-              point_shape$component_choices[0] == 5 &&
-              |point_shape$component_raws[0]| > 0 &&
-              |point_shape$component_raws[0]| <= 4 &&
-              point_shape$component_integer_values[0] >= 0 &&
-              point_shape$component_choices[1] == 4 &&
-              exact_eight_bit_string(
-                  point_shape$component_raws[1]) )
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_state_quality_time_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    shape_available: bool,
+    point_shape: PointValueShapeEvidence): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         learned_point_type == "Data_StateQTimeTag" &&
+         first_result_type == 2 && shape_available &&
+         point_shape?$component_choices &&
+         point_shape?$component_raws &&
+         point_shape?$component_integer_values &&
+         |point_shape$component_choices| == 2 &&
+         |point_shape$component_raws| == 2 &&
+         |point_shape$component_integer_values| == 2 &&
+         point_shape$component_choices[0] == 5 &&
+         |point_shape$component_raws[0]| > 0 &&
+         |point_shape$component_raws[0]| <= 4 &&
+         point_shape$component_integer_values[0] >= 0 &&
+         point_shape$component_choices[1] == 4 &&
+         exact_eight_bit_string(
+             point_shape$component_raws[1]) )
         {
         local state_time_flags = bytestring_to_count(
             sub_bytes(point_shape$component_raws[1], 2, 1));
@@ -6015,7 +6743,48 @@ function add_mms_quality_result(
     return rec;
     }
 
-function add_mms_extended_result(
+function add_mms_quality_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_component_count: count, result_first_choice: count,
+    result_second_choice: count, result_third_choice: count,
+    result_integer_value: int, result_floating_value: double,
+    result_flags_raw: string, result_timestamp_value: int,
+    shape_available: bool, first_component_length: count,
+    second_component_length: count, third_component_length: count,
+    point_shape: PointValueShapeEvidence): Info
+    {
+    if ( learned_point_type == "Data_StateQ" ||
+         learned_point_type == "Data_StateSupplementalQ" )
+        return add_mms_state_quality_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, shape_available, point_shape);
+
+    if ( learned_point_type == "Data_RealQ" ||
+         learned_point_type == "Data_DiscreteQ" ||
+         learned_point_type == "Data_RealQTimeTag" ||
+         learned_point_type == "Data_DiscreteQTimeTag" )
+        return add_mms_numeric_quality_result(
+            c, rec, learned_point_type, first_result_type, first_result_raw,
+            result_component_count, result_first_choice,
+            result_second_choice, result_third_choice,
+            result_integer_value, result_floating_value,
+            result_flags_raw, result_timestamp_value, shape_available,
+            first_component_length, second_component_length,
+            third_component_length);
+
+    if ( learned_point_type == "Data_StateQTimeTag" ||
+         learned_point_type == "Data_StateSupplementalQTimeTag" )
+        return add_mms_state_quality_time_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, shape_available, point_shape);
+
+    rec$standardized_value =
+        bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_extended_cov_result(
     c: connection, rec: Info, learned_point_type: string,
     first_result_type: count, first_result_raw: string,
     result_integer_value: int, result_floating_value: double,
@@ -6115,52 +6884,64 @@ function add_mms_extended_result(
             rec$standardized_value =
                 bounded_information_report_result_raw(first_result_raw);
         }
-    else if ( association_kind(c) == "tase2" &&
-              first_result_type == 2 && shape_available &&
-              point_shape?$component_choices &&
-              point_shape?$component_raws &&
-              point_shape?$component_integer_values &&
-              |point_shape$component_raws| ==
-                  |point_shape$component_choices| &&
-              |point_shape$component_integer_values| ==
-                  |point_shape$component_choices| &&
-              ((learned_point_type == "Data_RealQTimeTagExtended" &&
-                |point_shape$component_choices| == 3 &&
-                point_shape$component_choices[0] == 7 &&
-                |point_shape$component_raws[0]| == 5 &&
-                point_shape$component_choices[1] == 2 &&
-                point_shape$component_choices[2] == 4 &&
-                exact_extended_timestamp(point_shape, 2) &&
-                exact_eight_bit_string(
-                    point_shape$component_raws[2])) ||
-               (learned_point_type == "Data_DiscreteQTimeTagExtended" &&
-                |point_shape$component_choices| == 3 &&
-                point_shape$component_choices[0] == 5 &&
-                |point_shape$component_raws[0]| > 0 &&
-                |point_shape$component_raws[0]| <= 4 &&
-                point_shape$component_choices[1] == 2 &&
-                point_shape$component_choices[2] == 4 &&
-                exact_extended_timestamp(point_shape, 2) &&
-                exact_eight_bit_string(
-                    point_shape$component_raws[2])) ||
-               (learned_point_type == "Data_StateQTimeTagExtended" &&
-                |point_shape$component_choices| == 2 &&
-                point_shape$component_choices[0] == 2 &&
-                point_shape$component_choices[1] == 4 &&
-                exact_extended_timestamp(point_shape, 1) &&
-                exact_eight_bit_string(
-                    point_shape$component_raws[1])) ||
-               (learned_point_type ==
-                    "Data_StateSupplementalQTimeTagExtended" &&
-                |point_shape$component_choices| == 3 &&
-                point_shape$component_choices[0] == 4 &&
-                exact_eight_bit_string(
-                    point_shape$component_raws[0]) &&
-                point_shape$component_choices[1] == 2 &&
-                point_shape$component_choices[2] == 4 &&
-                exact_extended_timestamp(point_shape, 2) &&
-                exact_eight_bit_string(
-                    point_shape$component_raws[2]))) )
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_extended_quality_time_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_integer_value: int, result_floating_value: double,
+    shape_available: bool, point_shape: PointValueShapeEvidence): Info
+    {
+    if ( association_kind(c) == "tase2" &&
+         first_result_type == 2 && shape_available &&
+         point_shape?$component_choices &&
+         point_shape?$component_raws &&
+         point_shape?$component_integer_values &&
+         |point_shape$component_raws| ==
+             |point_shape$component_choices| &&
+         |point_shape$component_integer_values| ==
+             |point_shape$component_choices| &&
+         ((learned_point_type == "Data_RealQTimeTagExtended" &&
+           |point_shape$component_choices| == 3 &&
+           point_shape$component_choices[0] == 7 &&
+           |point_shape$component_raws[0]| == 5 &&
+           point_shape$component_choices[1] == 2 &&
+           point_shape$component_choices[2] == 4 &&
+           exact_extended_timestamp(point_shape, 2) &&
+           exact_eight_bit_string(
+               point_shape$component_raws[2])) ||
+          (learned_point_type == "Data_DiscreteQTimeTagExtended" &&
+           |point_shape$component_choices| == 3 &&
+           point_shape$component_choices[0] == 5 &&
+           |point_shape$component_raws[0]| > 0 &&
+           |point_shape$component_raws[0]| <= 4 &&
+           point_shape$component_choices[1] == 2 &&
+           point_shape$component_choices[2] == 4 &&
+           exact_extended_timestamp(point_shape, 2) &&
+           exact_eight_bit_string(
+               point_shape$component_raws[2])) ||
+          (learned_point_type == "Data_StateQTimeTagExtended" &&
+           |point_shape$component_choices| == 2 &&
+           point_shape$component_choices[0] == 2 &&
+           point_shape$component_choices[1] == 4 &&
+           exact_extended_timestamp(point_shape, 1) &&
+           exact_eight_bit_string(
+               point_shape$component_raws[1])) ||
+          (learned_point_type ==
+               "Data_StateSupplementalQTimeTagExtended" &&
+           |point_shape$component_choices| == 3 &&
+           point_shape$component_choices[0] == 4 &&
+           exact_eight_bit_string(
+               point_shape$component_raws[0]) &&
+           point_shape$component_choices[1] == 2 &&
+           point_shape$component_choices[2] == 4 &&
+           exact_extended_timestamp(point_shape, 2) &&
+           exact_eight_bit_string(
+               point_shape$component_raws[2]))) )
         {
         local extended_time_flags_index: count =
             learned_point_type == "Data_StateQTimeTagExtended" ? 1 : 2;
@@ -6209,6 +6990,36 @@ function add_mms_extended_result(
     else
         rec$standardized_value =
             bounded_information_report_result_raw(first_result_raw);
+    return rec;
+    }
+
+function add_mms_extended_result(
+    c: connection, rec: Info, learned_point_type: string,
+    first_result_type: count, first_result_raw: string,
+    result_integer_value: int, result_floating_value: double,
+    shape_available: bool, point_shape: PointValueShapeEvidence): Info
+    {
+    if ( learned_point_type == "Data_RealExtended" ||
+         learned_point_type == "Data_DiscreteExtended" ||
+         learned_point_type == "Data_StateExtended" ||
+         learned_point_type == "Data_StateSupplementalExtended" )
+        return add_mms_extended_cov_result(
+            c, rec, learned_point_type, first_result_type, first_result_raw,
+            result_integer_value, result_floating_value,
+            shape_available, point_shape);
+
+    if ( learned_point_type == "Data_RealQTimeTagExtended" ||
+         learned_point_type == "Data_DiscreteQTimeTagExtended" ||
+         learned_point_type == "Data_StateQTimeTagExtended" ||
+         learned_point_type ==
+             "Data_StateSupplementalQTimeTagExtended" )
+        return add_mms_extended_quality_time_result(
+            c, rec, learned_point_type, first_result_type, first_result_raw,
+            result_integer_value, result_floating_value,
+            shape_available, point_shape);
+
+    rec$standardized_value =
+        bounded_information_report_result_raw(first_result_raw);
     return rec;
     }
 
@@ -6335,6 +7146,282 @@ function add_mms_basic_point_result(
     }
 
 
+type MMSMessageDisposition: record {
+    status: string;
+    detail: string;
+};
+
+function mms_message_disposition(
+    recognized: bool, semantic_decoded: bool, request_invoke_reused: bool,
+    response_correlation: string): MMSMessageDisposition
+    {
+    if ( ! recognized )
+        return [
+            $status="unsupported",
+            $detail="unrecognized MMS top-level PDU preserved"
+        ];
+
+    if ( ! semantic_decoded )
+        return [
+            $status="raw",
+            $detail="recognized MMS top-level PDU body preserved for semantic decoding"
+        ];
+
+    if ( request_invoke_reused )
+        return [
+            $status="invoke_reused",
+            $detail="caller reused an outstanding confirmed-request invoke ID"
+        ];
+
+    if ( response_correlation == "ambiguous_response" ||
+         response_correlation == "direction_mismatch" ||
+         response_correlation == "service_mismatch" )
+        return [
+            $status=response_correlation,
+            $detail=response_correlation == "ambiguous_response" ?
+                "response cannot be attributed after invoke-ID reuse" :
+                response_correlation == "direction_mismatch" ?
+                    "response direction does not match the pending caller" :
+                    "response service does not match the pending request"
+        ];
+
+    return [$status="decoded", $detail=""];
+    }
+
+function add_mms_identify_fields(
+    rec: Info, identity: IdentifyEvidence, pdu_type: count,
+    request_invoke_reused: bool, request_state_full: bool,
+    response_correlation: string): Info
+    {
+    if ( pdu_type == 0 )
+        rec$identify_outcome = request_invoke_reused ? "invoke_reused" :
+            request_state_full ? "state_limit" : "requested";
+    else
+        rec$identify_outcome = response_correlation;
+
+    if ( identity$vendor_name != "" )
+        rec$vendor_name = bounded_detail(identity$vendor_name);
+    if ( identity$model_name != "" )
+        rec$model_name = bounded_detail(identity$model_name);
+    if ( identity$revision != "" )
+        rec$revision = bounded_detail(identity$revision);
+    rec$abstract_syntax_count = identity$abstract_syntax_count;
+    if ( identity$first_abstract_syntax != "" )
+        rec$first_abstract_syntax = identity$first_abstract_syntax;
+
+    return rec;
+    }
+
+function add_mms_information_report_fields(
+    c: connection, is_orig: bool, rec: Info,
+    report_evidence: InformationReportResultsEvidence): Info
+    {
+    local logged_results = information_report_loggable_result_count(
+        c, is_orig, report_evidence);
+    rec$result_count = report_evidence$result_count;
+    rec$failure_count = report_evidence$failure_count;
+    rec$logged_result_count = logged_results;
+    rec$omitted_result_count =
+        report_evidence$result_count > logged_results ?
+            report_evidence$result_count - logged_results : 0;
+    rec$result_pairing_status = information_report_pairing_status(
+        c, is_orig, report_evidence);
+
+    if ( |report_evidence$results| == 0 )
+        return rec;
+
+    local first_identity = information_report_result_identity(
+        c, is_orig, report_evidence, 0);
+    if ( ! first_identity$known )
+        return rec;
+
+    # Preserve the established first-result label. Additional ordered result
+    # rows use information_report_result.
+    rec$transfer_kind = "information_report";
+    rec$object_scope = transfer_scope_name(first_identity$scope);
+    rec$object_name = first_identity$name;
+    if ( first_identity$domain != "" )
+        rec$object_domain = first_identity$domain;
+    rec$name_model = object_name_model(
+        c, is_orig, first_identity$scope, first_identity$domain,
+        first_identity$name, 0);
+    if ( information_message_candidate(c, is_orig, report_evidence) )
+        rec$name_model = "standardized";
+    rec$domain_kind = object_domain_kind(
+        c, is_orig, first_identity$scope, first_identity$domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, is_orig, first_identity$domain);
+    rec = add_information_report_result_to_info(rec, report_evidence, 0);
+    rec$result_pairing_status = information_report_pairing_status(
+        c, is_orig, report_evidence);
+
+    return rec;
+    }
+
+function add_mms_point_result_fields(
+    c: connection, is_orig: bool, rec: Info, pdu_type: count,
+    service_tag: count, unconfirmed_service_tag: count, invoke_id: int,
+    object_scope: count, object_domain: string, object_name: string,
+    object_category: count, first_result_type: count,
+    first_result_raw: string, result_integer_count: count,
+    result_first_integer: int, result_second_integer: int,
+    result_component_count: count, result_first_choice: count,
+    result_second_choice: count, result_third_choice: count,
+    result_integer_value: int, result_floating_value: double,
+    result_flags_raw: string, result_timestamp_value: int,
+    shape_available: bool, first_result_length: count,
+    first_component_length: count, second_component_length: count,
+    third_component_length: count, point_shape: PointValueShapeEvidence,
+    context: MMSProcessingContext): Info
+    {
+    if ( first_result_type == 0 ||
+         ! ((pdu_type == 1 && service_tag == 4 && invoke_id >= 0) ||
+            (pdu_type == 3 && unconfirmed_service_tag == 0 &&
+             object_name != "" && association_kind(c) == "tase2")) )
+        return rec;
+
+    local transfer_object: PendingRead;
+    if ( pdu_type == 3 )
+        {
+        transfer_object = [$scope=object_scope, $domain=object_domain,
+                           $name=object_name, $category=object_category];
+        rec$transfer_kind = "information_report";
+        }
+    else
+        {
+        transfer_object = [
+            $scope=context$read_scope, $domain=context$read_domain,
+            $name=context$read_name, $category=context$read_category
+        ];
+        rec$transfer_kind = "read_response";
+        }
+
+    if ( transfer_object$name == "" )
+        return rec;
+
+    rec$object_scope = transfer_object$scope == 0 ? "vcc" :
+                       transfer_object$scope == 1 ? "icc" : "aa";
+    rec$object_name = transfer_object$name;
+    if ( transfer_object$domain != "" )
+        rec$object_domain = transfer_object$domain;
+    rec$value_type = first_result_type;
+    local learned_point_type = learned_variable_type_name(
+        c, is_orig, transfer_object$scope, transfer_object$domain,
+        transfer_object$name);
+    # 802 IndicationPoint values are never AA-specific. Keep a configured
+    # AA-specific Data_* variable observable as generic MMS data instead of
+    # promoting it to an exact TASE.2 point.
+    if ( /^Data_/ in learned_point_type &&
+         ! standardized_point_control_scope(
+             transfer_object$scope, transfer_object$domain) )
+        learned_point_type = "";
+
+    if ( mms_special_result_applicable(
+             c, transfer_object, first_result_type,
+             first_result_raw, result_integer_count) )
+        rec = add_mms_special_result(
+            rec, transfer_object, first_result_raw,
+            result_first_integer, result_second_integer);
+    else if ( learned_point_type == "Data_Real" ||
+              learned_point_type == "Data_Discrete" ||
+              learned_point_type == "Data_State" ||
+              learned_point_type == "Data_StateSupplemental" )
+        rec = add_mms_basic_point_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_integer_value,
+            result_floating_value, shape_available, first_result_length);
+    else if ( learned_point_type == "Data_StateQ" ||
+              learned_point_type == "Data_StateSupplementalQ" ||
+              learned_point_type == "Data_RealQ" ||
+              learned_point_type == "Data_DiscreteQ" ||
+              learned_point_type == "Data_RealQTimeTag" ||
+              learned_point_type == "Data_DiscreteQTimeTag" ||
+              learned_point_type == "Data_StateQTimeTag" ||
+              learned_point_type == "Data_StateSupplementalQTimeTag" )
+        rec = add_mms_quality_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_component_count,
+            result_first_choice, result_second_choice,
+            result_third_choice, result_integer_value,
+            result_floating_value, result_flags_raw,
+            result_timestamp_value, shape_available,
+            first_component_length, second_component_length,
+            third_component_length, point_shape);
+    else if ( learned_point_type == "Data_RealExtended" ||
+              learned_point_type == "Data_DiscreteExtended" ||
+              learned_point_type == "Data_StateExtended" ||
+              learned_point_type == "Data_StateSupplementalExtended" ||
+              learned_point_type == "Data_RealQTimeTagExtended" ||
+              learned_point_type == "Data_DiscreteQTimeTagExtended" ||
+              learned_point_type == "Data_StateQTimeTagExtended" ||
+              learned_point_type ==
+                  "Data_StateSupplementalQTimeTagExtended" )
+        rec = add_mms_extended_result(
+            c, rec, learned_point_type, first_result_type,
+            first_result_raw, result_integer_value,
+            result_floating_value, shape_available, point_shape);
+    else
+        rec$standardized_value =
+            bounded_information_report_result_raw(first_result_raw);
+
+    rec$name_model = object_name_model(
+        c, is_orig, transfer_object$scope, transfer_object$domain,
+        transfer_object$name, transfer_object$category);
+    rec$domain_kind = object_domain_kind(
+        c, is_orig, transfer_object$scope, transfer_object$domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, is_orig, transfer_object$domain);
+
+    return rec;
+    }
+
+function add_mms_object_metadata(
+    c: connection, is_orig: bool, rec: Info, pdu_type: count,
+    object_scope: count, object_domain: string, object_name: string,
+    object_category: count): Info
+    {
+    if ( object_name == "" )
+        return rec;
+
+    rec$object_scope = object_scope == 0 ? "vcc" :
+                       object_scope == 1 ? "icc" : "aa";
+    rec$object_name = object_name;
+    if ( object_domain != "" )
+        rec$object_domain = object_domain;
+
+    switch ( object_category )
+        {
+        case 1: rec$object_category = "supported_features"; break;
+        case 2: rec$object_category = "bilateral_table"; break;
+        case 3: rec$object_category = "transfer_support"; break;
+        case 4: rec$object_category = "information_message"; break;
+        case 5: rec$object_category = "tase2_version"; break;
+        default: rec$object_category = "unknown"; break;
+        }
+    if ( object_category == 0 && object_scope == 1 &&
+         object_name == "Event_Code_Detected" &&
+         valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        rec$object_category = "transfer_support";
+    if ( object_category == 0 &&
+         (object_scope == 0 || object_scope == 1) &&
+         information_buffer_capacity(object_name) > 0 &&
+         valid_tase2_object_identifier(
+             object_scope, object_domain, object_name) )
+        rec$object_category = "information_message";
+    local object_server_is_orig = pdu_type == 0 ? ! is_orig : is_orig;
+    rec$name_model = object_name_model(
+        c, object_server_is_orig, object_scope, object_domain,
+        object_name, object_category);
+    rec$domain_kind = object_domain_kind(
+        c, object_server_is_orig, object_scope, object_domain);
+    rec$bilateral_domain = is_bilateral_domain_for_server(
+        c, object_server_is_orig, object_domain);
+
+    return rec;
+    }
+
+
 function process_mms_message(
     c: connection, is_orig: bool, recognized: bool, pdu_type: count,
     semantic_decoded: bool, body_length: count, invoke_id: int,
@@ -6378,43 +7465,20 @@ function process_mms_message(
         third_component_length = shape$third_component_length;
         delete point_value_shape_evidence[
             c$uid, is_orig, context$parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, context$parser_sequence,
+            PROCESSING_POINT_VALUE_SHAPE, F);
         }
     local request_invoke_reused = context$request_invoke_reused;
     local request_state_full = context$request_state_full;
     local response_correlation = context$response_correlation;
 
-    local status = "decoded";
-    local detail = "";
-
-    if ( ! recognized )
-        {
-        status = "unsupported";
-        detail = "unrecognized MMS top-level PDU preserved";
-        }
-    else if ( ! semantic_decoded )
-        {
-        status = "raw";
-        detail = "recognized MMS top-level PDU body preserved for semantic decoding";
-        }
-    else if ( request_invoke_reused )
-        {
-        status = "invoke_reused";
-        detail = "caller reused an outstanding confirmed-request invoke ID";
-        }
-    else if ( response_correlation == "ambiguous_response" ||
-              response_correlation == "direction_mismatch" ||
-              response_correlation == "service_mismatch" )
-        {
-        status = response_correlation;
-        detail = response_correlation == "ambiguous_response" ?
-            "response cannot be attributed after invoke-ID reuse" :
-            response_correlation == "direction_mismatch" ?
-                "response direction does not match the pending caller" :
-                "response service does not match the pending request";
-        }
+    local disposition = mms_message_disposition(
+        recognized, semantic_decoded, request_invoke_reused,
+        response_correlation);
 
     local rec = base_record(c, is_orig, "mms", fmt("%d", pdu_type),
-                            status, body_length);
+                            disposition$status, body_length);
     rec$provenance = context$provenance;
     if ( invoke_id >= 0 )
         rec$invoke_id = invoke_id;
@@ -6434,24 +7498,15 @@ function process_mms_message(
         local identity = identify_evidence[
             c$uid, is_orig, context$parser_sequence, pdu_type,
             identify_key];
-        if ( pdu_type == 0 )
-            rec$identify_outcome = request_invoke_reused ? "invoke_reused" :
-                request_state_full ? "state_limit" : "requested";
-        else
-            rec$identify_outcome = response_correlation;
-
-        if ( identity$vendor_name != "" )
-            rec$vendor_name = bounded_detail(identity$vendor_name);
-        if ( identity$model_name != "" )
-            rec$model_name = bounded_detail(identity$model_name);
-        if ( identity$revision != "" )
-            rec$revision = bounded_detail(identity$revision);
-        rec$abstract_syntax_count = identity$abstract_syntax_count;
-        if ( identity$first_abstract_syntax != "" )
-            rec$first_abstract_syntax = identity$first_abstract_syntax;
+        rec = add_mms_identify_fields(
+            rec, identity, pdu_type, request_invoke_reused,
+            request_state_full, response_correlation);
         delete identify_evidence[
             c$uid, is_orig, context$parser_sequence, pdu_type,
             identify_key];
+        update_identify_processing_state(
+            c$uid, is_orig, context$parser_sequence, pdu_type,
+            identify_key, F);
         }
 
     if ( pdu_type == 3 && unconfirmed_service_tag == 0 &&
@@ -6461,198 +7516,28 @@ function process_mms_message(
         local report_evidence =
             information_report_results_evidence[
                 c$uid, is_orig, context$parser_sequence];
-        local logged_results = information_report_loggable_result_count(
-            c, is_orig, report_evidence);
-        rec$result_count = report_evidence$result_count;
-        rec$failure_count = report_evidence$failure_count;
-        rec$logged_result_count = logged_results;
-        rec$omitted_result_count =
-            report_evidence$result_count > logged_results ?
-                report_evidence$result_count - logged_results : 0;
-        rec$result_pairing_status = information_report_pairing_status(
-            c, is_orig, report_evidence);
-
-        if ( |report_evidence$result_choices| > 0 )
-            {
-            local first_identity = information_report_result_identity(
-                c, is_orig, report_evidence, 0);
-            if ( first_identity$known )
-                {
-                # Preserve the established first-result label. Additional
-                # ordered result rows use information_report_result.
-                rec$transfer_kind = "information_report";
-                rec$object_scope = transfer_scope_name(first_identity$scope);
-                rec$object_name = first_identity$name;
-                if ( first_identity$domain != "" )
-                    rec$object_domain = first_identity$domain;
-                rec$name_model = object_name_model(
-                    c, is_orig, first_identity$scope, first_identity$domain,
-                    first_identity$name, 0);
-                if ( information_message_candidate(
-                         c, is_orig, report_evidence) )
-                    rec$name_model = "standardized";
-                rec$domain_kind = object_domain_kind(
-                    c, is_orig, first_identity$scope,
-                    first_identity$domain);
-                rec$bilateral_domain = is_bilateral_domain_for_server(
-                    c, is_orig, first_identity$domain);
-                rec = add_information_report_result_to_info(
-                    rec, report_evidence, 0);
-                rec$result_pairing_status =
-                    information_report_pairing_status(
-                        c, is_orig, report_evidence);
-                }
-            }
+        rec = add_mms_information_report_fields(
+            c, is_orig, rec, report_evidence);
         write_information_message_observation(
             c, is_orig, report_evidence, point_shape,
             context$provenance);
         }
 
-    if ( first_result_type > 0 &&
-         ((pdu_type == 1 && service_tag == 4 && invoke_id >= 0) ||
-          (pdu_type == 3 && unconfirmed_service_tag == 0 &&
-           object_name != "" && association_kind(c) == "tase2")) )
-        {
-        local transfer_object: PendingRead;
-        if ( pdu_type == 3 )
-            {
-            transfer_object = [$scope=object_scope,
-                               $domain=object_domain,
-                               $name=object_name,
-                               $category=object_category];
-            rec$transfer_kind = "information_report";
-            }
-        else
-            {
-            transfer_object = [
-                $scope=context$read_scope, $domain=context$read_domain,
-                $name=context$read_name, $category=context$read_category
-            ];
-            rec$transfer_kind = "read_response";
-            }
-
-        if ( transfer_object$name != "" )
-            {
-            rec$object_scope = transfer_object$scope == 0 ? "vcc" :
-                               transfer_object$scope == 1 ? "icc" : "aa";
-            rec$object_name = transfer_object$name;
-            if ( transfer_object$domain != "" )
-                rec$object_domain = transfer_object$domain;
-            rec$value_type = first_result_type;
-            local learned_point_type = learned_variable_type_name(
-                c, is_orig,
-                transfer_object$scope, transfer_object$domain,
-                transfer_object$name);
-            # 802 IndicationPoint values are never AA-specific.  Keep a
-            # configured AA-specific Data_* variable observable as generic MMS
-            # data instead of promoting it to an exact TASE.2 point.
-            if ( /^Data_/ in learned_point_type &&
-                 ! standardized_point_control_scope(
-                     transfer_object$scope, transfer_object$domain) )
-                learned_point_type = "";
-
-            if ( mms_special_result_applicable(
-                     c, transfer_object, first_result_type,
-                     first_result_raw, result_integer_count) )
-                rec = add_mms_special_result(
-                    rec, transfer_object, first_result_raw,
-                    result_first_integer, result_second_integer);
-            else if ( learned_point_type == "Data_Real" ||
-                      learned_point_type == "Data_Discrete" ||
-                      learned_point_type == "Data_State" ||
-                      learned_point_type == "Data_StateSupplemental" )
-                rec = add_mms_basic_point_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_integer_value,
-                    result_floating_value, shape_available,
-                    first_result_length);
-            else if ( learned_point_type == "Data_StateQ" ||
-                 learned_point_type == "Data_StateSupplementalQ" ||
-                 learned_point_type == "Data_RealQ" ||
-                 learned_point_type == "Data_DiscreteQ" ||
-                 learned_point_type == "Data_RealQTimeTag" ||
-                 learned_point_type == "Data_DiscreteQTimeTag" ||
-                 learned_point_type == "Data_StateQTimeTag" ||
-                 learned_point_type == "Data_StateSupplementalQTimeTag" )
-                rec = add_mms_quality_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_component_count,
-                    result_first_choice, result_second_choice,
-                    result_third_choice, result_integer_value,
-                    result_floating_value, result_flags_raw,
-                    result_timestamp_value, shape_available,
-                    first_component_length, second_component_length,
-                    third_component_length, point_shape);
-            else if ( learned_point_type == "Data_RealExtended" ||
-                      learned_point_type == "Data_DiscreteExtended" ||
-                      learned_point_type == "Data_StateExtended" ||
-                      learned_point_type ==
-                          "Data_StateSupplementalExtended" ||
-                      learned_point_type ==
-                          "Data_RealQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_DiscreteQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_StateQTimeTagExtended" ||
-                      learned_point_type ==
-                          "Data_StateSupplementalQTimeTagExtended" )
-                rec = add_mms_extended_result(
-                    c, rec, learned_point_type, first_result_type,
-                    first_result_raw, result_integer_value,
-                    result_floating_value, shape_available, point_shape);
-            else
-                rec$standardized_value =
-                    bounded_information_report_result_raw(first_result_raw);
-
-            rec$name_model = object_name_model(
-                c, is_orig, transfer_object$scope, transfer_object$domain,
-                transfer_object$name, transfer_object$category);
-            rec$domain_kind = object_domain_kind(
-                c, is_orig, transfer_object$scope, transfer_object$domain);
-            rec$bilateral_domain =
-                is_bilateral_domain_for_server(
-                    c, is_orig, transfer_object$domain);
-            }
-        }
-    if ( object_name != "" )
-        {
-        rec$object_scope = object_scope == 0 ? "vcc" :
-                           object_scope == 1 ? "icc" : "aa";
-        rec$object_name = object_name;
-        if ( object_domain != "" )
-            rec$object_domain = object_domain;
-
-        switch ( object_category )
-            {
-            case 1: rec$object_category = "supported_features"; break;
-            case 2: rec$object_category = "bilateral_table"; break;
-            case 3: rec$object_category = "transfer_support"; break;
-            case 4: rec$object_category = "information_message"; break;
-            case 5: rec$object_category = "tase2_version"; break;
-            default: rec$object_category = "unknown"; break;
-            }
-        if ( object_category == 0 && object_scope == 1 &&
-             object_name == "Event_Code_Detected" &&
-             valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) )
-            rec$object_category = "transfer_support";
-        if ( object_category == 0 &&
-             (object_scope == 0 || object_scope == 1) &&
-             information_buffer_capacity(object_name) > 0 &&
-             valid_tase2_object_identifier(
-                 object_scope, object_domain, object_name) )
-            rec$object_category = "information_message";
-        local object_server_is_orig = pdu_type == 0 ? ! is_orig : is_orig;
-        rec$name_model = object_name_model(
-            c, object_server_is_orig, object_scope, object_domain,
-            object_name, object_category);
-        rec$domain_kind = object_domain_kind(
-            c, object_server_is_orig, object_scope, object_domain);
-        rec$bilateral_domain = is_bilateral_domain_for_server(
-            c, object_server_is_orig, object_domain);
-        }
-    if ( detail != "" )
-        rec$detail = bounded_detail(detail);
+    rec = add_mms_point_result_fields(
+        c, is_orig, rec, pdu_type, service_tag, unconfirmed_service_tag,
+        invoke_id, object_scope, object_domain, object_name, object_category,
+        first_result_type, first_result_raw, result_integer_count,
+        result_first_integer, result_second_integer, result_component_count,
+        result_first_choice, result_second_choice, result_third_choice,
+        result_integer_value, result_floating_value, result_flags_raw,
+        result_timestamp_value, shape_available, first_result_length,
+        first_component_length, second_component_length,
+        third_component_length, point_shape, context);
+    rec = add_mms_object_metadata(
+        c, is_orig, rec, pdu_type, object_scope, object_domain,
+        object_name, object_category);
+    if ( disposition$detail != "" )
+        rec$detail = bounded_detail(disposition$detail);
 
     write_iccp_record(c, rec);
     write_object_observation(rec);
@@ -6667,13 +7552,16 @@ function process_mms_message(
             information_report_result_identity(
                 c, is_orig, remaining_report_evidence, 0);
         local skip_first_result =
-            |remaining_report_evidence$result_choices| > 0 &&
+            |remaining_report_evidence$results| > 0 &&
             first_remaining_identity$known;
         write_additional_information_report_results(
             c, is_orig, remaining_report_evidence, skip_first_result,
             context$provenance);
         delete information_report_results_evidence[
             c$uid, is_orig, context$parser_sequence];
+        update_sequence_processing_state(
+            c$uid, is_orig, context$parser_sequence,
+            PROCESSING_INFORMATION_REPORT_RESULTS, F);
         }
     if ( recognized && semantic_decoded && pdu_type == 0 &&
          rec?$object_name && rec?$object_scope && rec?$name_model &&
@@ -6853,8 +7741,13 @@ event ICCP::mms_message(
         {
         local request_is_orig = ! is_orig;
         if ( [c$uid, request_is_orig, key] in invalid_confirmed_invokes )
+            {
             delete invalid_confirmed_invokes[
                 c$uid, request_is_orig, key];
+            update_directional_processing_state(
+                c$uid, request_is_orig, key,
+                PROCESSING_INVALID_CONFIRMED, F);
+            }
         else if ( [c$uid, request_is_orig, key] in pending_confirmed )
             {
             local pending = pending_confirmed[
@@ -6862,6 +7755,9 @@ event ICCP::mms_message(
             if ( pdu_type == 6 || service_tag == pending$service_tag )
                 {
                 delete pending_confirmed[c$uid, request_is_orig, key];
+                update_directional_processing_state(
+                    c$uid, request_is_orig, key,
+                    PROCESSING_PENDING_CONFIRMED, F);
                 if ( pdu_type == 6 )
                     purge_confirmed_request_state(
                         c, request_is_orig, invoke_id);
@@ -6873,99 +7769,52 @@ event ICCP::mms_message(
 
 function clear_mms_deferred_evidence(uid_to_clear: string)
     {
-    local identify_directions: vector of bool;
-    local identify_sequences: vector of count;
-    local identify_pdus: vector of count;
-    local identify_invokes: vector of count;
-    for ( [uid, is_orig, sequence, pdu_type, invoke] in identify_evidence )
-        if ( uid == uid_to_clear )
-            {
-            identify_directions[|identify_directions|] = is_orig;
-            identify_sequences[|identify_sequences|] = sequence;
-            identify_pdus[|identify_pdus|] = pdu_type;
-            identify_invokes[|identify_invokes|] = invoke;
-            }
-    for ( index in identify_sequences )
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, sequence, pdu_type, invoke] in
+          state$identify_evidence )
         delete identify_evidence[
-            uid_to_clear, identify_directions[index],
-            identify_sequences[index], identify_pdus[index],
-            identify_invokes[index]];
-
-    local report_directions: vector of bool;
-    local report_sequences: vector of count;
-    for ( [report_uid, report_is_orig, report_sequence] in
-          information_report_results_evidence )
-        if ( report_uid == uid_to_clear )
-            {
-            report_directions[|report_directions|] = report_is_orig;
-            report_sequences[|report_sequences|] = report_sequence;
-            }
-    for ( report_index in report_sequences )
+            uid_to_clear, is_orig, sequence, pdu_type, invoke];
+    for ( [is_orig, sequence] in state$information_report_results )
         delete information_report_results_evidence[
-            uid_to_clear, report_directions[report_index],
-            report_sequences[report_index]];
-
-    local point_directions: vector of bool;
-    local point_sequences: vector of count;
-    for ( [point_uid, point_is_orig, point_sequence] in
-          point_value_shape_evidence )
-        if ( point_uid == uid_to_clear )
-            {
-            point_directions[|point_directions|] = point_is_orig;
-            point_sequences[|point_sequences|] = point_sequence;
-            }
-    for ( point_index in point_sequences )
-        delete point_value_shape_evidence[
-            uid_to_clear, point_directions[point_index],
-            point_sequences[point_index]];
-
-    local read_directions: vector of bool;
-    local read_sequences: vector of count;
-    local read_invokes: vector of count;
-    for ( [read_uid, read_is_orig, read_sequence, read_invoke] in
-          control_read_value_shape_evidence )
-        if ( read_uid == uid_to_clear )
-            {
-            read_directions[|read_directions|] = read_is_orig;
-            read_sequences[|read_sequences|] = read_sequence;
-            read_invokes[|read_invokes|] = read_invoke;
-            }
-    for ( read_index in read_sequences )
+            uid_to_clear, is_orig, sequence];
+    for ( [is_orig, sequence] in state$point_value_shapes )
+        delete point_value_shape_evidence[uid_to_clear, is_orig, sequence];
+    for ( [is_orig, sequence, invoke] in state$control_read_value_shapes )
         delete control_read_value_shape_evidence[
-            uid_to_clear, read_directions[read_index],
-            read_sequences[read_index], read_invokes[read_index]];
+            uid_to_clear, is_orig, sequence, invoke];
+    for ( [is_orig, sequence, invoke] in state$first_result_evidence )
+        delete first_result_evidence[
+            uid_to_clear, is_orig, sequence, invoke];
+
+    local empty_identify: set[bool, count, count, count] = set();
+    local empty_sequences: set[bool, count] = set();
+    local empty_points: set[bool, count] = set();
+    local empty_read_shapes: set[bool, count, count] = set();
+    local empty_first_results: set[bool, count, count] = set();
+    state$identify_evidence = empty_identify;
+    state$information_report_results = empty_sequences;
+    state$point_value_shapes = empty_points;
+    state$control_read_value_shapes = empty_read_shapes;
+    state$first_result_evidence = empty_first_results;
+    processing_state_indexes[uid_to_clear] = state;
     clear_control_value_shapes(uid_to_clear, T);
     clear_control_value_shapes(uid_to_clear, F);
     }
 
 function clear_confirmed_processing_state(uid_to_clear: string)
     {
-    local confirmed_keys: vector of count;
-    local confirmed_directions: vector of bool;
-    for ( [uid, request_is_orig, invoke] in pending_confirmed )
-        if ( uid == uid_to_clear )
-            {
-            confirmed_keys[|confirmed_keys|] = invoke;
-            confirmed_directions[|confirmed_directions|] = request_is_orig;
-            }
-    for ( index in confirmed_keys )
-        delete pending_confirmed[
-            uid_to_clear, confirmed_directions[index], confirmed_keys[index]];
-
-    local invalid_keys: vector of count;
-    local invalid_directions: vector of bool;
-    for ( [invalid_uid, invalid_is_orig, invalid_invoke] in
-          invalid_confirmed_invokes )
-        if ( invalid_uid == uid_to_clear )
-            {
-            invalid_keys[|invalid_keys|] = invalid_invoke;
-            invalid_directions[|invalid_directions|] = invalid_is_orig;
-            }
-    for ( invalid_index in invalid_keys )
-        delete invalid_confirmed_invokes[
-            uid_to_clear, invalid_directions[invalid_index],
-            invalid_keys[invalid_index]];
-
+    if ( uid_to_clear !in processing_state_indexes ) return;
+    local state = processing_state_indexes[uid_to_clear];
+    for ( [is_orig, invoke] in state$pending_confirmed )
+        delete pending_confirmed[uid_to_clear, is_orig, invoke];
+    for ( [is_orig, invoke] in state$invalid_confirmed )
+        delete invalid_confirmed_invokes[uid_to_clear, is_orig, invoke];
+    local empty_pending: set[bool, count] = set();
+    local empty_invalid: set[bool, count] = set();
+    state$pending_confirmed = empty_pending;
+    state$invalid_confirmed = empty_invalid;
+    processing_state_indexes[uid_to_clear] = state;
     clear_mms_deferred_evidence(uid_to_clear);
     }
 
@@ -6976,6 +7825,11 @@ event connection_state_remove(c: connection)
     delete processing_acse_lifecycle_spdu[c$uid, F];
     delete processing_session_cleanup_spdu[c$uid, T];
     delete processing_session_cleanup_spdu[c$uid, F];
+    }
+
+event connection_state_remove(c: connection) &priority=-30
+    {
+    delete processing_state_indexes[c$uid];
     }
 
 event ICCP::session_spdu_marker_v1(
@@ -7092,6 +7946,9 @@ event ICCP::mms_error_message(
     if ( pdu_type == 2 && invoke_id >= 0 )
         delete invalid_confirmed_invokes[
             c$uid, ! is_orig, int_to_count(invoke_id)];
+        update_directional_processing_state(
+            c$uid, ! is_orig, int_to_count(invoke_id),
+            PROCESSING_INVALID_CONFIRMED, F);
     }
 
 event ICCP::mms_conclude_result_v1(

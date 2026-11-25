@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/../.." && pwd)"
+association_count="${1:-10000}"
+
+if [[ ! "${association_count}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "usage: $0 [positive-association-count]" >&2
+    exit 2
+fi
+
+export ICCP_STATE_BENCHMARK_ASSOCIATIONS="${association_count}"
+export ZEEK_PLUGIN_PATH="${project_dir}/build"
+
+/usr/bin/time -f 'elapsed_seconds=%e max_rss_kib=%M' \
+    zeek -b \
+    "${project_dir}/scripts/__load__.zeek" \
+    "${project_dir}/testing/benchmarks/state-scalability.zeek"

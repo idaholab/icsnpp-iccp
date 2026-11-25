@@ -211,6 +211,36 @@ event ICCP::mms_information_report_results_v2(
     set_mms_provenance(c, is_orig, provenance);
     }
 
+event ICCP::mms_information_report_results_v3(
+    c: connection, is_orig: bool, access_choice: count,
+    list_scope: count, list_domain: string, list_name: string,
+    result_count: count, failure_count: count,
+    variable_scopes: vector of count,
+    variable_domains: vector of string,
+    variable_names: vector of string,
+    result_choices: vector of count,
+    result_errors: vector of int,
+    result_raws: vector of string,
+    result_raw_lengths: vector of count,
+    result_raw_truncated: vector of bool,
+    result_integer_values: vector of int,
+    result_floating_values: vector of double,
+    result_boolean_values: vector of bool,
+    result_string_values: vector of string,
+    provenance: count) &priority=20
+    {
+    set_mms_provenance(c, is_orig, provenance);
+    }
+
+event ICCP::mms_first_result_evidence_v1(
+    c: connection, is_orig: bool, pdu_type: count, invoke_id: int,
+    service_tag: count, choice: count, raw_prefix: string,
+    raw_length: count, raw_truncated: bool, integer_value: int,
+    floating_value: double, provenance: count) &priority=20
+    {
+    set_mms_provenance(c, is_orig, provenance);
+    }
+
 event ICCP::mms_device_action_message_v1(
     c: connection, is_orig: bool,
     enrollment_scope: count, enrollment_domain: string,

@@ -418,6 +418,29 @@ public type DataCase = unit {
     }
 };
 
+public type DataDepthEightCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::DataValue(0, self.state, 8);
+
+    on %done {
+        print "depth=%d" % self.value.maximumDepth;
+    }
+};
+
+public type DataEvidenceCase = unit {
+    var state: ICCP_MMS::DataState& = new ICCP_MMS::DataState;
+    value: ICCP_MMS::DataValue(0, self.state);
+
+    on %done {
+        print "choice=%d retained=%d original=%d truncated=%s" % (
+            self.value.choice,
+            |self.value.raw|,
+            self.value.rawLength,
+            self.value.rawTruncated
+        );
+    }
+};
+
 public type DataForestCase = unit {
     identifier: ICCP_BER::Identifier;
     : void &requires=(

@@ -1,0 +1,3 @@
+v1 dir=T pdu=0 invoke=2 targets=1 values=1 raw=1 results=0 provenance=1
+v1 dir=F pdu=1 invoke=2 targets=0 values=0 raw=0 results=1 provenance=1
+bridges v1_to_v2=0 v2_to_v1=0

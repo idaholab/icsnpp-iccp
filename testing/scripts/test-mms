@@ -117,6 +117,47 @@ runCaseInvalid() {
     passCount=$((passCount + 1))
 }
 
+runFileCaseValid() {
+    local parser="$1"
+    local input="$2"
+    local expected="$3"
+    local actual
+
+    actual="$(spicy-driver -p "${parser}" "${testPlugin}" < "${input}")"
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "unexpected MMS output for ${parser} ${input}" >&2
+        echo "expected: ${expected}" >&2
+        echo "actual:   ${actual}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
+runFileCaseInvalid() {
+    local parser="$1"
+    local input="$2"
+    local expectedError="$3"
+    local output
+
+    if output="$(
+        spicy-driver -p "${parser}" "${testPlugin}" < "${input}" 2>&1
+    )"; then
+        echo "invalid MMS input unexpectedly parsed by ${parser}: ${input}" >&2
+        exit 1
+    fi
+
+    if ! grep -q "${expectedError}" <<<"${output}"; then
+        echo "unexpected MMS error for ${parser} ${input}" >&2
+        echo "expected error containing: ${expectedError}" >&2
+        echo "actual output: ${output}" >&2
+        exit 1
+    fi
+
+    passCount=$((passCount + 1))
+}
+
 runValid "a005020101a300" \
     "type=TopLevelPDU::CONFIRMED_REQUEST recognized=true decoded=false constructed=true length=5 body=\\x02\\x01\\x01\\xa3\\x00"
 runValid "a1050201018300" \
@@ -694,10 +735,10 @@ runCaseValid "${accessResultParser}" "850101" \
 runCaseValid "${accessResultParser}" "a100" \
     "success=true choice=1 error=-1 rawLength=0 integers=0 first=0 second=0 components=0 choices=0/0/0 integer=0 floating=0 flagsLength=0 timestamp=0"
 runCaseValid "${accessResultParser}" "a207850207d0850108" \
-    "success=true choice=2 error=-1 rawLength=7 integers=2 first=2000 second=8 components=2 choices=5/5/0 integer=2000 floating=0 flagsLength=1 timestamp=0"
+    "success=true choice=2 error=-1 rawLength=0 integers=2 first=2000 second=8 components=2 choices=5/5/0 integer=2000 floating=0 flagsLength=1 timestamp=0"
 runCaseValid "${accessResultParser}" \
     "a211870508412000008402002a85046553f100" \
-    "success=true choice=2 error=-1 rawLength=17 integers=1 first=1700000000 second=0 components=3 choices=7/4/5 integer=0 floating=10 flagsLength=2 timestamp=1700000000"
+    "success=true choice=2 error=-1 rawLength=0 integers=1 first=1700000000 second=0 components=3 choices=7/4/5 integer=0 floating=10 flagsLength=2 timestamp=1700000000"
 
 scalarAccessResultParser="ICCP_MMS_TEST::ScalarAccessResultCase"
 runCaseValid "${scalarAccessResultParser}" "8301ff" \
@@ -800,8 +841,101 @@ runCaseInvalid "${accessResultParser}" "8c04f0000000" "requires failed"
 runCaseInvalid "${accessResultParser}" "910700000000000000" "requires failed"
 
 dataParser="ICCP_MMS_TEST::DataCase"
+dataEvidenceParser="ICCP_MMS_TEST::DataEvidenceCase"
 accessResultForestParser="ICCP_MMS_TEST::AccessResultForestCase"
 dataForestParser="ICCP_MMS_TEST::DataForestCase"
+
+python3 - "${testBuildDir}" <<'PY'
+import pathlib
+import sys
+
+
+output_dir = pathlib.Path(sys.argv[1])
+max_value_length = 1024 * 1024
+
+
+def encode_length(length):
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 + len(encoded)]) + encoded
+
+
+def tlv(identifier, value):
+    return identifier + encode_length(len(value)) + value
+
+
+def unknown_data(length):
+    return tlv(bytes.fromhex("9f20"), b"A" * length)
+
+
+def nested_data(depth, leaf_length=1):
+    value = unknown_data(leaf_length)
+    for _ in range(depth):
+        value = tlv(bytes([0xA2]), value)
+    return value
+
+
+(output_dir / "data-depth-eight.bin").write_bytes(nested_data(8))
+(output_dir / "data-depth-nine.bin").write_bytes(nested_data(9))
+(output_dir / "data-depth-at-limit.bin").write_bytes(nested_data(16))
+(output_dir / "data-depth-over-limit.bin").write_bytes(nested_data(17))
+(output_dir / "data-amplification-regression.bin").write_bytes(
+    nested_data(30, 8 * 1024 * 1024)
+)
+(output_dir / "data-value-at-limit.bin").write_bytes(
+    unknown_data(max_value_length)
+)
+(output_dir / "data-value-over-limit.bin").write_bytes(
+    unknown_data(max_value_length + 1)
+)
+
+budget_values = unknown_data(max_value_length) * 4
+(output_dir / "data-budget-at-limit.bin").write_bytes(
+    tlv(bytes([0x30]), budget_values)
+)
+(output_dir / "data-budget-over-limit.bin").write_bytes(
+    tlv(bytes([0x30]), budget_values + unknown_data(1))
+)
+PY
+
+runFileCaseValid "${dataParser}" \
+    "${testBuildDir}/data-depth-at-limit.bin" \
+    "choice=2 known=true nodes=17 children=1 depth=16 boolean=false integer=0 unused=0 string= oid= rawLength=0"
+runFileCaseInvalid "${dataParser}" \
+    "${testBuildDir}/data-depth-over-limit.bin" \
+    "MMS Data exceeds configured nesting depth limit"
+runFileCaseValid "${dataParser}" \
+    "${testBuildDir}/data-depth-nine.bin" \
+    "choice=2 known=true nodes=10 children=1 depth=9 boolean=false integer=0 unused=0 string= oid= rawLength=0"
+runFileCaseValid "ICCP_MMS_TEST::DataDepthEightCase" \
+    "${testBuildDir}/data-depth-eight.bin" \
+    "depth=8"
+runFileCaseInvalid "ICCP_MMS_TEST::DataDepthEightCase" \
+    "${testBuildDir}/data-depth-nine.bin" \
+    "MMS Data exceeds configured nesting depth limit"
+runFileCaseInvalid "${dataParser}" \
+    "${testBuildDir}/data-amplification-regression.bin" \
+    "MMS Data value exceeds configured length limit"
+runFileCaseValid "${dataParser}" \
+    "${testBuildDir}/data-value-at-limit.bin" \
+    "choice=32 known=false nodes=1 children=0 depth=0 boolean=false integer=0 unused=0 string= oid= rawLength=256"
+runFileCaseValid "${dataEvidenceParser}" \
+    "${testBuildDir}/data-value-at-limit.bin" \
+    "choice=32 retained=256 original=1048576 truncated=true"
+runCaseValid "${dataEvidenceParser}" "a1068301ff8501fe" \
+    "choice=1 retained=0 original=6 truncated=true"
+runCaseValid "${dataEvidenceParser}" "850101" \
+    "choice=5 retained=1 original=1 truncated=false"
+runFileCaseInvalid "${dataParser}" \
+    "${testBuildDir}/data-value-over-limit.bin" \
+    "MMS Data value exceeds configured length limit"
+runFileCaseValid "${dataForestParser}" \
+    "${testBuildDir}/data-budget-at-limit.bin" \
+    "count=4 nodes=4"
+runFileCaseInvalid "${dataForestParser}" \
+    "${testBuildDir}/data-budget-over-limit.bin" \
+    "MMS Data forest exceeds configured value-byte limit"
 
 # Each structured root contributes itself plus its children. Two roots with
 # 2,047 children therefore hit the 4,096-node limit exactly; adding one child
@@ -830,9 +964,9 @@ runCaseInvalid "${dataForestParser}" \
     "Data forest exceeds configured aggregate element limit"
 
 runCaseValid "${dataParser}" "a1068301ff8501fe" \
-    "choice=1 known=true nodes=3 children=2 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=6"
+    "choice=1 known=true nodes=3 children=2 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runCaseValid "${dataParser}" "a202a100" \
-    "choice=2 known=true nodes=2 children=1 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=2"
+    "choice=2 known=true nodes=2 children=1 depth=1 boolean=false integer=0 unused=0 string= oid= rawLength=0"
 runCaseValid "${dataParser}" "8301ff" \
     "choice=3 known=true nodes=1 children=0 depth=0 boolean=true integer=0 unused=0 string= oid= rawLength=1"
 runCaseValid "${dataParser}" "840203a8" \
@@ -1014,7 +1148,7 @@ runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
     "choice=5 rawLength=4 components=0 c1=0 c2=0 c3=0 integer=1700000000 second= third="
 runCaseValid "ICCP_MMS_TEST::TransferSupportCase" \
     "a127020101a422a120a21e8601018a10434f4e54524f4c5f43454e5445525f428a0754535f4e455854" \
-    "choice=2 rawLength=30 components=3 c1=6 c2=10 c3=10 integer=1 second=CONTROL_CENTER_B third=TS_NEXT"
+    "choice=2 rawLength=0 components=3 c1=6 c2=10 c3=10 integer=1 second=CONTROL_CENTER_B third=TS_NEXT"
 
 runInvalid "a008020101a4038001ff" \
     "missing variable access specification"

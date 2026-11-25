@@ -93,6 +93,9 @@ event zeek_init()
     known_variable_types[
         legacy_first$uid, F, 0, "", "BREAKER_SBO"] =
             "SBO_CheckBackName";
+    update_object_processing_state(
+        legacy_first$uid, F, 0, "", "BREAKER_SBO",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(legacy_first, T, 1);
     control_compat_request(legacy_first, 10, 0, "", "BREAKER_SBO", 0);
     aggregate_read_request(legacy_first, 10, 0, "", "BREAKER_SBO", 0);
@@ -105,6 +108,9 @@ event zeek_init()
     known_variable_types[
         aggregate_first$uid, F, 0, "", "BREAKER_SBO"] =
             "SBO_CheckBackName";
+    update_object_processing_state(
+        aggregate_first$uid, F, 0, "", "BREAKER_SBO",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(aggregate_first, T, 1);
     aggregate_read_request(aggregate_first, 11, 0, "", "BREAKER_SBO", 0);
     control_compat_request(aggregate_first, 11, 0, "", "BREAKER_SBO", 0);
@@ -116,6 +122,9 @@ event zeek_init()
     establish_tase(v3_first);
     known_variable_types[v3_first$uid, F, 0, "", "BREAKER_SBO"] =
         "SBO_CheckBackName";
+    update_object_processing_state(
+        v3_first$uid, F, 0, "", "BREAKER_SBO",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(v3_first, T, 1);
     v3_read_request(v3_first, 12, 1, 0, 0, "", "BREAKER_SBO", 0);
     aggregate_read_request(v3_first, 12, 0, "", "BREAKER_SBO", 0);
@@ -139,6 +148,9 @@ event zeek_init()
     establish_tase(explicit);
     known_variable_types[explicit$uid, F, 0, "", "BREAKER_SBO"] =
         "SBO_CheckBackName";
+    update_object_processing_state(
+        explicit$uid, F, 0, "", "BREAKER_SBO",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     event ICCP::mms_provenance_marker_v1(explicit, T, 1);
     control_compat_request(explicit, 14, 0, "", "BREAKER_SBO", 1);
     aggregate_read_request(explicit, 14, 0, "", "BREAKER_SBO", 0);
@@ -151,6 +163,9 @@ event zeek_init()
     known_variable_types[
         direct_control$uid, F, 0, "", "BREAKER_SBO"] =
             "SBO_CheckBackName";
+    update_object_processing_state(
+        direct_control$uid, F, 0, "", "BREAKER_SBO",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     control_compat_request(
         direct_control, 20, 0, "", "BREAKER_SBO", 1);
     event inspect_read_gate(direct_control, "direct-control", 20);

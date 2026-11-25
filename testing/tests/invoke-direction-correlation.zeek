@@ -35,14 +35,20 @@ event seed_specialized_pending(c: connection, invoke_id: int)
         $variable_count=1, $data_count=1, $data_node_count=1,
         $classification="write_candidate", $named_type=""
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_CONTROL, T);
     pending_control_reads[c$uid, T, key] = [
         $request_is_orig=T, $scope=0, $domain="", $name="SELECT_SBO",
         $variable_count=1, $classification="select_candidate",
         $named_type=""
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_CONTROL_READ, T);
     invalid_control_read_invokes[c$uid, T, key] = [
         $classification="select_candidate"
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_INVALID_CONTROL_READ, T);
     pending_transfer_sets[c$uid, T, key] = [
         $action="inspect", $scope=0, $domain="", $name="TS",
         $variable_count=0, $first_variable_scope=0,
@@ -54,24 +60,37 @@ event seed_specialized_pending(c: connection, invoke_id: int)
         $member_alternate_access_counts=vector(),
         $exact_member_access_evidence=T, $profile_reasons=""
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_TRANSFER_SET, T);
     pending_transfer_support[c$uid, T, key] = [
         $request_is_orig=T, $scope=1, $domain="ICC",
         $name="Event_Code_Detected"
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_TRANSFER_SUPPORT, T);
     pending_transfer_controls[c$uid, T, key] = [
         $action="start", $request_is_orig=T, $scope=2, $domain="",
         $name="IM_Transfer_Set"
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_TRANSFER_CONTROL, T);
     pending_variable_types[c$uid, T, key] = [
         $request_is_orig=T, $server=c$id$resp_h, $peer=c$id$orig_h,
         $scope=0, $domain="", $name="POINT"
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_VARIABLE_TYPE, T);
     invalid_variable_type_invokes[c$uid, T, key] = T;
-    control_read_value_shape_evidence[
-        c$uid, F, mms_parser_sequence(c, F), key] = [
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_INVALID_VARIABLE_TYPE, T);
+    local sequence = mms_parser_sequence(c, F);
+    control_read_value_shape_evidence[c$uid, F, sequence, key] = [
         $first_result_length=1, $first_component_length=0,
         $second_component_length=0, $third_component_length=0
     ];
+    update_sequence_invoke_processing_state(
+        c$uid, F, sequence, key,
+        PROCESSING_CONTROL_READ_VALUE_SHAPE, T);
     local state = current_state(c);
     state$pending_reads[T, key] = [
         $scope=0, $domain="", $name="SEEDED_READ", $category=0
@@ -122,9 +141,13 @@ event seed_transfer_service_check(c: connection, invoke_id: int)
         $member_alternate_access_counts=vector(0),
         $exact_member_access_evidence=T, $profile_reasons=""
     ];
+    update_directional_processing_state(
+        c$uid, T, key, PROCESSING_PENDING_TRANSFER_SET, T);
     known_transfer_sets[c$uid, F, 0, "", "TS_SAFE"] = [
         $scopes=vector(0), $domains=vector(""), $names=vector("POINT")
     ];
+    update_object_processing_state(
+        c$uid, F, 0, "", "TS_SAFE", PROCESSING_KNOWN_TRANSFER_SET, T);
     }
 
 event inspect_transfer_service_check(

@@ -1,0 +1,9 @@
+seeded-first confirmed=1 names=1 known_types=1
+seeded-second confirmed=1 names=1 known_types=1
+invoke-reused confirmed=1 names=1 known_types=1
+retention-seeded confirmed=1 names=1 known_types=1
+removed confirmed=0 names=0 known_types=0
+retained confirmed=1 names=1 known_types=1
+removed tables confirmed=F names=F known_type=F
+retained indexes processing=T evidence=T
+retained tables confirmed=T names=T known_type=T learned=Data_Discrete

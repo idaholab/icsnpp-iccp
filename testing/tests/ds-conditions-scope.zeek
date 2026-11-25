@@ -57,10 +57,19 @@ event zeek_init()
     known_variable_types[
         c$uid, F, 1, "CONTROL_CENTER_B", "OTHER_CONDITIONS"] =
             "DSConditions";
+    update_object_processing_state(
+        c$uid, F, 1, "CONTROL_CENTER_B", "OTHER_CONDITIONS",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     known_variable_types[
         c$uid, F, 0, "", "DSConditions_Detected"] = "DSConditions";
+    update_object_processing_state(
+        c$uid, F, 0, "", "DSConditions_Detected",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
     known_variable_types[
         c$uid, F, 2, "", "DSConditions_Detected"] = "DSConditions";
+    update_object_processing_state(
+        c$uid, F, 2, "", "DSConditions_Detected",
+        PROCESSING_KNOWN_VARIABLE_TYPE, T);
 
     condition_read(c, 1, 1, "CONTROL_CENTER_B",
                    "DSConditions_Detected", 3);
